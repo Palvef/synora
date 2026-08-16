@@ -220,6 +220,7 @@ pub fn status_value(s: JobStatus) -> f64 {
         JobStatus::Cancelling => 8.0,
         JobStatus::Cancelled => 9.0,
         JobStatus::Lost => 10.0,
+        JobStatus::Skipped => 11.0,
     }
 }
 

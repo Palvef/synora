@@ -62,6 +62,10 @@ pub struct DaemonDoc {
     pub db: DbDoc,
     #[serde(default = "default_log_dir")]
     pub log_dir: String,
+    /// Default proxy for probe/tooling traffic (user: default Cloudflare
+    /// egress). Mirror sync itself stays direct unless a job opts in.
+    #[serde(default)]
+    pub default_proxy: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -94,6 +98,12 @@ pub struct ApiDoc {
     pub tls: TlsDoc,
     #[serde(default)]
     pub tokens: Vec<TokenDoc>,
+    /// Path serving the native status JSON (mirror-web consumption).
+    #[serde(default = "default_synora_json")]
+    pub synora_json_path: String,
+    /// Path serving tunasync-compatible JSON (mirror-web drop-in).
+    #[serde(default = "default_tunasync_json")]
+    pub tunasync_json_path: String,
 }
 
 impl Default for ApiDoc {
@@ -102,6 +112,8 @@ impl Default for ApiDoc {
             listen: default_api_listen(),
             tls: TlsDoc::default(),
             tokens: Vec::new(),
+            synora_json_path: default_synora_json(),
+            tunasync_json_path: default_tunasync_json(),
         }
     }
 }
@@ -152,6 +164,10 @@ pub struct JobDoc {
     pub storage: Option<String>,
     pub proxy: Option<String>,
     pub egress: Option<String>,
+    /// ipv4 | ipv6 | any — which address family the sync uses (user: mirror
+    /// sync goes direct; family/bind are the knobs).
+    #[serde(default = "default_family")]
+    pub family: String,
     #[serde(default = "default_timeout")]
     pub timeout: TomlDuration,
     #[serde(default = "default_retry")]
@@ -188,6 +204,16 @@ pub struct JobDoc {
     pub hooks: HooksDoc,
     #[serde(default)]
     pub safety: SafetyDoc,
+    #[serde(default)]
+    pub snapshot: SnapshotJobDoc,
+    #[serde(default)]
+    pub verify: VerifyDoc,
+    // P2+: cgroup limits (user-requested; tunasync parity)
+    pub memory_limit: Option<String>,
+    pub cpu_limit: Option<f64>,
+    /// Dependencies: jobs that must have succeeded recently (spec §93).
+    #[serde(default)]
+    pub depends_on: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -211,6 +237,32 @@ pub struct SafetyDoc {
     pub max_size_drop_ratio: Option<f64>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotJobDoc {
+    /// after-success | before-sync | before-and-after | manual | never
+    #[serde(default = "default_snapshot_policy")]
+    pub policy: String,
+}
+
+impl Default for SnapshotJobDoc {
+    fn default() -> Self {
+        Self {
+            policy: default_snapshot_policy(),
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerifyDoc {
+    #[serde(default = "no")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub checks: Vec<String>,
+    pub command: Option<String>,
+}
+
 fn yes() -> bool {
     true
 }
@@ -231,6 +283,12 @@ fn default_db_path() -> String {
 }
 fn default_api_listen() -> String {
     "127.0.0.1:8100".into()
+}
+fn default_synora_json() -> String {
+    "/synora.json".into()
+}
+fn default_tunasync_json() -> String {
+    "/tunasync.json".into()
 }
 fn default_role() -> String {
     "admin".into()
@@ -264,4 +322,10 @@ fn default_statistics() -> String {
 }
 fn default_priority() -> i32 {
     50
+}
+fn default_snapshot_policy() -> String {
+    "never".into()
+}
+fn default_family() -> String {
+    "any".into()
 }

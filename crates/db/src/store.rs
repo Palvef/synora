@@ -735,6 +735,7 @@ impl JobStatusDb for JobStatus {
             JobStatus::Cancelling => "CANCELLING",
             JobStatus::Cancelled => "CANCELLED",
             JobStatus::Lost => "LOST",
+            JobStatus::Skipped => "SKIPPED",
         }
     }
 
@@ -751,6 +752,7 @@ impl JobStatusDb for JobStatus {
             "CANCELLING" => JobStatus::Cancelling,
             "CANCELLED" => JobStatus::Cancelled,
             "LOST" => JobStatus::Lost,
+            "SKIPPED" => JobStatus::Skipped,
             _ => JobStatus::Pending,
         }
     }

@@ -8,8 +8,8 @@ pub mod size;
 pub mod state;
 
 pub use job::{
-    ErrorKind, Hooks, JobSpec, JobStatus, MisfirePolicy, OnWorkerLost, ProviderConfig, RunId,
-    Safety, StatisticsMode,
+    ErrorKind, Hooks, JobSpec, JobStatus, MisfirePolicy, OnWorkerLost, ProviderConfig,
+    RetentionPolicy, RunId, Safety, SnapshotPolicy, StatisticsMode, VerifyConfig,
 };
 pub use metrics::Metrics;
 pub use schedule::{parse_cron_expr, parse_duration_human, Schedule, ScheduleKind};

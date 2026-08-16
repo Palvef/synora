@@ -14,6 +14,12 @@ db = { path = "crates/db" }
 provider = { path = "crates/provider" }
 engine = { path = "crates/engine" }
 api = { path = "crates/api" }
+nginx = { path = "crates/nginx" }
+parser = { path = "crates/parser" }
+netroute = { path = "crates/netroute" }
+storage = { path = "crates/storage" }
+snapshot = { path = "crates/snapshot" }
+httpfetch = { path = "crates/httpfetch" }
 
 # --- cached locally (offline builds after first fetch) ---
 serde = { version = "1", features = ["derive"] }

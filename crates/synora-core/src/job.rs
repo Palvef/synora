@@ -22,6 +22,8 @@ pub enum JobStatus {
     Cancelled,
     /// Lease expired while a worker was supposed to hold it (spec §29).
     Lost,
+    /// Dependency failed or didn't run — this run never started (spec §93).
+    Skipped,
 }
 
 /// Classified failure cause — decides whether a retry makes sense (spec §54).
@@ -125,12 +127,45 @@ pub struct Hooks {
     pub on_failure: Vec<String>,
 }
 
-/// Dangerous-sync thresholds (spec §53). Parsed now, enforced in a later phase.
+/// Dangerous-sync thresholds (spec §53). Evaluated after sync runs report
+/// deletion counts; the executor blocks runs whose deletions would breach
+/// them (needs provider support — rsync --stats reports deletions).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Safety {
     pub max_delete_files: Option<u64>,
     pub max_delete_ratio: Option<f64>,
     pub max_size_drop_ratio: Option<f64>,
+}
+
+/// When snapshots are taken around a run (spec §32).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SnapshotPolicy {
+    Never,
+    AfterSuccess,
+    BeforeSync,
+    BeforeAndAfter,
+    Manual,
+}
+
+/// Post-sync verification (spec §56): only a verified success can produce an
+/// after-success snapshot.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct VerifyConfig {
+    pub enabled: bool,
+    /// "path" = storage dir exists, "size" = non-zero size, "command" = run
+    /// the configured command.
+    pub checks: Vec<String>,
+    pub command: Option<String>,
+}
+
+/// Snapshot retention buckets (spec §33).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RetentionPolicy {
+    pub keep_last: Option<u32>,
+    pub keep_daily: Option<u32>,
+    pub keep_weekly: Option<u32>,
+    pub keep_monthly: Option<u32>,
 }
 
 /// Fully resolved job definition. `proxy`/`egress` are parsed but inert in P0/P1
@@ -149,8 +184,12 @@ pub struct JobSpec {
     pub storage: PathBuf,
     /// Proxy / proxy-group name (parsed, inert until Phase 3).
     pub proxy: Option<String>,
-    /// Egress / egress-group name (parsed, inert until Phase 3).
+    /// Egress / egress-group name — the source address to bind (Phase 3).
     pub egress: Option<String>,
+    /// Address family for the sync connection: ipv4 | ipv6 | any.
+    /// Mirror sync uses the machine's direct network by default; proxies are
+    /// opt-in per job.
+    pub family: String,
     /// Hard wall-clock limit for one run.
     pub timeout: Duration,
     pub retry: u32,
@@ -175,4 +214,16 @@ pub struct JobSpec {
     pub schedule: Schedule,
     pub hooks: Hooks,
     pub safety: Safety,
+    /// cgroup memory limit, e.g. "4G" (user-requested feature; tunasync has
+    /// the same per-mirror memory_limit). Also passed to docker --memory.
+    pub memory_limit: Option<u64>,
+    /// cgroup CPU limit in cores (docker --cpus).
+    pub cpu_limit: Option<f64>,
+    /// Jobs that must have succeeded recently for this job to run (spec §93).
+    /// A failed/missing dependency marks the run SKIPPED.
+    pub depends_on: Vec<String>,
+    /// Snapshot timing (spec §32).
+    pub snapshot_policy: SnapshotPolicy,
+    /// Post-sync verification (spec §56).
+    pub verify: VerifyConfig,
 }

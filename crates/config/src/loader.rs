@@ -27,8 +27,94 @@ pub struct ResolvedConfig {
     pub daemon: DaemonConfig,
     pub api: ApiConfig,
     pub jobs: Vec<JobSpec>,
-    /// Parsed-but-inert sections (proxy/proxy_groups/egress/storage/worker).
+    /// Typed P2+ sections.
+    pub proxies: HashMap<String, ProxyConfig>,
+    pub proxy_groups: HashMap<String, ProxyGroupConfig>,
+    pub egresses: Vec<EgressConfig>,
+    pub egress_groups: HashMap<String, EgressGroupConfig>,
+    pub storages: HashMap<String, StorageConfig>,
+    pub cgroup: Option<CgroupConfig>,
+    pub snapshot_retention: synora_core::RetentionPolicy,
+    pub notifications: NotificationConfig,
+    pub groups: HashMap<String, Vec<String>>,
+    pub min_free_bytes: Option<u64>,
+    /// Remaining untyped sections.
     pub extras: HashMap<String, toml::Value>,
+}
+
+/// One proxy definition (spec §20/§22): HTTP forward proxy, or a command
+/// that reports liveness, or plain direct.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProxyConfig {
+    pub kind: ProxyKind,
+    /// Liveness probe URL (HTTP proxies): GET through the proxy.
+    pub healthcheck: Option<String>,
+    pub timeout: u64,
+    /// Local listener to expose when "exposed" from the TUI
+    /// (e.g. "127.0.0.1:4000" for a local CF One / WARP endpoint).
+    pub expose: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProxyKind {
+    Direct,
+    /// http:// or socks5h:// forward proxy.
+    Forward { url: String, env: Vec<(String, String)> },
+    Command { check: String, env: Vec<(String, String)> },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProxyGroupConfig {
+    pub proxies: Vec<String>,
+    /// fixed | failover | round-robin | random
+    pub strategy: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EgressConfig {
+    pub name: String,
+    pub address: std::net::IpAddr,
+    /// Optional TCP probe target (spec §63), e.g. "1.1.1.1:443".
+    pub probe: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EgressGroupConfig {
+    pub addresses: Vec<String>,
+    pub strategy: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StorageConfig {
+    pub kind: StorageKind,
+    pub mountpoint: Option<PathBuf>,
+    pub auto_create: bool,
+    pub require_empty: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum StorageKind {
+    Dir,
+    Zfs {
+        pool: String,
+        dataset: String,
+        /// Extra `zfs create -o key=value` options (user-requested).
+        options: Vec<(String, String)>,
+    },
+    Btrfs { subvol: String },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CgroupConfig {
+    /// cgroup v2 base path (default /sys/fs/cgroup/synora).
+    pub base_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NotificationConfig {
+    pub webhook_url: Option<String>,
+    /// Consecutive failures before the first alert (spec §91).
+    pub alert_after_failures: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +122,7 @@ pub struct DaemonConfig {
     pub max_concurrency: u32,
     pub db: DbConfig,
     pub log_dir: PathBuf,
+    pub default_proxy: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +145,8 @@ pub struct ApiConfig {
     pub listen: SocketAddr,
     pub tls: TlsConfig,
     pub tokens: Vec<ApiToken>,
+    pub synora_json_path: String,
+    pub tunasync_json_path: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -496,6 +585,7 @@ fn resolve(root: &RootDoc, jobs: Vec<JobEntry>) -> Result<ResolvedConfig, Config
         max_concurrency: root.daemon.max_concurrency.max(1),
         db,
         log_dir: PathBuf::from(&root.daemon.log_dir),
+        default_proxy: root.daemon.default_proxy.clone(),
     };
     // api
     let listen: SocketAddr = root
@@ -531,7 +621,13 @@ fn resolve(root: &RootDoc, jobs: Vec<JobEntry>) -> Result<ResolvedConfig, Config
             permissions: t.permissions.clone(),
         });
     }
-    let api = ApiConfig { listen, tls, tokens };
+    let api = ApiConfig {
+        listen,
+        tls,
+        tokens,
+        synora_json_path: root.api.synora_json_path.clone(),
+        tunasync_json_path: root.api.tunasync_json_path.clone(),
+    };
 
     // jobs: resolve each, reject duplicate names (spec §44)
     let mut seen: HashMap<String, (String, usize)> = HashMap::new();
@@ -552,13 +648,305 @@ fn resolve(root: &RootDoc, jobs: Vec<JobEntry>) -> Result<ResolvedConfig, Config
         resolved.push(spec);
     }
 
+    let (proxies, proxy_groups) = parse_proxies(root)?;
+    let (egresses, egress_groups) = parse_egress(root)?;
+    let storages = parse_storage(root)?;
+    let cgroup = parse_cgroup(root)?;
+    let (snapshot_retention, notifications, groups, min_free_bytes) =
+        parse_misc(root)?;
+
     Ok(ResolvedConfig {
         version: root.version.unwrap_or(1),
         daemon,
         api,
         jobs: resolved,
+        proxies,
+        proxy_groups,
+        egresses,
+        egress_groups,
+        storages,
+        cgroup,
+        snapshot_retention,
+        notifications,
+        groups,
+        min_free_bytes,
         extras: root.extras.clone(),
     })
+}
+
+/// Read a string-keyed section from the untyped extras.
+fn extra_table<'a>(
+    root: &'a RootDoc,
+    key: &str,
+) -> Option<&'a toml::value::Table> {
+    root.extras.get(key).and_then(|v| v.as_table())
+}
+
+fn parse_proxies(
+    root: &RootDoc,
+) -> Result<(HashMap<String, ProxyConfig>, HashMap<String, ProxyGroupConfig>), ConfigError> {
+    let mut proxies = HashMap::new();
+    if let Some(table) = extra_table(root, "proxy") {
+        for (name, value) in table {
+            let t = value.as_table().ok_or_else(|| {
+                ConfigError::new("<config>", 0, format!("[proxy.{name}] must be a table"))
+            })?;
+            let kind = match t.get("type").and_then(|v| v.as_str()).unwrap_or("http") {
+                "http" | "socks5h" => ProxyKind::Forward {
+                    url: t
+                        .get("url")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    env: parse_env_table(t),
+                },
+                "command" => ProxyKind::Command {
+                    check: t
+                        .get("check")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    env: parse_env_table(t),
+                },
+                "direct" => ProxyKind::Direct,
+                other => {
+                    return Err(ConfigError::new(
+                        "<config>",
+                        0,
+                        format!("[proxy.{name}]: invalid type `{other}` (http|command|direct)"),
+                    ))
+                }
+            };
+            proxies.insert(
+                name.clone(),
+                ProxyConfig {
+                    kind,
+                    healthcheck: t
+                        .get("healthcheck")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
+                    expose: t.get("expose").and_then(|v| v.as_str()).map(String::from),
+                    timeout: t
+                        .get("timeout")
+                        .and_then(|v| v.as_str())
+                        .and_then(|v| synora_core::parse_duration_human(v).ok())
+                        .map(|d| d.whole_seconds().max(1) as u64)
+                        .unwrap_or(10),
+                },
+            );
+        }
+    }
+    let mut groups = HashMap::new();
+    if let Some(table) = extra_table(root, "proxy_groups") {
+        for (name, value) in table {
+            let t = value.as_table().ok_or_else(|| {
+                ConfigError::new("<config>", 0, format!("[proxy_groups.{name}] must be a table"))
+            })?;
+            let proxies: Vec<String> = t
+                .get("proxies")
+                .and_then(|v| v.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            let strategy = t
+                .get("strategy")
+                .and_then(|v| v.as_str())
+                .unwrap_or("failover")
+                .to_string();
+            if !["fixed", "failover", "round-robin", "random"].contains(&strategy.as_str()) {
+                return Err(ConfigError::new(
+                    "<config>",
+                    0,
+                    format!("[proxy_groups.{name}]: invalid strategy `{strategy}`"),
+                ));
+            }
+            groups.insert(name.clone(), ProxyGroupConfig { proxies, strategy });
+        }
+    }
+    Ok((proxies, groups))
+}
+
+fn parse_env_table(t: &toml::value::Table) -> Vec<(String, String)> {
+    t.get("env")
+        .and_then(|v| v.as_table())
+        .map(|env| {
+            env.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_egress(
+    root: &RootDoc,
+) -> Result<(Vec<EgressConfig>, HashMap<String, EgressGroupConfig>), ConfigError> {
+    let mut egresses = Vec::new();
+    if let Some(arr) = root.extras.get("egress").and_then(|v| v.as_array()) {
+        for item in arr {
+            let t = item.as_table().ok_or_else(|| {
+                ConfigError::new("<config>", 0, "[[egress]] entries must be tables")
+            })?;
+            let name = t.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let address: std::net::IpAddr = t
+                .get("address")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ConfigError::new("<config>", 0, format!("[[egress]] `{name}`: missing address")))?
+                .parse()
+                .map_err(|_| ConfigError::new("<config>", 0, format!("[[egress]] `{name}`: invalid address")))?;
+            egresses.push(EgressConfig {
+                name,
+                address,
+                probe: t.get("probe").and_then(|v| v.as_str()).map(String::from),
+            });
+        }
+    }
+    let mut groups = HashMap::new();
+    for key in ["egress-groups", "egress_groups"] {
+        if let Some(table) = extra_table(root, key) {
+            for (name, value) in table {
+                let t = value.as_table().ok_or_else(|| {
+                    ConfigError::new("<config>", 0, format!("[{key}.{name}] must be a table"))
+                })?;
+                let addresses: Vec<String> = t
+                    .get("addresses")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .unwrap_or_default();
+                let strategy = t
+                    .get("strategy")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("failover")
+                    .to_string();
+                groups.insert(name.clone(), EgressGroupConfig { addresses, strategy });
+            }
+        }
+    }
+    Ok((egresses, groups))
+}
+
+fn parse_storage(root: &RootDoc) -> Result<HashMap<String, StorageConfig>, ConfigError> {
+    let mut storages = HashMap::new();
+    if let Some(table) = extra_table(root, "storage") {
+        for (name, value) in table {
+            let t = value.as_table().ok_or_else(|| {
+                ConfigError::new("<config>", 0, format!("[storage.{name}] must be a table"))
+            })?;
+            let kind = match t.get("type").and_then(|v| v.as_str()).unwrap_or("dir") {
+                "dir" => StorageKind::Dir,
+                "zfs" => StorageKind::Zfs {
+                    pool: t.get("pool").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    dataset: t.get("dataset").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    options: t
+                        .get("zfs_options")
+                        .and_then(|v| v.as_table())
+                        .map(|o| {
+                            o.iter()
+                                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                },
+                "btrfs" => StorageKind::Btrfs {
+                    subvol: t.get("subvol").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                },
+                other => {
+                    return Err(ConfigError::new(
+                        "<config>",
+                        0,
+                        format!("[storage.{name}]: invalid type `{other}` (dir|zfs|btrfs)"),
+                    ))
+                }
+            };
+            storages.insert(
+                name.clone(),
+                StorageConfig {
+                    kind,
+                    mountpoint: t
+                        .get("mountpoint")
+                        .and_then(|v| v.as_str())
+                        .map(PathBuf::from),
+                    auto_create: t
+                        .get("auto_create")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                    require_empty: t
+                        .get("require_empty")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                },
+            );
+        }
+    }
+    Ok(storages)
+}
+
+fn parse_cgroup(root: &RootDoc) -> Result<Option<CgroupConfig>, ConfigError> {
+    match extra_table(root, "cgroup") {
+        None => Ok(None),
+        Some(t) => Ok(Some(CgroupConfig {
+            base_path: t
+                .get("base_path")
+                .and_then(|v| v.as_str())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/sys/fs/cgroup/synora")),
+        })),
+    }
+}
+
+fn parse_misc(
+    root: &RootDoc,
+) -> Result<
+    (
+        synora_core::RetentionPolicy,
+        NotificationConfig,
+        HashMap<String, Vec<String>>,
+        Option<u64>,
+    ),
+    ConfigError,
+> {
+    let retention = extra_table(root, "snapshot")
+        .and_then(|t| t.get("policy").and_then(|v| v.as_table()))
+        .map(|t| synora_core::RetentionPolicy {
+            keep_last: t.get("keep_last").and_then(|v| v.as_integer()).map(|v| v as u32),
+            keep_daily: t.get("keep_daily").and_then(|v| v.as_integer()).map(|v| v as u32),
+            keep_weekly: t.get("keep_weekly").and_then(|v| v.as_integer()).map(|v| v as u32),
+            keep_monthly: t.get("keep_monthly").and_then(|v| v.as_integer()).map(|v| v as u32),
+        })
+        .unwrap_or_default();
+    let notifications = extra_table(root, "notifications")
+        .and_then(|t| t.get("webhook").and_then(|v| v.as_table()))
+        .map(|t| NotificationConfig {
+            webhook_url: t.get("url").and_then(|v| v.as_str()).map(String::from),
+            alert_after_failures: t
+                .get("alert_after_failures")
+                .and_then(|v| v.as_integer())
+                .unwrap_or(1) as u32,
+        })
+        .unwrap_or_default();
+    let groups = extra_table(root, "groups")
+        .map(|t| {
+            t.iter()
+                .filter_map(|(name, v)| {
+                    v.as_table()
+                        .and_then(|gt| gt.get("jobs"))
+                        .and_then(|j| j.as_array())
+                        .map(|a| {
+                            (
+                                name.clone(),
+                                a.iter()
+                                    .filter_map(|s| s.as_str().map(String::from))
+                                    .collect(),
+                            )
+                        })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let min_free = extra_table(root, "min_storage")
+        .and_then(|t| t.get("free_bytes"))
+        .and_then(|v| v.as_str())
+        .and_then(|s| synora_core::parse_duration_human(s).ok())
+        .map(|d| d.whole_seconds().max(0) as u64);
+    Ok((retention, notifications, groups, min_free))
 }
 
 fn resolve_db(db: &DbDoc) -> Result<DbConfig, ConfigError> {
@@ -660,6 +1048,50 @@ fn resolve_job(doc: &JobDoc, file: &str, line: usize) -> Result<JobSpec, ConfigE
         }
     };
 
+    // memory_limit: "4G"/"512M"/"1T" or a bare number in MB (tunasync parity).
+    let parse_mem = |m: &str| -> Result<u64, String> {
+        let (num, mult) = match m.chars().last() {
+            Some('K') => (&m[..m.len() - 1], 1024u64),
+            Some('M') => (&m[..m.len() - 1], 1024 * 1024),
+            Some('G') => (&m[..m.len() - 1], 1024u64.pow(3)),
+            Some('T') => (&m[..m.len() - 1], 1024u64.pow(4)),
+            _ => (m, 1024 * 1024),
+        };
+        num.parse::<u64>()
+            .map(|n| n.saturating_mul(mult))
+            .map_err(|_| format!("invalid memory_limit `{m}`: expected like `4G` or `512M`"))
+    };
+    let memory_limit = doc
+        .memory_limit
+        .as_deref()
+        .map(|m| parse_mem(m).map_err(&err))
+        .transpose()?;
+    let family = match doc.family.as_str() {
+        "ipv4" | "ipv6" | "any" => doc.family.clone(),
+        other => {
+            return Err(err(format!(
+                "invalid family `{other}`: expected ipv4|ipv6|any"
+            )))
+        }
+    };
+    let snapshot_policy = match doc.snapshot.policy.as_str() {
+        "never" => synora_core::SnapshotPolicy::Never,
+        "after-success" => synora_core::SnapshotPolicy::AfterSuccess,
+        "before-sync" => synora_core::SnapshotPolicy::BeforeSync,
+        "before-and-after" => synora_core::SnapshotPolicy::BeforeAndAfter,
+        "manual" => synora_core::SnapshotPolicy::Manual,
+        other => {
+            return Err(err(format!(
+                "invalid snapshot policy `{other}`: expected never|after-success|before-sync|before-and-after|manual"
+            )))
+        }
+    };
+    for dep in &doc.depends_on {
+        if dep == &doc.name {
+            return Err(err(format!("job `{}` cannot depend on itself", doc.name)));
+        }
+    }
+
     Ok(JobSpec {
         name: doc.name.clone(),
         enabled: doc.enabled,
@@ -693,6 +1125,16 @@ fn resolve_job(doc: &JobDoc, file: &str, line: usize) -> Result<JobSpec, ConfigE
             max_delete_files: doc.safety.max_delete_files,
             max_delete_ratio: doc.safety.max_delete_ratio,
             max_size_drop_ratio: doc.safety.max_size_drop_ratio,
+        },
+        family,
+        memory_limit,
+        cpu_limit: doc.cpu_limit,
+        depends_on: doc.depends_on.clone(),
+        snapshot_policy,
+        verify: synora_core::VerifyConfig {
+            enabled: doc.verify.enabled,
+            checks: doc.verify.checks.clone(),
+            command: doc.verify.command.clone(),
         },
     })
 }
