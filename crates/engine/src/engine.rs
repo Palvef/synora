@@ -40,13 +40,24 @@ impl Engine {
         cfg: ResolvedConfig,
         migrations_dir: &std::path::Path,
     ) -> Result<Arc<Self>, String> {
-        let db_path = match cfg.daemon.db.kind {
-            DbKind::Sqlite => PathBuf::from(&cfg.daemon.db.path),
+        let db = match cfg.daemon.db.kind {
+            DbKind::Sqlite => {
+                db::Db::Sqlite(std::sync::Arc::new(
+                    SqliteDb::open(&PathBuf::from(&cfg.daemon.db.path)).map_err(|e| e.to_string())?,
+                ))
+            }
             DbKind::Postgres => {
-                return Err("postgres backend lands in M3".to_string());
+                let url = cfg
+                    .daemon
+                    .db
+                    .url
+                    .as_deref()
+                    .ok_or("db.kind = \"postgres\" requires db.url")?;
+                db::Db::Pg(std::sync::Arc::new(
+                    db::PgDb::connect(url).await.map_err(|e| e.to_string())?,
+                ))
             }
         };
-        let db = SqliteDb::open(&db_path).map_err(|e| e.to_string())?;
         let applied = Migrator::new(migrations_dir).run(&db).await.map_err(|e| e.to_string())?;
         for m in applied {
             tracing::info!("migration applied: {m}");

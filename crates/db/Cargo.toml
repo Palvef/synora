@@ -13,4 +13,5 @@ time.workspace = true
 uuid.workspace = true
 rusqlite.workspace = true
 tokio-postgres.workspace = true
+bytes.workspace = true
 postgres-types.workspace = true

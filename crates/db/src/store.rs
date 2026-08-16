@@ -1,7 +1,8 @@
 //! Store: all engine↔database interaction. M1 is SQLite-only; the Pg backend
 //! (M3) implements the same methods.
 
-use crate::sqlite::{DbError, DbResult, DbValue, Param, SqliteDb};
+use crate::sqlite::{DbError, DbResult, DbValue, Param};
+use crate::Db;
 use synora_core::job::{JobSpec, JobStatus};
 
 #[derive(Debug, Clone)]
@@ -25,7 +26,7 @@ pub struct RunRow {
 }
 
 pub struct Store {
-    db: SqliteDb,
+    db: Db,
 }
 
 fn unix_now() -> i64 {
@@ -40,11 +41,11 @@ fn cell<'a>(row: &'a [(String, DbValue)], name: &str) -> Option<&'a DbValue> {
 }
 
 impl Store {
-    pub fn new(db: SqliteDb) -> Self {
+    pub fn new(db: Db) -> Self {
         Store { db }
     }
 
-    pub fn db(&self) -> &SqliteDb {
+    pub fn db(&self) -> &Db {
         &self.db
     }
 

@@ -288,7 +288,9 @@ async fn cmd_status(config: Option<PathBuf>) -> Result<(), String> {
     if cfg.daemon.db.kind != DbKind::Sqlite {
         return Err("status requires a sqlite database".to_string());
     }
-    let db = db::SqliteDb::open(&PathBuf::from(&cfg.daemon.db.path)).map_err(|e| e.to_string())?;
+    let db = db::Db::Sqlite(std::sync::Arc::new(
+        db::SqliteDb::open(&PathBuf::from(&cfg.daemon.db.path)).map_err(|e| e.to_string())?,
+    ));
     db::migrator::Migrator::new(&PathBuf::from("migrations"))
         .run(&db)
         .await

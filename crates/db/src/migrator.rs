@@ -1,7 +1,8 @@
 //! Hand-rolled migration runner (spec §96): numbered `NNNN_*.sql` files run
-//! in order, each in a transaction, tracked in `schema_migrations`.
+//! in order against either backend, tracked in `schema_migrations`.
 
-use crate::sqlite::{DbError, DbResult, SqliteDb};
+use crate::sqlite::{DbError, DbResult, Param};
+use crate::Db;
 use std::path::Path;
 
 pub struct Migrator {
@@ -13,7 +14,7 @@ impl Migrator {
         Migrator { dir: dir.to_path_buf() }
     }
 
-    pub async fn run(&self, db: &SqliteDb) -> DbResult<Vec<String>> {
+    pub async fn run(&self, db: &Db) -> DbResult<Vec<String>> {
         db.execute(
             "CREATE TABLE IF NOT EXISTS schema_migrations (
                 version INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)",
@@ -44,7 +45,7 @@ impl Migrator {
             let rows = db
                 .query(
                     "SELECT version FROM schema_migrations WHERE version = ?",
-                    &[version.into()],
+                    &[Param::Int(version as i64)],
                 )
                 .await?;
             if !rows.is_empty() {
@@ -52,21 +53,28 @@ impl Migrator {
             }
             let sql = std::fs::read_to_string(&path).map_err(|e| DbError::Sql(e.to_string()))?;
             let path_display = path.display().to_string();
-            db.with_conn(move |conn| {
-                let tx = conn.transaction().map_err(|e| DbError::Sql(e.to_string()))?;
-                // Execute statement by statement (DDL cannot be batched portably).
-                for stmt in split_statements(&sql) {
-                    let stmt: &str = &stmt;
-                    tx.execute(stmt, rusqlite::params![])
-                        .map_err(|e| DbError::Sql(format!("in {path_display}: {e}")))?;
+            for stmt in split_statements(&sql) {
+                match db {
+                    Db::Sqlite(d) => {
+                        let pd = path_display.clone();
+                        d.with_conn(move |conn| {
+                            conn.execute(&stmt, rusqlite::params![])
+                                .map_err(|e| DbError::Sql(format!("in {pd}: {e}")))?;
+                            Ok(())
+                        })
+                        .await?;
+                    }
+                    Db::Pg(d) => {
+                        d.simple(&stmt)
+                            .await
+                            .map_err(|e| DbError::Sql(format!("in {path_display}: {e}")))?;
+                    }
                 }
-                tx.execute(
-                    "INSERT INTO schema_migrations (version, applied_at) VALUES (?1, ?2)",
-                    rusqlite::params![version as i64, now],
-                )
-                .map_err(|e| DbError::Sql(e.to_string()))?;
-                tx.commit().map_err(|e| DbError::Sql(e.to_string()))
-            })
+            }
+            db.execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?,?)",
+                &[Param::Int(version as i64), Param::Int(now)],
+            )
             .await?;
             applied.push(format!("{} (v{version})", path.display()));
         }
