@@ -64,6 +64,7 @@ pub async fn execute_run(
 
     let cancel = CancellationToken::new();
     engine.register_run(&job.name, cancel.clone());
+    let netroute = engine.netroute.read().unwrap().clone();
     let outcome = run_once(
         &job,
         &run_id,
@@ -71,7 +72,7 @@ pub async fn execute_run(
         cancel,
         &engine.cfg.daemon.log_dir,
         engine.run_storage.as_ref(),
-        engine.netroute.as_deref(),
+        netroute.as_deref(),
     )
     .await;
 

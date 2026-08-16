@@ -165,9 +165,10 @@ impl Provider {
 /// Build the provider for a job.
 pub fn build_provider(job: &JobSpec) -> Result<Provider, ProviderError> {
     match &job.provider {
-        synora_core::ProviderConfig::Rsync { options } => {
+        synora_core::ProviderConfig::Rsync { options, exclude } => {
             Ok(Provider::Rsync(rsync::RsyncProvider {
                 options: options.clone(),
+                exclude: exclude.clone(),
             }))
         }
         synora_core::ProviderConfig::Script { command } => Ok(Provider::Script(

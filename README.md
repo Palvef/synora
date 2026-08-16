@@ -100,7 +100,8 @@ provider = "rsync"               # rsync | script | docker
 upstream = "rsync://archive.ubuntu.com/ubuntu/"
 storage = "/srv/mirror/ubuntu"
 options = ["--delete", "--delay-updates"]
-success_exit_codes = [23, 24]
+success_exit_codes = [23, 24]   # rsync exit codes counted as success (tunasync convention)
+exclude = ["*.tmp"]             # rsync --exclude=PATTERN entries (tunasync `exclude`)
 
 retry = 3
 retry_delay = "5m"
@@ -121,6 +122,7 @@ Worker (`worker1.toml`):
 
 ```toml
 [worker]
+name = "worker-a"               # optional: friendly id (defaults to the token name)
 manager = "https://synora.example.org:8100"
 token = "worker-token"
 labels = ["g1", "zfs"]

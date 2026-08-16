@@ -149,6 +149,8 @@ pub struct JobDoc {
     // rsync
     #[serde(default)]
     pub options: Vec<String>,
+    #[serde(default)]
+    pub exclude: Vec<String>,
     // script
     pub command: Option<String>,
     // docker

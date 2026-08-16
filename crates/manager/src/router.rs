@@ -257,7 +257,12 @@ async fn register(
     axum::Json(body): axum::Json<RegisterRequest>,
 ) -> Result<axum::Json<RegisterResponse>, StatusCode> {
     require(&auth, "runs.manage")?;
-    let worker_id = auth.name.clone();
+    // Worker id: the requested name, or the token name (spec §9).
+    let worker_id = body
+        .name
+        .clone()
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| auth.name.clone());
     let mut capabilities = body.capabilities.clone();
     if capabilities.get("max_concurrency").is_none() {
         capabilities["max_concurrency"] = serde_json::json!(8);
@@ -302,9 +307,6 @@ async fn heartbeat(
     axum::Json(body): axum::Json<HeartbeatRequest>,
 ) -> Result<axum::Json<HeartbeatResponse>, StatusCode> {
     require(&auth, "runs.manage")?;
-    if auth.name != worker_id {
-        return Err(StatusCode::FORBIDDEN);
-    }
     state
         .engine
         .store
@@ -353,12 +355,19 @@ async fn claim(
     State(state): State<AppState>,
     axum::Extension(auth): axum::Extension<AuthUser>,
     Path(run_id): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<axum::Json<RunAssignment>, StatusCode> {
     require(&auth, "runs.manage")?;
+    // Worker id: registered name via ?worker=, else legacy token name.
+    let worker = params
+        .get("worker")
+        .cloned()
+        .filter(|w| !w.is_empty())
+        .unwrap_or_else(|| auth.name.clone());
     let claimed = state
         .engine
         .store
-        .claim_run(&run_id, &auth.name)
+        .claim_run(&run_id, &worker)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     if !claimed {
@@ -389,7 +398,11 @@ async fn complete(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
-    if run.worker_id.as_deref() != Some(auth.name.as_str()) {
+    // Identity: the caller must be the worker the run is assigned to —
+    // either by its registered id or, for legacy workers, its token name.
+    if run.worker_id.as_deref() != Some(body.worker_id.as_str())
+        && run.worker_id.as_deref() != Some(auth.name.as_str())
+    {
         return Err(StatusCode::FORBIDDEN);
     }
     let Some(job) = state.engine.job(&run.job_id) else {
@@ -399,15 +412,15 @@ async fn complete(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let duration = run
-        .created_at
-        .checked_neg()
-        .map(|_| 0)
-        .unwrap_or(0)
-        .max(ended.saturating_sub(run.created_at));
+    let duration = ended.saturating_sub(run.started_at.unwrap_or(run.created_at));
+    // Metric labels use the run's worker (named workers register as their
+    // own id; auth.name is only the token name).
+    let worker_label = run.worker_id.clone().unwrap_or_else(|| auth.name.clone());
+    let mut new_status = JobStatus::Success;
 
     match body.status.as_str() {
         "cancelled" => {
+            new_status = JobStatus::Cancelled;
             let _ = state
                 .engine
                 .store
@@ -444,7 +457,7 @@ async fn complete(
             if let Some(bytes) = body.bytes_transferred {
                 state.engine.metrics.inc_counter(
                     "synora_job_bytes_transferred_total",
-                    &[("job", job.name.as_str()), ("worker", auth.name.as_str())],
+                    &[("job", job.name.as_str()), ("worker", worker_label.as_str())],
                     bytes as f64,
                 );
             }
@@ -460,6 +473,7 @@ async fn complete(
             );
             match decision {
                 synora_core::RetryDecision::Retry { delay_secs } => {
+                    new_status = JobStatus::Retrying;
                     let _ = state
                         .engine
                         .store
@@ -476,6 +490,7 @@ async fn complete(
                         .inc_counter("synora_job_retries_total", &[("job", job.name.as_str())], 1.0);
                 }
                 synora_core::RetryDecision::NoRetry => {
+                    new_status = JobStatus::Failed;
                     let _ = state
                         .engine
                         .store
@@ -492,8 +507,8 @@ async fn complete(
     }
     state.engine.metrics.set_gauge(
         "synora_job_status",
-        &[("job", job.name.as_str()), ("worker", auth.name.as_str())],
-        engine::status_value(run.status),
+        &[("job", job.name.as_str()), ("worker", worker_label.as_str())],
+        engine::status_value(new_status),
     );
     state.engine.metrics.set_gauge(
         "synora_job_duration_seconds",
@@ -736,10 +751,33 @@ async fn list_proxies(
     axum::Extension(auth): axum::Extension<AuthUser>,
 ) -> Result<axum::Json<serde_json::Value>, StatusCode> {
     require(&auth, "workers.read")?;
-    let proxies: Vec<serde_json::Value> = state
-        .engine
-        .cfg
-        .proxies
+    // Prefer the reload-updated NetRoute snapshot; fall back to the startup
+    // config (identical when no proxy/egress config exists at all).
+    let proxy_cfgs: Vec<(String, config::ProxyConfig)> = match state.engine.netroute.read() {
+        Ok(guard) => match guard.as_ref() {
+            Some(nr) => nr
+                .proxy_configs()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            None => Vec::new(),
+        },
+        Err(_) => Vec::new(),
+    };
+    let proxy_cfgs = if proxy_cfgs.is_empty() && state.engine.cfg.proxies.is_empty() {
+        proxy_cfgs
+    } else if proxy_cfgs.is_empty() {
+        state
+            .engine
+            .cfg
+            .proxies
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    } else {
+        proxy_cfgs
+    };
+    let proxies: Vec<serde_json::Value> = proxy_cfgs
         .iter()
         .map(|(name, p)| {
             let probe = state.proxy_probes.read().unwrap().get(name).cloned().unwrap_or_default();

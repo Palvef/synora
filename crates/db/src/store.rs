@@ -375,6 +375,27 @@ impl Store {
             .await
     }
 
+    /// QUEUED runs with no worker assigned (queued while no worker was
+    /// online, or unassigned by the reaper) — candidates for re-dispatch.
+    pub async fn unassigned_runs(&self) -> DbResult<Vec<RunRow>> {
+        self.runs_where("status = 'QUEUED' AND worker_id IS NULL", &[])
+            .await
+    }
+
+    /// Atomically assign an unassigned QUEUED run to a worker. Returns true
+    /// when this call did the assignment (a concurrent assign loses the race).
+    pub async fn assign_queued_run(&self, id: &str, worker: &str) -> DbResult<bool> {
+        let n = self
+            .db
+            .execute(
+                "UPDATE job_runs SET worker_id = ?
+                 WHERE id = ? AND status = 'QUEUED' AND worker_id IS NULL",
+                &[worker.into(), id.into()],
+            )
+            .await?;
+        Ok(n > 0)
+    }
+
     /// Active (claimed) runs of a worker.
     pub async fn active_runs_of(&self, worker: &str) -> DbResult<Vec<RunRow>> {
         self.runs_where(

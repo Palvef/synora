@@ -27,7 +27,7 @@ fn write(dir: &Path, rel: &str, content: &str) {
 
 async fn engine_for(dir: &Path) -> Arc<Engine> {
     let cfg = ConfigLoader::load(&dir.join("synora.toml"), &CliOverrides::default()).unwrap();
-    Engine::new(cfg, &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations"))
+    Engine::new(cfg, &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations"), true)
         .await
         .unwrap()
 }

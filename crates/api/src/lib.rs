@@ -58,6 +58,9 @@ pub struct WorkerDTO {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegisterRequest {
+    /// Desired worker id (falls back to the token name when absent).
+    #[serde(default)]
+    pub name: Option<String>,
     pub hostname: String,
     pub address: String,
     pub version: String,
@@ -95,6 +98,9 @@ pub struct RunAssignment {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompleteRequest {
+    /// Worker id of the caller (identity check on the manager).
+    #[serde(default)]
+    pub worker_id: String,
     pub status: String, // "success" | "failed" | "cancelled"
     pub exit_code: Option<i64>,
     pub size_before: Option<i64>,
@@ -194,6 +200,23 @@ impl Client {
         }
     }
 
+    /// Endpoints whose success body is irrelevant (empty or {"ok":...}) —
+    /// only the status code matters.
+    async fn send_ok(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: Option<&impl Serialize>,
+    ) -> Result<(), ApiError> {
+        let resp = self.send(method, path, body).await?;
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            let text = resp.text().await.unwrap_or_default();
+            Err(ApiError::Rejected(text))
+        }
+    }
+
     // --- worker-facing -----------------------------------------------------
 
     pub async fn register_worker(&self, req: &RegisterRequest) -> Result<RegisterResponse, ApiError> {
@@ -215,10 +238,18 @@ impl Client {
     }
 
     /// Claim a run: 200 with the assignment, or Rejected (409) when it was
-    /// taken by someone else.
-    pub async fn claim_run(&self, run_id: &str) -> Result<Option<RunAssignment>, ApiError> {
+    /// taken by someone else. `worker_id` is the worker's registered id.
+    pub async fn claim_run(
+        &self,
+        run_id: &str,
+        worker_id: &str,
+    ) -> Result<Option<RunAssignment>, ApiError> {
         let resp = self
-            .send(reqwest::Method::POST, &format!("{API_V1}/runs/{run_id}/claim"), None::<&()>)
+            .send(
+                reqwest::Method::POST,
+                &format!("{API_V1}/runs/{run_id}/claim?worker={worker_id}"),
+                None::<&()>,
+            )
             .await?;
         match resp.status().as_u16() {
             200 => Ok(Some(
@@ -232,13 +263,21 @@ impl Client {
     }
 
     pub async fn complete_run(&self, run_id: &str, req: &CompleteRequest) -> Result<(), ApiError> {
-        self.json(reqwest::Method::POST, &format!("{API_V1}/runs/{run_id}/complete"), Some(req))
-            .await
+        self.send_ok(
+            reqwest::Method::POST,
+            &format!("{API_V1}/runs/{run_id}/complete"),
+            Some(req),
+        )
+        .await
     }
 
     pub async fn unregister(&self, worker_id: &str) -> Result<(), ApiError> {
-        self.json(reqwest::Method::DELETE, &format!("{API_V1}/workers/{worker_id}"), None::<&()>)
-            .await
+        self.send_ok(
+            reqwest::Method::DELETE,
+            &format!("{API_V1}/workers/{worker_id}"),
+            None::<&()>,
+        )
+        .await
     }
 
     // --- operator-facing ----------------------------------------------------
@@ -271,6 +310,13 @@ impl Client {
     pub async fn job_logs(&self, job: &str, tail: u32) -> Result<String, ApiError> {
         let path = format!("{API_V1}/jobs/{job}/logs?tail={tail}");
         self.json(reqwest::Method::GET, &path, None::<&()>).await
+    }
+
+    /// Hot-reload the manager's config (same as SIGHUP / `synora reload`).
+    pub async fn reload(&self) -> Result<usize, ApiError> {
+        self.json::<ReloadResponse>(reqwest::Method::POST, &format!("{API_V1}/reload"), None::<&()>)
+            .await
+            .map(|r| r.applied)
     }
 
     pub async fn list_proxies(&self) -> Result<serde_json::Value, ApiError> {

@@ -80,7 +80,7 @@ pub struct Engine {
     pub failure_streak: std::sync::Mutex<std::collections::HashMap<String, u32>>,
     /// Network routing (proxies/egress). Built when any proxy/egress config
     /// exists; None = pure direct mode.
-    pub netroute: Option<std::sync::Arc<netroute::NetRoute>>,
+    pub netroute: std::sync::RwLock<Option<std::sync::Arc<netroute::NetRoute>>>,
     /// Worker picker for distributed dispatch (None = standalone/local).
     planner: std::sync::RwLock<Option<WorkerPlanner>>,
     shutdown: Arc<AtomicBool>,
@@ -90,6 +90,7 @@ impl Engine {
     pub async fn new(
         cfg: ResolvedConfig,
         migrations_dir: &std::path::Path,
+        register_local: bool,
     ) -> Result<Arc<Self>, String> {
         let db = match cfg.daemon.db.kind {
             DbKind::Sqlite => {
@@ -115,30 +116,31 @@ impl Engine {
         }
         let store = Store::new(db);
         // The standalone engine is its own worker (job_runs.worker_id → workers).
-        let hostname = std::env::var("HOSTNAME").unwrap_or_else(|_| "localhost".to_string());
-        store
-            .upsert_worker(
-                LOCAL_WORKER,
-                &hostname,
-                "local",
-                env!("CARGO_PKG_VERSION"),
-                &[],
-            )
-            .await
-            .map_err(|e| e.to_string())?;
+        // The manager does not register itself — it only orchestrates.
+        if register_local {
+            let hostname = std::env::var("HOSTNAME").unwrap_or_else(|_| "localhost".to_string());
+            store
+                .upsert_worker(
+                    LOCAL_WORKER,
+                    &hostname,
+                    "local",
+                    env!("CARGO_PKG_VERSION"),
+                    &[],
+                )
+                .await
+                .map_err(|e| e.to_string())?;
+        }
 
         let run_storage = RunStorageCtx::from_config(&cfg);
-        let netroute = if cfg.proxies.is_empty() && cfg.egresses.is_empty() {
-            None
-        } else {
-            Some(std::sync::Arc::new(netroute::NetRoute::new(
+        let netroute = std::sync::RwLock::new(
+            netroute::NetRoute::build_optional(
                 &cfg.proxies,
                 &cfg.proxy_groups,
                 &cfg.egresses,
                 &cfg.egress_groups,
                 cfg.daemon.default_proxy.as_deref(),
-            )))
-        };
+            ),
+        );
         let mut job_locks = HashMap::new();
         let mut live_jobs = HashMap::new();
         for j in &cfg.jobs {
@@ -526,6 +528,22 @@ impl Engine {
                     &[now.into(), name.into(), before.into(), after.into()],
                 )
                 .await;
+        }
+        // Proxy/egress changes: rebuild the NetRoute (user: TUI-registered
+        // proxies apply on reload).
+        if old.proxies != new_cfg.proxies
+            || old.egresses != new_cfg.egresses
+            || old.proxy_groups != new_cfg.proxy_groups
+            || old.egress_groups != new_cfg.egress_groups
+            || old.daemon.default_proxy != new_cfg.daemon.default_proxy
+        {
+            *self.netroute.write().unwrap() = netroute::NetRoute::build_optional(
+                &new_cfg.proxies,
+                &new_cfg.proxy_groups,
+                &new_cfg.egresses,
+                &new_cfg.egress_groups,
+                new_cfg.daemon.default_proxy.as_deref(),
+            );
         }
         let changed = new_cfg.jobs.len() + removed.len();
         let _ = self

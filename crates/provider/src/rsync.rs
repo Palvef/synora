@@ -13,6 +13,7 @@ use crate::{cancelled_after_wait, kill_group, spawn_group};
 
 pub struct RsyncProvider {
     pub options: Vec<String>,
+    pub exclude: Vec<String>,
 }
 
 impl RsyncProvider {
@@ -70,8 +71,26 @@ impl RsyncProvider {
         }
 
         let mut cmd = Command::new("rsync");
-        // tunasync-aligned defaults, then job options, then --stats.
-        cmd.args(["-aH", "--partial", "--delete", "--delete-delay", "--delay-updates"]);
+        // tunasync-aligned defaults (same argv as tunasync's rsync provider:
+        // `-aH --delete --delete-delay --delay-updates --safe-links
+        //  --timeout=120 --contimeout=120`), then exclude, then job options,
+        // then --stats.
+        cmd.args([
+            "-aH",
+            "--delete",
+            "--delete-delay",
+            "--delay-updates",
+            "--safe-links",
+            "--timeout=120",
+        ]);
+        // --contimeout is daemon-connection only (rsync errors on local
+        // paths); tunasync passes it because its upstreams are rsync://.
+        if upstream.starts_with("rsync://") {
+            cmd.arg("--contimeout=120");
+        }
+        for pat in &self.exclude {
+            cmd.arg(format!("--exclude={pat}"));
+        }
         for (k, v) in &ctx.proxy_env {
             cmd.env(k, v);
         }

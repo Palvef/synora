@@ -9,20 +9,44 @@ use std::sync::Arc;
 use synora_core::job::JobStatus;
 
 #[derive(Parser)]
-#[command(name = "synora", version, about = "Synora — mirror synchronization engine")]
+#[command(
+    name = "synora",
+    version,
+    about = "Synora — mirror synchronization engine",
+    arg_required_else_help = true
+)]
 struct Cli {
+    /// Main config file (default: synora.toml or config/synora.toml)
+    #[arg(short, long, global = true)]
+    config: Option<PathBuf>,
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
+    // Hidden --style aliases for the most-used subcommands (user request:
+    // `synora --check` must behave exactly like `synora check`).
+    #[arg(long, hide = true)]
+    check: bool,
+    #[arg(long, hide = true)]
+    start: bool,
+    #[arg(long, hide = true)]
+    status: bool,
+    #[arg(long, hide = true)]
+    reload: bool,
+    #[arg(long, hide = true, value_name = "JOB")]
+    run: Option<String>,
+    #[arg(long, hide = true, value_name = "JOB")]
+    stop: Option<String>,
+    #[arg(long, hide = true, value_name = "JOB")]
+    logs: Option<String>,
+    #[arg(long, hide = true, default_value_t = 50)]
+    lines: usize,
+    #[arg(long, hide = true)]
+    db: Option<String>,
 }
 
 #[derive(Subcommand)]
 enum Command {
     /// Validate configuration; errors report file:line (spec §44)
-    Check {
-        /// Main config file (default: synora.toml or config/synora.toml)
-        #[arg(short, long)]
-        config: Option<PathBuf>,
-    },
+    Check {},
     /// Configuration subcommands
     Config {
         #[command(subcommand)]
@@ -30,23 +54,14 @@ enum Command {
     },
     /// Run the standalone daemon: scheduler + executor + metrics endpoint
     Start {
-        #[arg(short, long)]
-        config: Option<PathBuf>,
         /// DB override (path or postgres:// URL)
         #[arg(long)]
         db: Option<String>,
     },
     /// Trigger one job now and wait for it to finish
-    Run {
-        job: String,
-        #[arg(short, long)]
-        config: Option<PathBuf>,
-    },
+    Run { job: String },
     /// Show job statuses and next run times
-    Status {
-        #[arg(short, long)]
-        config: Option<PathBuf>,
-    },
+    Status {},
     /// Job subcommands
     Job {
         #[command(subcommand)]
@@ -58,21 +73,12 @@ enum Command {
         /// Lines to show (default 50)
         #[arg(short = 'n', long, default_value_t = 50)]
         lines: usize,
-        #[arg(short, long)]
-        config: Option<PathBuf>,
     },
     /// Cancel a running job (asks the daemon via a control file)
-    Stop {
-        job: String,
-        #[arg(short, long)]
-        config: Option<PathBuf>,
-    },
+    Stop { job: String },
     /// Hot-reload configuration (SIGHUP to the daemon; job/schedule changes
     /// apply, non-reloadable changes are rejected)
-    Reload {
-        #[arg(short, long)]
-        config: Option<PathBuf>,
-    },
+    Reload {},
     /// Worker management (talks to the manager API)
     Worker {
         #[command(subcommand)]
@@ -84,8 +90,6 @@ enum Command {
 enum WorkerCmd {
     /// List registered workers
     List {
-        #[arg(short, long)]
-        config: Option<PathBuf>,
         /// Manager base URL override (default: config api.listen)
         #[arg(long)]
         manager: Option<String>,
@@ -96,8 +100,6 @@ enum WorkerCmd {
     /// Drain a worker (no new runs; unregister when idle)
     Drain {
         id: String,
-        #[arg(short, long)]
-        config: Option<PathBuf>,
         #[arg(long)]
         manager: Option<String>,
         #[arg(long)]
@@ -108,19 +110,23 @@ enum WorkerCmd {
 #[derive(Subcommand)]
 enum JobCmd {
     /// List jobs with their current status
-    List {
-        #[arg(short, long)]
-        config: Option<PathBuf>,
+    List {},
+    /// Trigger one job now and wait for it to finish
+    Run { job: String },
+    /// Cancel a running job
+    Stop { job: String },
+    /// Tail a job's latest run log
+    Logs {
+        job: String,
+        #[arg(short = 'n', long, default_value_t = 50)]
+        lines: usize,
     },
 }
 
 #[derive(Subcommand)]
 enum ConfigCmd {
     /// Same as `check`
-    Validate {
-        #[arg(short, long)]
-        config: Option<PathBuf>,
-    },
+    Validate {},
 }
 
 fn main() -> ExitCode {
@@ -142,29 +148,58 @@ fn main() -> ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<(), String> {
-    match cli.command {
-        Command::Check { config } => {
+    let config = cli.config.clone();
+    // Hidden --style invocations behave exactly like their subcommands.
+    if cli.check {
+        let (cfg, path) = load_config(config, None)?;
+        print_summary(&cfg, &path);
+        return Ok(());
+    }
+    if cli.start {
+        return cmd_start(config, cli.db).await;
+    }
+    if cli.status {
+        return cmd_status(config).await;
+    }
+    if cli.reload {
+        return cmd_reload(config);
+    }
+    if let Some(job) = cli.run {
+        return cmd_run(job, config).await;
+    }
+    if let Some(job) = cli.stop {
+        return cmd_stop(job, config);
+    }
+    if let Some(job) = cli.logs {
+        return cmd_logs(job, cli.lines, config);
+    }
+    let command = cli.command.expect("clap requires a subcommand");
+    match command {
+        Command::Check {} => {
             let (cfg, path) = load_config(config, None)?;
             print_summary(&cfg, &path);
         }
         Command::Config {
-            cmd: ConfigCmd::Validate { config },
+            cmd: ConfigCmd::Validate {},
         } => {
             let (cfg, path) = load_config(config, None)?;
             print_summary(&cfg, &path);
         }
-        Command::Start { config, db } => cmd_start(config, db).await?,
-        Command::Run { job, config } => cmd_run(job, config).await?,
-        Command::Status { config } => cmd_status(config).await?,
-        Command::Job {
-            cmd: JobCmd::List { config },
-        } => cmd_status(config).await?,
-        Command::Logs { job, lines, config } => cmd_logs(job, lines, config)?,
-        Command::Stop { job, config } => cmd_stop(job, config)?,
-        Command::Reload { config } => cmd_reload(config)?,
+        Command::Start { db } => cmd_start(config, db).await?,
+        Command::Run { job } => cmd_run(job, config).await?,
+        Command::Status {} => cmd_status(config).await?,
+        Command::Job { cmd } => match cmd {
+            JobCmd::List {} => cmd_status(config).await?,
+            JobCmd::Run { job } => cmd_run(job, config).await?,
+            JobCmd::Stop { job } => cmd_stop(job, config)?,
+            JobCmd::Logs { job, lines } => cmd_logs(job, lines, config)?,
+        },
+        Command::Logs { job, lines } => cmd_logs(job, lines, config)?,
+        Command::Stop { job } => cmd_stop(job, config)?,
+        Command::Reload {} => cmd_reload(config)?,
         Command::Worker { cmd } => match cmd {
-            WorkerCmd::List { config, manager, token } => cmd_worker_list(config, manager, token).await?,
-            WorkerCmd::Drain { id, config, manager, token } => cmd_worker_drain(id, config, manager, token).await?,
+            WorkerCmd::List { manager, token } => cmd_worker_list(config, manager, token).await?,
+            WorkerCmd::Drain { id, manager, token } => cmd_worker_drain(id, config, manager, token).await?,
         },
     }
     Ok(())
@@ -218,7 +253,7 @@ fn print_summary(cfg: &config::ResolvedConfig, path: &std::path::Path) {
 async fn cmd_start(config: Option<PathBuf>, db: Option<String>) -> Result<(), String> {
     let (cfg, config_path) = load_config(config, db.as_deref())?;
     let migrations = PathBuf::from("migrations");
-    let engine = Engine::new(cfg, &migrations).await?;
+    let engine = Engine::new(cfg, &migrations, true).await?;
     engine.set_config_source(config_path.clone(), cli_overrides(db.as_deref()));
     engine.sync_config().await?;
 
@@ -306,7 +341,7 @@ async fn metrics_handler(axum::extract::State(engine): axum::extract::State<Arc<
 
 async fn cmd_run(job: String, config: Option<PathBuf>) -> Result<(), String> {
     let (cfg, _) = load_config(config, None)?;
-    let engine = Engine::new(cfg, &PathBuf::from("migrations")).await?;
+    let engine = Engine::new(cfg, &PathBuf::from("migrations"), true).await?;
     let status = engine.clone().run_once(&job).await?;
     match status {
         JobStatus::Success => println!("{job}: SUCCESS"),
@@ -381,19 +416,25 @@ fn manager_creds(
     manager: Option<String>,
     token: Option<String>,
 ) -> Result<(String, String), String> {
-    let (cfg, _) = load_config(config, None)?;
-    let url = match manager {
-        Some(u) => u,
-        None => format!("http://{}", cfg.api.listen),
-    };
-    let token = match token {
-        Some(t) => t,
-        None => cfg
-            .api
-            .tokens
-            .first()
-            .map(|t| t.token.clone())
-            .ok_or("no api token configured (set one in [api.tokens] or pass --token)")?,
+    let (url, token) = match (manager, token) {
+        (Some(u), Some(t)) => (u, t), // fully explicit: no config file needed
+        (manager, token) => {
+            let (cfg, _) = load_config(config, None)?;
+            let url = match manager {
+                Some(u) => u,
+                None => format!("http://{}", cfg.api.listen),
+            };
+            let token = match token {
+                Some(t) => t,
+                None => cfg
+                    .api
+                    .tokens
+                    .first()
+                    .map(|t| t.token.clone())
+                    .ok_or("no api token configured (set one in [api.tokens] or pass --token)")?,
+            };
+            (url, token)
+        }
     };
     Ok((url, token))
 }

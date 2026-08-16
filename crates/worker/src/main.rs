@@ -27,6 +27,8 @@ struct Cli {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 struct WorkerConfig {
+    /// Friendly worker name; registers as this id instead of the token name.
+    name: Option<String>,
     manager: String,
     token: String,
     #[serde(default)]
@@ -114,16 +116,25 @@ async fn main() -> Result<(), String> {
     };
 
     let hostname = std::env::var("HOSTNAME").unwrap_or_else(|_| "localhost".to_string());
-    let register = client
-        .register_worker(&RegisterRequest {
-            hostname: hostname.clone(),
-            address: "".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            labels: worker_cfg.labels.clone(),
-            capabilities: serde_json::json!({"max_concurrency": worker_cfg.max_concurrency}),
-        })
-        .await
-        .map_err(|e| e.to_string())?;
+    let register_req = RegisterRequest {
+        name: worker_cfg.name.clone(),
+        hostname: hostname.clone(),
+        address: "".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        labels: worker_cfg.labels.clone(),
+        capabilities: serde_json::json!({"max_concurrency": worker_cfg.max_concurrency}),
+    };
+    // Retry registration until the manager is reachable (manager may start
+    // after the worker, or restart) — don't die on a boot race.
+    let register = loop {
+        match client.register_worker(&register_req).await {
+            Ok(r) => break r,
+            Err(e) => {
+                tracing::warn!("register failed ({e}), retrying in 10s");
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            }
+        }
+    };
     let worker_id = register.worker_id;
     tracing::info!(
         "registered as `{worker_id}` on {} (labels: {:?}, max_concurrency: {})",
@@ -191,7 +202,7 @@ async fn main() -> Result<(), String> {
         let has_capacity = (jobs_running as u32) < worker_cfg.max_concurrency;
         if has_capacity && !draining.load(Ordering::SeqCst) {
             if let Some(assignment) = heartbeat.assignment {
-                match client.claim_run(&assignment.run_id).await {
+                match client.claim_run(&assignment.run_id, &worker_id).await {
                     Ok(Some(a)) => {
                         let client = client.clone();
                         let running = running.clone();
@@ -217,7 +228,7 @@ async fn main() -> Result<(), String> {
                                 netroute.as_deref(),
                             )
                             .await;
-                            let req = outcome_to_complete(&job, &outcome);
+                            let req = outcome_to_complete(&worker_id, &job, &outcome);
                             if let Err(e) = client.complete_run(&a.run_id, &req).await {
                                 tracing::warn!("complete_run {} failed: {e}", a.run_id);
                             }
@@ -248,7 +259,11 @@ async fn main() -> Result<(), String> {
 
 /// RunOutcome → manager report (size detection priority: provider hint →
 /// filesystem walk, spec §17/§58).
-fn outcome_to_complete(job: &JobSpec, outcome: &engine::RunOutcome) -> CompleteRequest {
+fn outcome_to_complete(
+    worker_id: &str,
+    job: &JobSpec,
+    outcome: &engine::RunOutcome,
+) -> CompleteRequest {
     let status = match &outcome.result {
         Ok(_) => "success",
         Err(provider::ProviderError::Cancelled) => "cancelled",
@@ -262,6 +277,7 @@ fn outcome_to_complete(job: &JobSpec, outcome: &engine::RunOutcome) -> CompleteR
         }
     };
     CompleteRequest {
+        worker_id: worker_id.to_string(),
         status: status.to_string(),
         exit_code: ok.and_then(|r| r.exit_code).map(|v| v as i64),
         size_before: None,

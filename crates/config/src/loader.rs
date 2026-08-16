@@ -1236,6 +1236,7 @@ fn resolve_provider(
             }
             Ok(ProviderConfig::Rsync {
                 options: doc.options.clone(),
+                exclude: doc.exclude.clone(),
             })
         }
         "script" => {

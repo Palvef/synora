@@ -69,6 +69,9 @@ pub enum ProviderConfig {
         /// Extra rsync arguments appended after the defaults (spec §13).
         #[serde(default)]
         options: Vec<String>,
+        /// `--exclude=PATTERN` entries (tunasync `exclude` config).
+        #[serde(default)]
+        exclude: Vec<String>,
     },
     Script {
         /// Path of the script/command to run (spec §16).

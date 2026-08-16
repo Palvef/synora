@@ -42,20 +42,7 @@ async fn main() -> Result<(), String> {
         )
         .init();
 
-    // Proxy/egress probing (user: per-proxy latency + egress IP, default CF
-    // egress for probe traffic). Built before cfg moves into the engine.
-    let netroute = if cfg.proxies.is_empty() && cfg.egresses.is_empty() {
-        None
-    } else {
-        Some(std::sync::Arc::new(netroute::NetRoute::new(
-            &cfg.proxies,
-            &cfg.proxy_groups,
-            &cfg.egresses,
-            &cfg.egress_groups,
-            cfg.daemon.default_proxy.as_deref(),
-        )))
-    };
-    let engine = Engine::new(cfg, &PathBuf::from("migrations")).await?;
+    let engine = Engine::new(cfg, &PathBuf::from("migrations"), false).await?;
     engine.set_config_source(path.clone(), overrides);
     engine.sync_config().await?;
 
@@ -64,18 +51,23 @@ async fn main() -> Result<(), String> {
     let picker_clone = picker.clone();
     engine.set_planner(move |job| picker_clone.pick(job));
 
-    // (netroute is built above, before cfg moves into the engine)
-    let _ = netroute;
+    // Proxy/egress probing (user: per-proxy latency + egress IP, default CF
+    // egress for probe traffic). Reads the engine's NetRoute so reloads
+    // (TUI-added proxies) take effect on the next probe tick.
     let probes: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<String, netroute::ProxyProbe>>> =
         std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
-    if let Some(nr) = netroute.clone() {
+    {
         let probes = probes.clone();
+        let probe_engine = engine.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
             loop {
                 tick.tick().await;
-                let results = nr.probe_all().await;
-                *probes.write().unwrap() = results;
+                let nr = probe_engine.netroute.read().unwrap().clone();
+                if let Some(nr) = nr {
+                    let results = nr.probe_all().await;
+                    *probes.write().unwrap() = results;
+                }
             }
         });
     }
@@ -119,7 +111,8 @@ async fn main() -> Result<(), String> {
                 .db()
                 .execute(
                     "UPDATE workers SET status = 'OFFLINE'
-                     WHERE last_heartbeat < ? AND status NOT IN ('DRAINING','MAINTENANCE')",
+                     WHERE (last_heartbeat < ? OR last_heartbeat IS NULL)
+                       AND status NOT IN ('DRAINING','MAINTENANCE')",
                     &[(now - 45).into()],
                 )
                 .await;
@@ -161,6 +154,27 @@ async fn main() -> Result<(), String> {
                 }
             }
             reaper_picker.refresh().await;
+            // Re-dispatch unassigned QUEUED runs now that workers are online
+            // (spec §28): runs queued while no worker was up, or unassigned
+            // above, must not wait forever.
+            if let Ok(queued) = reaper_engine.store.unassigned_runs().await {
+                for run in queued {
+                    let Some(job) = reaper_engine.job(&run.job_id) else {
+                        continue;
+                    };
+                    if let Some(worker) = reaper_picker.pick(&job) {
+                        if let Ok(true) =
+                            reaper_engine.store.assign_queued_run(&run.id, &worker).await
+                        {
+                            tracing::info!(
+                                "run {} (job `{}`) re-dispatched to worker `{worker}`",
+                                run.id,
+                                run.job_id
+                            );
+                        }
+                    }
+                }
+            }
         }
     });
 

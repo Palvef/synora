@@ -1,1 +1,1716 @@
-{"dashboard": {"title": "Synora 镜像同步", "uid": "synora-mirror", "schemaVersion": 39, "version": 1, "refresh": "30s", "time": {"from": "now-6h", "to": "now"}, "timezone": "browser", "tags": ["synora", "mirror"], "panels": [{"id": 1, "title": "Running", "type": "stat", "datasource": {"type": "prometheus", "uid": "ae4bld7vas268d"}, "targets": [{"refId": "A", "expr": "sum(synora_job_status == 4)", "legendFormat": ""}], "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0}, "fieldConfig": {"defaults": {"mappings": []}}, "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "textMode": "value_and_name"}}, {"id": 2, "title": "Failed", "type": "stat", "datasource": {"type": "prometheus", "uid": "ae4bld7vas268d"}, "targets": [{"refId": "A", "expr": "sum(synora_job_status == 6)", "legendFormat": ""}], "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0}, "fieldConfig": {"defaults": {"mappings": []}}, "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "textMode": "value_and_name"}}, {"id": 3, "title": "Success", "type": "stat", "datasource": {"type": "prometheus", "uid": "ae4bld7vas268d"}, "targets": [{"refId": "A", "expr": "sum(synora_job_status == 5)", "legendFormat": ""}], "gridPos": {"h": 4, "w": 6, "x": 12, "y": 0}, "fieldConfig": {"defaults": {"mappings": []}}, "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "textMode": "value_and_name"}}, {"id": 4, "title": "Workers Online", "type": "stat", "datasource": {"type": "prometheus", "uid": "ae4bld7vas268d"}, "targets": [{"refId": "A", "expr": "sum(synora_worker_status == 1)", "legendFormat": ""}], "gridPos": {"h": 4, "w": 6, "x": 18, "y": 0}, "fieldConfig": {"defaults": {"mappings": []}}, "options": {"reduceOptions": {"calcs": ["lastNotNull"]}, "textMode": "value_and_name"}}, {"id": 5, "title": "同步带宽 / job", "type": "timeseries", "datasource": {"type": "prometheus", "uid": "ae4bld7vas268d"}, "targets": [{"refId": "A", "expr": "sum by (job) (rate(synora_job_bytes_transferred_total[5m])) * 8", "legendFormat": "{{job}}"}], "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4}, "fieldConfig": {"defaults": {"unit": "bps", "custom": {"drawStyle": "line", "fillOpacity": 10}}}, "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi"}}}, {"id": 6, "title": "失败次数 / job (1h)", "type": "timeseries", "datasource": {"type": "prometheus", "uid": "ae4bld7vas268d"}, "targets": [{"refId": "A", "expr": "sum by (job) (increase(synora_job_failures_total[1h]))", "legendFormat": "{{job}}"}], "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4}, "fieldConfig": {"defaults": {"unit": "", "custom": {"drawStyle": "line", "fillOpacity": 10}}}, "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi"}}}, {"id": 7, "title": "同步时长 / job", "type": "timeseries", "datasource": {"type": "prometheus", "uid": "ae4bld7vas268d"}, "targets": [{"refId": "A", "expr": "synora_job_duration_seconds", "legendFormat": "{{job}}"}], "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12}, "fieldConfig": {"defaults": {"unit": "s", "custom": {"drawStyle": "line", "fillOpacity": 10}}}, "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi"}}}, {"id": 8, "title": "重试次数 / job (1h)", "type": "timeseries", "datasource": {"type": "prometheus", "uid": "ae4bld7vas268d"}, "targets": [{"refId": "A", "expr": "sum by (job) (increase(synora_job_retries_total[1h]))", "legendFormat": "{{job}}"}], "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12}, "fieldConfig": {"defaults": {"unit": "", "custom": {"drawStyle": "line", "fillOpacity": 10}}}, "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi"}}}, {"id": 9, "title": "CPU 占用 / job", "type": "timeseries", "datasource": {"type": "prometheus", "uid": "ae4bld7vas268d"}, "targets": [{"refId": "A", "expr": "sum by (job) (rate(synora_job_cpu_usage_seconds_total[5m]))", "legendFormat": "{{job}}"}], "gridPos": {"h": 8, "w": 12, "x": 0, "y": 20}, "fieldConfig": {"defaults": {"unit": "", "custom": {"drawStyle": "line", "fillOpacity": 10}}}, "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi"}}}, {"id": 10, "title": "内存占用 / job", "type": "timeseries", "datasource": {"type": "prometheus", "uid": "ae4bld7vas268d"}, "targets": [{"refId": "A", "expr": "synora_job_memory_bytes", "legendFormat": "{{job}}"}], "gridPos": {"h": 8, "w": 12, "x": 12, "y": 20}, "fieldConfig": {"defaults": {"unit": "bytes", "custom": {"drawStyle": "line", "fillOpacity": 10}}}, "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi"}}}, {"id": 11, "title": "运行总次数 / job (1h)", "type": "timeseries", "datasource": {"type": "prometheus", "uid": "ae4bld7vas268d"}, "targets": [{"refId": "A", "expr": "sum by (job) (increase(synora_job_runs_total[1h]))", "legendFormat": "{{job}}"}], "gridPos": {"h": 6, "w": 24, "x": 0, "y": 28}, "fieldConfig": {"defaults": {"unit": "", "custom": {"drawStyle": "line", "fillOpacity": 10}}}, "options": {"legend": {"displayMode": "table", "placement": "bottom", "calcs": ["mean", "max"]}, "tooltip": {"mode": "multi"}}}, {"id": 12, "title": "同步任务状态", "type": "table", "datasource": {"type": "prometheus", "uid": "ae4bld7vas268d"}, "targets": [{"refId": "A", "expr": "synora_job_status", "legendFormat": "{{job}}", "instant": true}], "gridPos": {"h": 10, "w": 12, "x": 0, "y": 34}, "fieldConfig": {"defaults": {"mappings": [{"type": "value", "options": {"0": {"text": "pending", "color": "gray"}, "1": {"text": "scheduled", "color": "gray"}, "2": {"text": "queued", "color": "blue"}, "3": {"text": "starting", "color": "blue"}, "4": {"text": "running", "color": "yellow"}, "5": {"text": "success", "color": "green"}, "6": {"text": "failed", "color": "red"}, "7": {"text": "retrying", "color": "orange"}, "8": {"text": "cancelling", "color": "purple"}, "9": {"text": "cancelled", "color": "purple"}, "10": {"text": "lost", "color": "red"}, "11": {"text": "skipped", "color": "gray"}}}]}}, "options": {"showHeader": true}, "transformations": [{"id": "organize", "options": {"excludeByName": {"Time": true, "__name__": true}, "renameByName": {"Value": "状态", "job": "任务"}}}]}, {"id": 13, "title": "Worker 状态", "type": "table", "datasource": {"type": "prometheus", "uid": "ae4bld7vas268d"}, "targets": [{"refId": "A", "expr": "synora_worker_status", "legendFormat": "{{worker}}", "instant": true}, {"refId": "B", "expr": "synora_worker_jobs_running", "legendFormat": "{{worker}}", "instant": true}], "gridPos": {"h": 10, "w": 12, "x": 12, "y": 34}, "fieldConfig": {"defaults": {"mappings": [{"type": "value", "options": {"0": {"text": "OFFLINE", "color": "red"}, "1": {"text": "ONLINE", "color": "green"}, "2": {"text": "DRAINING", "color": "yellow"}, "3": {"text": "MAINTENANCE", "color": "purple"}}}]}}, "options": {"showHeader": true}, "transformations": [{"id": "organize", "options": {"excludeByName": {"Time": true, "__name__": true}, "renameByName": {"Value #A": "状态", "Value #B": "运行中", "worker": "Worker"}}}]}, {"id": 14, "title": "仓库大小", "type": "table", "datasource": {"type": "prometheus", "uid": "ae4bld7vas268d"}, "targets": [{"refId": "A", "expr": "synora_repository_size_bytes", "legendFormat": "{{repository}}", "instant": true}], "gridPos": {"h": 8, "w": 12, "x": 0, "y": 44}, "fieldConfig": {"defaults": {"unit": "bytes"}}, "options": {"showHeader": true}, "transformations": [{"id": "organize", "options": {"excludeByName": {"Time": true, "__name__": true}, "renameByName": {"Value": "大小", "repository": "仓库"}}}]}, {"id": 15, "title": "下次同步时间", "type": "table", "datasource": {"type": "prometheus", "uid": "ae4bld7vas268d"}, "targets": [{"refId": "A", "expr": "synora_job_next_run_timestamp > 0", "legendFormat": "{{job}}", "instant": true}], "gridPos": {"h": 8, "w": 12, "x": 12, "y": 44}, "fieldConfig": {"defaults": {"unit": "dateTimeFromNow"}}, "options": {"showHeader": true}, "transformations": [{"id": "organize", "options": {"excludeByName": {"Time": true, "__name__": true}, "renameByName": {"Value": "下次运行", "job": "任务"}}}]}]}, "overwrite": true, "message": "Synora mirror sync dashboard"}
+{
+ "dashboard": {
+  "title": "Synora Mirror Sync",
+  "uid": "synora-mirror",
+  "tags": [
+   "synora",
+   "mirror"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 4,
+  "refresh": "30s",
+  "editable": true,
+  "graphTooltip": 1,
+  "time": {
+   "from": "now-6h",
+   "to": "now"
+  },
+  "templating": {
+   "list": [
+    {
+     "name": "job_name",
+     "type": "query",
+     "label": "同步任务",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "ae4bld7vas268d"
+     },
+     "query": {
+      "query": "label_values(synora_job_status, exported_job)",
+      "refId": "A"
+     },
+     "refresh": 2,
+     "includeAll": true,
+     "multi": true,
+     "allValue": ".*",
+     "current": {
+      "selected": true,
+      "text": [
+       "All"
+      ],
+      "value": [
+       "$__all"
+      ]
+     }
+    },
+    {
+     "name": "worker_name",
+     "type": "query",
+     "label": "Worker",
+     "datasource": {
+      "type": "prometheus",
+      "uid": "ae4bld7vas268d"
+     },
+     "query": {
+      "query": "label_values(synora_worker_status, worker)",
+      "refId": "A"
+     },
+     "refresh": 2,
+     "includeAll": true,
+     "multi": true,
+     "allValue": ".*",
+     "current": {
+      "selected": true,
+      "text": [
+       "All"
+      ],
+      "value": [
+       "$__all"
+      ]
+     }
+    }
+   ]
+  },
+  "panels": [
+   {
+    "type": "row",
+    "id": 1,
+    "title": "总览",
+    "collapsed": false,
+    "gridPos": {
+     "h": 1,
+     "w": 24,
+     "x": 0,
+     "y": 0
+    }
+   },
+   {
+    "id": 2,
+    "type": "stat",
+    "title": "在线 Worker",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "ae4bld7vas268d"
+    },
+    "gridPos": {
+     "h": 6,
+     "w": 4,
+     "x": 0,
+     "y": 1
+    },
+    "fieldConfig": {
+     "defaults": {
+      "color": {
+       "mode": "thresholds"
+      },
+      "thresholds": {
+       "mode": "absolute",
+       "steps": [
+        {
+         "color": "red",
+         "value": null
+        },
+        {
+         "color": "green",
+         "value": 1
+        }
+       ]
+      },
+      "mappings": [
+       {
+        "type": "special",
+        "options": {
+         "match": "null",
+         "result": {
+          "text": "N/A"
+         }
+        }
+       }
+      ],
+      "unit": "short"
+     },
+     "overrides": []
+    },
+    "options": {
+     "reduceOptions": {
+      "calcs": [
+       "lastNotNull"
+      ],
+      "fields": "",
+      "values": false
+     },
+     "colorMode": "background",
+     "graphMode": "none",
+     "textMode": "auto"
+    },
+    "targets": [
+     {
+      "expr": "count(synora_worker_status == 1)",
+      "legendFormat": "online",
+      "refId": "A",
+      "instant": true
+     }
+    ]
+   },
+   {
+    "id": 3,
+    "type": "stat",
+    "title": "运行中任务",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "ae4bld7vas268d"
+    },
+    "gridPos": {
+     "h": 6,
+     "w": 4,
+     "x": 4,
+     "y": 1
+    },
+    "fieldConfig": {
+     "defaults": {
+      "color": {
+       "mode": "thresholds"
+      },
+      "thresholds": {
+       "mode": "absolute",
+       "steps": [
+        {
+         "color": "green",
+         "value": null
+        },
+        {
+         "color": "yellow",
+         "value": 1
+        },
+        {
+         "color": "orange",
+         "value": 5
+        }
+       ]
+      },
+      "mappings": [
+       {
+        "type": "special",
+        "options": {
+         "match": "null",
+         "result": {
+          "text": "N/A"
+         }
+        }
+       }
+      ],
+      "unit": "short"
+     },
+     "overrides": []
+    },
+    "options": {
+     "reduceOptions": {
+      "calcs": [
+       "sum"
+      ],
+      "fields": "",
+      "values": false
+     },
+     "colorMode": "background",
+     "graphMode": "none",
+     "textMode": "auto"
+    },
+    "targets": [
+     {
+      "expr": "sum(synora_worker_jobs_running{worker=~\"$worker_name\"})",
+      "legendFormat": "running",
+      "refId": "A",
+      "instant": true
+     }
+    ]
+   },
+   {
+    "id": 4,
+    "type": "stat",
+    "title": "失败任务数",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "ae4bld7vas268d"
+    },
+    "gridPos": {
+     "h": 6,
+     "w": 4,
+     "x": 8,
+     "y": 1
+    },
+    "fieldConfig": {
+     "defaults": {
+      "color": {
+       "mode": "thresholds"
+      },
+      "thresholds": {
+       "mode": "absolute",
+       "steps": [
+        {
+         "color": "green",
+         "value": null
+        },
+        {
+         "color": "red",
+         "value": 1
+        }
+       ]
+      },
+      "mappings": [
+       {
+        "type": "special",
+        "options": {
+         "match": "null",
+         "result": {
+          "text": "N/A"
+         }
+        }
+       }
+      ],
+      "unit": "short"
+     },
+     "overrides": []
+    },
+    "options": {
+     "reduceOptions": {
+      "calcs": [
+       "lastNotNull"
+      ],
+      "fields": "",
+      "values": false
+     },
+     "colorMode": "background",
+     "graphMode": "none",
+     "textMode": "auto"
+    },
+    "targets": [
+     {
+      "expr": "count(synora_job_status{exported_job=~\"$job_name\"} == 6)",
+      "legendFormat": "failed",
+      "refId": "A",
+      "instant": true
+     }
+    ]
+   },
+   {
+    "id": 5,
+    "type": "stat",
+    "title": "累计同步次数",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "ae4bld7vas268d"
+    },
+    "gridPos": {
+     "h": 6,
+     "w": 4,
+     "x": 12,
+     "y": 1
+    },
+    "fieldConfig": {
+     "defaults": {
+      "color": {
+       "mode": "thresholds"
+      },
+      "thresholds": {
+       "mode": "absolute",
+       "steps": [
+        {
+         "color": "blue",
+         "value": null
+        }
+       ]
+      },
+      "mappings": [
+       {
+        "type": "special",
+        "options": {
+         "match": "null",
+         "result": {
+          "text": "N/A"
+         }
+        }
+       }
+      ],
+      "unit": "short"
+     },
+     "overrides": []
+    },
+    "options": {
+     "reduceOptions": {
+      "calcs": [
+       "sum"
+      ],
+      "fields": "",
+      "values": false
+     },
+     "colorMode": "background",
+     "graphMode": "none",
+     "textMode": "auto"
+    },
+    "targets": [
+     {
+      "expr": "sum(synora_job_runs_total{exported_job=~\"$job_name\"})",
+      "legendFormat": "runs",
+      "refId": "A",
+      "instant": true
+     }
+    ]
+   },
+   {
+    "id": 6,
+    "type": "stat",
+    "title": "累计传输量",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "ae4bld7vas268d"
+    },
+    "gridPos": {
+     "h": 6,
+     "w": 4,
+     "x": 16,
+     "y": 1
+    },
+    "fieldConfig": {
+     "defaults": {
+      "color": {
+       "mode": "thresholds"
+      },
+      "thresholds": {
+       "mode": "absolute",
+       "steps": [
+        {
+         "color": "blue",
+         "value": null
+        }
+       ]
+      },
+      "mappings": [
+       {
+        "type": "special",
+        "options": {
+         "match": "null",
+         "result": {
+          "text": "N/A"
+         }
+        }
+       }
+      ],
+      "unit": "decbytes"
+     },
+     "overrides": []
+    },
+    "options": {
+     "reduceOptions": {
+      "calcs": [
+       "sum"
+      ],
+      "fields": "",
+      "values": false
+     },
+     "colorMode": "background",
+     "graphMode": "none",
+     "textMode": "auto"
+    },
+    "targets": [
+     {
+      "expr": "sum(synora_job_bytes_transferred_total{exported_job=~\"$job_name\"})",
+      "legendFormat": "bytes",
+      "refId": "A",
+      "instant": true
+     }
+    ]
+   },
+   {
+    "id": 7,
+    "type": "stat",
+    "title": "仓库总大小",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "ae4bld7vas268d"
+    },
+    "gridPos": {
+     "h": 6,
+     "w": 4,
+     "x": 20,
+     "y": 1
+    },
+    "fieldConfig": {
+     "defaults": {
+      "color": {
+       "mode": "thresholds"
+      },
+      "thresholds": {
+       "mode": "absolute",
+       "steps": [
+        {
+         "color": "blue",
+         "value": null
+        }
+       ]
+      },
+      "mappings": [
+       {
+        "type": "special",
+        "options": {
+         "match": "null",
+         "result": {
+          "text": "N/A"
+         }
+        }
+       }
+      ],
+      "unit": "decbytes"
+     },
+     "overrides": []
+    },
+    "options": {
+     "reduceOptions": {
+      "calcs": [
+       "sum"
+      ],
+      "fields": "",
+      "values": false
+     },
+     "colorMode": "background",
+     "graphMode": "none",
+     "textMode": "auto"
+    },
+    "targets": [
+     {
+      "expr": "sum(synora_repository_size_bytes)",
+      "legendFormat": "size",
+      "refId": "A",
+      "instant": true
+     }
+    ]
+   },
+   {
+    "type": "row",
+    "id": 8,
+    "title": "同步状态",
+    "collapsed": false,
+    "gridPos": {
+     "h": 1,
+     "w": 24,
+     "x": 0,
+     "y": 7
+    }
+   },
+   {
+    "id": 9,
+    "type": "timeseries",
+    "title": "任务状态时间线",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "ae4bld7vas268d"
+    },
+    "gridPos": {
+     "h": 8,
+     "w": 24,
+     "x": 0,
+     "y": 8
+    },
+    "fieldConfig": {
+     "defaults": {
+      "color": {
+       "mode": "thresholds"
+      },
+      "custom": {
+       "drawStyle": "points",
+       "lineInterpolation": "stepAfter",
+       "pointSize": 6,
+       "fillOpacity": 10,
+       "showPoints": "always",
+       "spanNulls": false
+      },
+      "unit": "none",
+      "min": 0,
+      "max": 12,
+      "thresholds": {
+       "mode": "absolute",
+       "steps": [
+        {
+         "color": "gray",
+         "value": null
+        },
+        {
+         "color": "blue",
+         "value": 1
+        },
+        {
+         "color": "orange",
+         "value": 2
+        },
+        {
+         "color": "light-blue",
+         "value": 3
+        },
+        {
+         "color": "yellow",
+         "value": 4
+        },
+        {
+         "color": "green",
+         "value": 5
+        },
+        {
+         "color": "red",
+         "value": 6
+        },
+        {
+         "color": "purple",
+         "value": 7
+        },
+        {
+         "color": "orange",
+         "value": 8
+        },
+        {
+         "color": "dark-gray",
+         "value": 9
+        },
+        {
+         "color": "dark-red",
+         "value": 10
+        },
+        {
+         "color": "light-gray",
+         "value": 11
+        }
+       ]
+      },
+      "mappings": [
+       {
+        "type": "value",
+        "options": {
+         "0": {
+          "text": "Pending",
+          "color": "gray"
+         },
+         "1": {
+          "text": "Scheduled",
+          "color": "blue"
+         },
+         "2": {
+          "text": "Queued",
+          "color": "orange"
+         },
+         "3": {
+          "text": "Starting",
+          "color": "light-blue"
+         },
+         "4": {
+          "text": "Running",
+          "color": "yellow"
+         },
+         "5": {
+          "text": "Success",
+          "color": "green"
+         },
+         "6": {
+          "text": "Failed",
+          "color": "red"
+         },
+         "7": {
+          "text": "Retrying",
+          "color": "purple"
+         },
+         "8": {
+          "text": "Cancelling",
+          "color": "orange"
+         },
+         "9": {
+          "text": "Cancelled",
+          "color": "dark-gray"
+         },
+         "10": {
+          "text": "Lost",
+          "color": "dark-red"
+         },
+         "11": {
+          "text": "Skipped",
+          "color": "light-gray"
+         }
+        }
+       }
+      ]
+     },
+     "overrides": []
+    },
+    "options": {
+     "legend": {
+      "displayMode": "table",
+      "placement": "bottom",
+      "calcs": [
+       "lastNotNull"
+      ]
+     },
+     "tooltip": {
+      "mode": "multi",
+      "sort": "desc"
+     }
+    },
+    "targets": [
+     {
+      "expr": "synora_job_status{exported_job=~\"$job_name\"}",
+      "legendFormat": "{{exported_job}} @ {{worker}}",
+      "refId": "A",
+      "instant": false
+     }
+    ]
+   },
+   {
+    "id": 10,
+    "type": "table",
+    "title": "所有任务状态",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "ae4bld7vas268d"
+    },
+    "gridPos": {
+     "h": 12,
+     "w": 24,
+     "x": 0,
+     "y": 16
+    },
+    "fieldConfig": {
+     "defaults": {
+      "color": {
+       "mode": "thresholds"
+      },
+      "custom": {
+       "align": "center",
+       "cellOptions": {
+        "type": "auto"
+       }
+      },
+      "thresholds": {
+       "mode": "absolute",
+       "steps": [
+        {
+         "color": "green",
+         "value": null
+        }
+       ]
+      },
+      "mappings": []
+     },
+     "overrides": [
+      {
+       "matcher": {
+        "id": "byName",
+        "options": "状态"
+       },
+       "properties": [
+        {
+         "id": "mappings",
+         "value": [
+          {
+           "type": "value",
+           "options": {
+            "0": {
+             "text": "Pending",
+             "color": "gray"
+            },
+            "1": {
+             "text": "Scheduled",
+             "color": "blue"
+            },
+            "2": {
+             "text": "Queued",
+             "color": "orange"
+            },
+            "3": {
+             "text": "Starting",
+             "color": "light-blue"
+            },
+            "4": {
+             "text": "Running",
+             "color": "yellow"
+            },
+            "5": {
+             "text": "Success",
+             "color": "green"
+            },
+            "6": {
+             "text": "Failed",
+             "color": "red"
+            },
+            "7": {
+             "text": "Retrying",
+             "color": "purple"
+            },
+            "8": {
+             "text": "Cancelling",
+             "color": "orange"
+            },
+            "9": {
+             "text": "Cancelled",
+             "color": "dark-gray"
+            },
+            "10": {
+             "text": "Lost",
+             "color": "dark-red"
+            },
+            "11": {
+             "text": "Skipped",
+             "color": "light-gray"
+            }
+           }
+          }
+         ]
+        },
+        {
+         "id": "custom.cellOptions",
+         "value": {
+          "type": "color-text"
+         }
+        }
+       ]
+      },
+      {
+       "matcher": {
+        "id": "byName",
+        "options": "成功"
+       },
+       "properties": [
+        {
+         "id": "mappings",
+         "value": [
+          {
+           "type": "value",
+           "options": {
+            "1": {
+             "text": "✅ 成功",
+             "color": "green"
+            },
+            "0": {
+             "text": "❌ 未成功",
+             "color": "red"
+            }
+           }
+          }
+         ]
+        },
+        {
+         "id": "custom.cellOptions",
+         "value": {
+          "type": "color-text"
+         }
+        }
+       ]
+      },
+      {
+       "matcher": {
+        "id": "byName",
+        "options": "失败"
+       },
+       "properties": [
+        {
+         "id": "thresholds",
+         "value": {
+          "mode": "absolute",
+          "steps": [
+           {
+            "color": "green",
+            "value": null
+           },
+           {
+            "color": "red",
+            "value": 1
+           }
+          ]
+         }
+        },
+        {
+         "id": "custom.cellOptions",
+         "value": {
+          "type": "color-text"
+         }
+        }
+       ]
+      },
+      {
+       "matcher": {
+        "id": "byName",
+        "options": "耗时"
+       },
+       "properties": [
+        {
+         "id": "unit",
+         "value": "s"
+        }
+       ]
+      },
+      {
+       "matcher": {
+        "id": "byName",
+        "options": "传输量"
+       },
+       "properties": [
+        {
+         "id": "unit",
+         "value": "decbytes"
+        }
+       ]
+      },
+      {
+       "matcher": {
+        "id": "byName",
+        "options": "仓库大小"
+       },
+       "properties": [
+        {
+         "id": "unit",
+         "value": "decbytes"
+        }
+       ]
+      },
+      {
+       "matcher": {
+        "id": "byName",
+        "options": "下次运行"
+       },
+       "properties": [
+        {
+         "id": "unit",
+         "value": "dateTimeFromNow"
+        }
+       ]
+      },
+      {
+       "matcher": {
+        "id": "byName",
+        "options": "上次同步"
+       },
+       "properties": [
+        {
+         "id": "unit",
+         "value": "dateTimeFromNow"
+        }
+       ]
+      }
+     ]
+    },
+    "options": {
+     "showHeader": true,
+     "sortBy": [
+      {
+       "displayName": "状态",
+       "desc": false
+      }
+     ]
+    },
+    "targets": [
+     {
+      "expr": "synora_job_status{exported_job=~\"$job_name\"}",
+      "legendFormat": "状态",
+      "refId": "status",
+      "instant": true,
+      "format": "table"
+     },
+     {
+      "expr": "count(synora_job_status{exported_job=~\"$job_name\"} == 5) by (exported_job)",
+      "legendFormat": "成功",
+      "refId": "ok",
+      "instant": true,
+      "format": "table"
+     },
+     {
+      "expr": "synora_job_failures_total{exported_job=~\"$job_name\"}",
+      "legendFormat": "失败",
+      "refId": "fail",
+      "instant": true,
+      "format": "table"
+     },
+     {
+      "expr": "synora_job_retries_total{exported_job=~\"$job_name\"}",
+      "legendFormat": "重试",
+      "refId": "retry",
+      "instant": true,
+      "format": "table"
+     },
+     {
+      "expr": "synora_job_duration_seconds{exported_job=~\"$job_name\"}",
+      "legendFormat": "耗时",
+      "refId": "dur",
+      "instant": true,
+      "format": "table"
+     },
+     {
+      "expr": "synora_job_bytes_transferred_total{exported_job=~\"$job_name\"}",
+      "legendFormat": "传输量",
+      "refId": "bytes",
+      "instant": true,
+      "format": "table"
+     },
+     {
+      "expr": "synora_repository_size_bytes{repository=~\"$job_name\"}",
+      "legendFormat": "仓库大小",
+      "refId": "size",
+      "instant": true,
+      "format": "table"
+     },
+     {
+      "expr": "synora_job_next_run_timestamp{exported_job=~\"$job_name\"} * 1000",
+      "legendFormat": "下次运行",
+      "refId": "next",
+      "instant": true,
+      "format": "table"
+     },
+     {
+      "expr": "synora_job_last_end_timestamp{exported_job=~\"$job_name\"} * 1000",
+      "legendFormat": "上次同步",
+      "refId": "last",
+      "instant": true,
+      "format": "table"
+     }
+    ],
+    "transformations": [
+     {
+      "id": "merge"
+     },
+     {
+      "id": "organize",
+      "options": {
+       "excludeByName": {
+        "Time": true,
+        "__name__": true,
+        "instance": true,
+        "job": true,
+        "worker": true,
+        "repository": true,
+        "Value #status": true,
+        "Value #ok": true,
+        "Value #fail": true,
+        "Value #retry": true,
+        "Value #dur": true,
+        "Value #bytes": true,
+        "Value #size": true,
+        "Value #next": true,
+        "Value #last": true
+       },
+       "renameByName": {
+        "exported_job": "任务"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "type": "row",
+    "id": 12,
+    "title": "带宽与耗时",
+    "collapsed": false,
+    "gridPos": {
+     "h": 1,
+     "w": 24,
+     "x": 0,
+     "y": 28
+    }
+   },
+   {
+    "id": 13,
+    "type": "timeseries",
+    "title": "每任务带宽",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "ae4bld7vas268d"
+    },
+    "gridPos": {
+     "h": 8,
+     "w": 16,
+     "x": 0,
+     "y": 29
+    },
+    "fieldConfig": {
+     "defaults": {
+      "color": {
+       "mode": "palette-classic"
+      },
+      "custom": {
+       "drawStyle": "line",
+       "lineInterpolation": "smooth",
+       "fillOpacity": 10,
+       "showPoints": "never",
+       "spanNulls": false
+      },
+      "unit": "bps"
+     },
+     "overrides": []
+    },
+    "options": {
+     "legend": {
+      "displayMode": "table",
+      "placement": "bottom",
+      "calcs": [
+       "lastNotNull",
+       "max"
+      ]
+     },
+     "tooltip": {
+      "mode": "multi",
+      "sort": "desc"
+     }
+    },
+    "targets": [
+     {
+      "expr": "rate(synora_job_bytes_transferred_total{exported_job=~\"$job_name\"}[5m]) * 8",
+      "legendFormat": "{{exported_job}} @ {{worker}}",
+      "refId": "A"
+     }
+    ]
+   },
+   {
+    "id": 14,
+    "type": "timeseries",
+    "title": "同步耗时",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "ae4bld7vas268d"
+    },
+    "gridPos": {
+     "h": 8,
+     "w": 8,
+     "x": 16,
+     "y": 29
+    },
+    "fieldConfig": {
+     "defaults": {
+      "color": {
+       "mode": "palette-classic"
+      },
+      "custom": {
+       "drawStyle": "line",
+       "lineInterpolation": "stepAfter",
+       "fillOpacity": 10,
+       "showPoints": "always",
+       "pointSize": 4,
+       "spanNulls": false
+      },
+      "unit": "s"
+     },
+     "overrides": []
+    },
+    "options": {
+     "legend": {
+      "displayMode": "table",
+      "placement": "bottom",
+      "calcs": [
+       "lastNotNull"
+      ]
+     },
+     "tooltip": {
+      "mode": "multi",
+      "sort": "desc"
+     }
+    },
+    "targets": [
+     {
+      "expr": "synora_job_duration_seconds{exported_job=~\"$job_name\"}",
+      "legendFormat": "{{exported_job}}",
+      "refId": "A"
+     }
+    ]
+   },
+   {
+    "id": 15,
+    "type": "timeseries",
+    "title": "传输速度（所有任务合计）",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "ae4bld7vas268d"
+    },
+    "gridPos": {
+     "h": 6,
+     "w": 24,
+     "x": 0,
+     "y": 37
+    },
+    "fieldConfig": {
+     "defaults": {
+      "color": {
+       "mode": "palette-classic"
+      },
+      "custom": {
+       "drawStyle": "line",
+       "lineInterpolation": "smooth",
+       "fillOpacity": 20,
+       "showPoints": "never",
+       "spanNulls": false
+      },
+      "unit": "bps"
+     },
+     "overrides": []
+    },
+    "options": {
+     "legend": {
+      "displayMode": "list",
+      "placement": "bottom",
+      "calcs": [
+       "lastNotNull",
+       "max"
+      ]
+     },
+     "tooltip": {
+      "mode": "multi",
+      "sort": "desc"
+     }
+    },
+    "targets": [
+     {
+      "expr": "sum(rate(synora_job_bytes_transferred_total[5m])) * 8",
+      "legendFormat": "总带宽",
+      "refId": "A"
+     }
+    ]
+   },
+   {
+    "type": "row",
+    "id": 16,
+    "title": "失败与重试",
+    "collapsed": false,
+    "gridPos": {
+     "h": 1,
+     "w": 24,
+     "x": 0,
+     "y": 43
+    }
+   },
+   {
+    "id": 17,
+    "type": "timeseries",
+    "title": "失败次数",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "ae4bld7vas268d"
+    },
+    "gridPos": {
+     "h": 7,
+     "w": 12,
+     "x": 0,
+     "y": 44
+    },
+    "fieldConfig": {
+     "defaults": {
+      "color": {
+       "mode": "palette-classic"
+      },
+      "custom": {
+       "drawStyle": "bars",
+       "fillOpacity": 60,
+       "showPoints": "never",
+       "spanNulls": false
+      },
+      "unit": "short"
+     },
+     "overrides": []
+    },
+    "options": {
+     "legend": {
+      "displayMode": "table",
+      "placement": "bottom",
+      "calcs": [
+       "lastNotNull",
+       "sum"
+      ]
+     },
+     "tooltip": {
+      "mode": "multi",
+      "sort": "desc"
+     }
+    },
+    "targets": [
+     {
+      "expr": "increase(synora_job_failures_total{exported_job=~\"$job_name\"}[$__interval])",
+      "legendFormat": "{{exported_job}}",
+      "refId": "A"
+     }
+    ]
+   },
+   {
+    "id": 18,
+    "type": "timeseries",
+    "title": "重试次数",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "ae4bld7vas268d"
+    },
+    "gridPos": {
+     "h": 7,
+     "w": 12,
+     "x": 12,
+     "y": 44
+    },
+    "fieldConfig": {
+     "defaults": {
+      "color": {
+       "mode": "palette-classic"
+      },
+      "custom": {
+       "drawStyle": "bars",
+       "fillOpacity": 60,
+       "showPoints": "never",
+       "spanNulls": false
+      },
+      "unit": "short"
+     },
+     "overrides": []
+    },
+    "options": {
+     "legend": {
+      "displayMode": "table",
+      "placement": "bottom",
+      "calcs": [
+       "lastNotNull",
+       "sum"
+      ]
+     },
+     "tooltip": {
+      "mode": "multi",
+      "sort": "desc"
+     }
+    },
+    "targets": [
+     {
+      "expr": "increase(synora_job_retries_total{exported_job=~\"$job_name\"}[$__interval])",
+      "legendFormat": "{{exported_job}}",
+      "refId": "A"
+     }
+    ]
+   },
+   {
+    "type": "row",
+    "id": 19,
+    "title": "Workers",
+    "collapsed": false,
+    "gridPos": {
+     "h": 1,
+     "w": 24,
+     "x": 0,
+     "y": 51
+    }
+   },
+   {
+    "id": 20,
+    "type": "stat",
+    "title": "Worker 状态",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "ae4bld7vas268d"
+    },
+    "gridPos": {
+     "h": 5,
+     "w": 12,
+     "x": 0,
+     "y": 52
+    },
+    "fieldConfig": {
+     "defaults": {
+      "color": {
+       "mode": "thresholds"
+      },
+      "thresholds": {
+       "mode": "absolute",
+       "steps": [
+        {
+         "color": "red",
+         "value": null
+        },
+        {
+         "color": "green",
+         "value": 1
+        }
+       ]
+      },
+      "mappings": [
+       {
+        "type": "value",
+        "options": {
+         "0": {
+          "text": "Offline",
+          "color": "red"
+         },
+         "1": {
+          "text": "Online",
+          "color": "green"
+         },
+         "2": {
+          "text": "Draining",
+          "color": "yellow"
+         },
+         "3": {
+          "text": "Maintenance",
+          "color": "blue"
+         }
+        }
+       }
+      ]
+     },
+     "overrides": []
+    },
+    "options": {
+     "reduceOptions": {
+      "calcs": [
+       "lastNotNull"
+      ],
+      "fields": "",
+      "values": false
+     },
+     "colorMode": "background",
+     "graphMode": "none",
+     "textMode": "value_and_name",
+     "justifyMode": "center"
+    },
+    "targets": [
+     {
+      "expr": "synora_worker_status{worker=~\"$worker_name\"}",
+      "legendFormat": "{{worker}}",
+      "refId": "A",
+      "instant": true
+     }
+    ]
+   },
+   {
+    "id": 21,
+    "type": "stat",
+    "title": "每 Worker 运行任务数",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "ae4bld7vas268d"
+    },
+    "gridPos": {
+     "h": 5,
+     "w": 12,
+     "x": 12,
+     "y": 52
+    },
+    "fieldConfig": {
+     "defaults": {
+      "color": {
+       "mode": "thresholds"
+      },
+      "thresholds": {
+       "mode": "absolute",
+       "steps": [
+        {
+         "color": "green",
+         "value": null
+        },
+        {
+         "color": "yellow",
+         "value": 1
+        },
+        {
+         "color": "orange",
+         "value": 5
+        },
+        {
+         "color": "red",
+         "value": 10
+        }
+       ]
+      },
+      "mappings": [],
+      "unit": "short"
+     },
+     "overrides": []
+    },
+    "options": {
+     "reduceOptions": {
+      "calcs": [
+       "lastNotNull"
+      ],
+      "fields": "",
+      "values": false
+     },
+     "colorMode": "background",
+     "graphMode": "none",
+     "textMode": "value_and_name",
+     "justifyMode": "center"
+    },
+    "targets": [
+     {
+      "expr": "synora_worker_jobs_running{worker=~\"$worker_name\"}",
+      "legendFormat": "{{worker}}",
+      "refId": "A",
+      "instant": true
+     }
+    ]
+   },
+   {
+    "id": 22,
+    "type": "timeseries",
+    "title": "Worker 任务负载时间线",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "ae4bld7vas268d"
+    },
+    "gridPos": {
+     "h": 7,
+     "w": 24,
+     "x": 0,
+     "y": 57
+    },
+    "fieldConfig": {
+     "defaults": {
+      "color": {
+       "mode": "palette-classic"
+      },
+      "custom": {
+       "drawStyle": "line",
+       "lineInterpolation": "stepAfter",
+       "fillOpacity": 10,
+       "showPoints": "never",
+       "spanNulls": false
+      },
+      "unit": "short"
+     },
+     "overrides": []
+    },
+    "options": {
+     "legend": {
+      "displayMode": "table",
+      "placement": "bottom",
+      "calcs": [
+       "lastNotNull",
+       "max"
+      ]
+     },
+     "tooltip": {
+      "mode": "multi",
+      "sort": "desc"
+     }
+    },
+    "targets": [
+     {
+      "expr": "synora_worker_jobs_running{worker=~\"$worker_name\"}",
+      "legendFormat": "{{worker}}",
+      "refId": "A"
+     }
+    ]
+   },
+   {
+    "type": "row",
+    "id": 23,
+    "title": "资源",
+    "collapsed": false,
+    "gridPos": {
+     "h": 1,
+     "w": 24,
+     "x": 0,
+     "y": 64
+    }
+   },
+   {
+    "id": 24,
+    "type": "timeseries",
+    "title": "任务 CPU 使用",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "ae4bld7vas268d"
+    },
+    "gridPos": {
+     "h": 7,
+     "w": 12,
+     "x": 0,
+     "y": 65
+    },
+    "fieldConfig": {
+     "defaults": {
+      "color": {
+       "mode": "palette-classic"
+      },
+      "custom": {
+       "drawStyle": "line",
+       "lineInterpolation": "smooth",
+       "fillOpacity": 10,
+       "showPoints": "never",
+       "spanNulls": false
+      },
+      "unit": "percentunit"
+     },
+     "overrides": []
+    },
+    "options": {
+     "legend": {
+      "displayMode": "table",
+      "placement": "bottom",
+      "calcs": [
+       "lastNotNull",
+       "max"
+      ]
+     },
+     "tooltip": {
+      "mode": "multi",
+      "sort": "desc"
+     }
+    },
+    "targets": [
+     {
+      "expr": "rate(synora_job_cpu_usage_seconds_total{exported_job=~\"$job_name\"}[5m])",
+      "legendFormat": "{{exported_job}} @ {{worker}}",
+      "refId": "A"
+     }
+    ]
+   },
+   {
+    "id": 25,
+    "type": "timeseries",
+    "title": "任务内存使用",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "ae4bld7vas268d"
+    },
+    "gridPos": {
+     "h": 7,
+     "w": 12,
+     "x": 12,
+     "y": 65
+    },
+    "fieldConfig": {
+     "defaults": {
+      "color": {
+       "mode": "palette-classic"
+      },
+      "custom": {
+       "drawStyle": "line",
+       "lineInterpolation": "smooth",
+       "fillOpacity": 10,
+       "showPoints": "never",
+       "spanNulls": false
+      },
+      "unit": "bytes"
+     },
+     "overrides": []
+    },
+    "options": {
+     "legend": {
+      "displayMode": "table",
+      "placement": "bottom",
+      "calcs": [
+       "lastNotNull",
+       "max"
+      ]
+     },
+     "tooltip": {
+      "mode": "multi",
+      "sort": "desc"
+     }
+    },
+    "targets": [
+     {
+      "expr": "synora_job_memory_bytes{exported_job=~\"$job_name\"}",
+      "legendFormat": "{{exported_job}} @ {{worker}}",
+      "refId": "A"
+     }
+    ]
+   },
+   {
+    "id": 26,
+    "type": "timeseries",
+    "title": "仓库大小",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "ae4bld7vas268d"
+    },
+    "gridPos": {
+     "h": 7,
+     "w": 12,
+     "x": 0,
+     "y": 72
+    },
+    "fieldConfig": {
+     "defaults": {
+      "color": {
+       "mode": "palette-classic"
+      },
+      "custom": {
+       "drawStyle": "line",
+       "lineInterpolation": "stepAfter",
+       "fillOpacity": 10,
+       "showPoints": "never",
+       "spanNulls": false
+      },
+      "unit": "decbytes"
+     },
+     "overrides": []
+    },
+    "options": {
+     "legend": {
+      "displayMode": "table",
+      "placement": "bottom",
+      "calcs": [
+       "lastNotNull"
+      ]
+     },
+     "tooltip": {
+      "mode": "multi",
+      "sort": "desc"
+     }
+    },
+    "targets": [
+     {
+      "expr": "synora_repository_size_bytes{repository=~\"$job_name\"}",
+      "legendFormat": "{{repository}}",
+      "refId": "A"
+     }
+    ]
+   },
+   {
+    "id": 27,
+    "type": "timeseries",
+    "title": "下次运行时间",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "ae4bld7vas268d"
+    },
+    "gridPos": {
+     "h": 7,
+     "w": 12,
+     "x": 12,
+     "y": 72
+    },
+    "fieldConfig": {
+     "defaults": {
+      "color": {
+       "mode": "palette-classic"
+      },
+      "custom": {
+       "drawStyle": "points",
+       "pointSize": 6,
+       "showPoints": "always",
+       "spanNulls": false
+      },
+      "unit": "dateTimeFromNow"
+     },
+     "overrides": []
+    },
+    "options": {
+     "legend": {
+      "displayMode": "table",
+      "placement": "bottom",
+      "calcs": [
+       "lastNotNull"
+      ]
+     },
+     "tooltip": {
+      "mode": "multi",
+      "sort": "desc"
+     }
+    },
+    "targets": [
+     {
+      "expr": "synora_job_next_run_timestamp{exported_job=~\"$job_name\"} * 1000",
+      "legendFormat": "{{exported_job}}",
+      "refId": "A"
+     }
+    ]
+   }
+  ]
+ },
+ "overwrite": true,
+ "folderUid": "",
+ "message": "Synora dashboard v2: CK-style layout, all statuses, duration metric"
+}

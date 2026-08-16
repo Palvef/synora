@@ -95,6 +95,33 @@ pub struct NetRoute {
 
 impl NetRoute {
     /// Build from the config crate's typed sections.
+    /// Build the router, or None when no proxy/egress config exists
+    /// (pure direct mode).
+    pub fn build_optional(
+        proxies: &std::collections::HashMap<String, config::ProxyConfig>,
+        proxy_groups: &std::collections::HashMap<String, config::ProxyGroupConfig>,
+        egresses: &[config::EgressConfig],
+        egress_groups: &std::collections::HashMap<String, config::EgressGroupConfig>,
+        default_proxy: Option<&str>,
+    ) -> Option<std::sync::Arc<NetRoute>> {
+        if proxies.is_empty() && egresses.is_empty() {
+            return None;
+        }
+        Some(std::sync::Arc::new(NetRoute::new(
+            proxies,
+            proxy_groups,
+            egresses,
+            egress_groups,
+            default_proxy,
+        )))
+    }
+
+    /// Configured proxies (reload-updated; the /proxies endpoint reads this
+    /// so TUI-added proxies show up after a reload).
+    pub fn proxy_configs(&self) -> &HashMap<String, ProxyConfig> {
+        &self.proxies
+    }
+
     pub fn new(
         proxies: &HashMap<String, config::ProxyConfig>,
         proxy_groups: &HashMap<String, config::ProxyGroupConfig>,
