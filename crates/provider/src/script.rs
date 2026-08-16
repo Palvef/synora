@@ -65,6 +65,13 @@ impl ScriptProvider {
             cmd.env("SYNORA_EGRESS", e);
         }
         cmd.env("SYNORA_RUN_ID", &ctx.run_id);
+        for (k, v) in &ctx.proxy_env {
+            cmd.env(k, v);
+        }
+        if let Some(addr) = &ctx.egress_address {
+            cmd.env("SYNORA_EGRESS_ADDRESS", addr);
+        }
+        cmd.env("SYNORA_FAMILY", &ctx.family);
         // tunasync-scripts compatibility (alignment decision).
         cmd.env("TUNASYNC_MIRROR_NAME", &ctx.job_name);
         if let Some(up) = &ctx.upstream {
@@ -75,7 +82,7 @@ impl ScriptProvider {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let mut child = spawn_group(&mut cmd)
+        let mut child = spawn_group(&mut cmd, ctx)
             .map_err(|e| ProviderError::Spawn(format!("`{}`: {e}", self.command)))?;
         // Read pipes and wait for exit concurrently with cancellation: a
         // long-running child keeps its pipes open, so a plain read_to_end

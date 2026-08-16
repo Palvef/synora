@@ -72,6 +72,21 @@ impl RsyncProvider {
         let mut cmd = Command::new("rsync");
         // tunasync-aligned defaults, then job options, then --stats.
         cmd.args(["-aH", "--partial", "--delete", "--delete-delay", "--delay-updates"]);
+        for (k, v) in &ctx.proxy_env {
+            cmd.env(k, v);
+        }
+        if let Some(addr) = &ctx.egress_address {
+            cmd.arg("--address").arg(addr);
+        }
+        match ctx.family.as_str() {
+            "ipv4" => {
+                cmd.arg("--ipv4");
+            }
+            "ipv6" => {
+                cmd.arg("--ipv6");
+            }
+            _ => {}
+        }
         for opt in &self.options {
             cmd.arg(opt);
         }
@@ -81,7 +96,7 @@ impl RsyncProvider {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let mut child = spawn_group(&mut cmd).map_err(|e| ProviderError::Spawn(format!("rsync: {e}")))?;
+        let mut child = spawn_group(&mut cmd, ctx).map_err(|e| ProviderError::Spawn(format!("rsync: {e}")))?;
         // Read pipes and wait for exit concurrently with cancellation: a
         // long-running child keeps its pipes open, so a plain read_to_end
         // before the select would swallow cancels until the child exits.

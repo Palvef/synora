@@ -35,12 +35,14 @@ struct Snapshot {
     jobs: Vec<api::JobDTO>,
     workers: Vec<api::WorkerDTO>,
     log_lines: Vec<String>,
+    proxies: Vec<serde_json::Value>,
     error: Option<String>,
 }
 
 enum Mode {
     Jobs,
     Workers,
+    Proxies,
     Logs,
 }
 
@@ -81,6 +83,13 @@ async fn fetch(client: &Client) -> Snapshot {
         if let Ok(log) = client.job_logs(&job.name, 30).await {
             snap.log_lines = log.lines().map(|l| l.to_string()).collect();
         }
+    }
+    if let Ok(p) = client.list_proxies().await {
+        snap.proxies = p
+            .get("proxies")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
     }
     snap
 }
@@ -165,6 +174,37 @@ fn render_workers(f: &mut Frame, app: &mut App, snap: &Snapshot) {
     f.render_stateful_widget(table, f.area(), &mut app.workers_state);
 }
 
+fn render_proxies(f: &mut Frame, snap: &Snapshot) {
+    let header = Row::new(vec!["NAME", "TYPE", "LATENCY", "EGRESS IP", "HEALTH", "EXPOSE"])
+        .style(Style::default().add_modifier(Modifier::BOLD));
+    let rows: Vec<Row> = snap
+        .proxies
+        .iter()
+        .map(|p| {
+            let get = |k: &str| p.get(k).and_then(|v| v.as_str()).unwrap_or("-").to_string();
+            let latency = p
+                .get("latency_ms")
+                .and_then(|v| v.as_u64())
+                .map(|v| format!("{v}ms"))
+                .unwrap_or_else(|| "-".into());
+            let healthy = p.get("healthy").and_then(|v| v.as_bool()).unwrap_or(false);
+            Row::new(vec![
+                get("name"),
+                get("type"),
+                latency,
+                get("egress_ip"),
+                if healthy { "UP".into() } else { "DOWN".into() },
+                get("expose"),
+            ])
+            .style(Style::default().fg(if healthy { Color::Green } else { Color::Red }))
+        })
+        .collect();
+    let table = Table::new(rows, [Constraint::Percentage(16), Constraint::Percentage(10), Constraint::Percentage(12), Constraint::Percentage(18), Constraint::Percentage(10), Constraint::Percentage(34)])
+        .header(header)
+        .block(Block::default().borders(Borders::ALL).title(" Proxies (F3) — latency + egress IP "));
+    f.render_widget(table, f.area());
+}
+
 fn render_logs(f: &mut Frame, app: &App, snap: &Snapshot) {
     let job = app.selected_job(snap);
     let title = job
@@ -183,7 +223,7 @@ fn render_logs(f: &mut Frame, app: &App, snap: &Snapshot) {
 fn render_footer(f: &mut Frame, snap: &Snapshot) {
     let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(f.area());
     f.render_widget(
-        Paragraph::new("F1 Jobs  F2 Workers  F5 Logs  ↑/↓ select  q/F10 quit")
+        Paragraph::new("F1 Jobs  F2 Workers  F3 Proxies  F5 Logs  ↑/↓ select  q/F10 quit")
             .style(Style::default().fg(Color::DarkGray)),
         chunks[1],
     );
@@ -200,6 +240,7 @@ fn render(f: &mut Frame, app: &mut App, snap: &Snapshot) {
     match app.mode {
         Mode::Jobs => render_jobs(f, app, snap),
         Mode::Workers => render_workers(f, app, snap),
+        Mode::Proxies => render_proxies(f, snap),
         Mode::Logs => render_logs(f, app, snap),
     }
     render_footer(f, snap);
@@ -240,6 +281,7 @@ fn main() -> Result<(), String> {
                 KeyCode::Char('q') | KeyCode::F(10) => break Ok(()),
                 KeyCode::F(1) => app.mode = Mode::Jobs,
                 KeyCode::F(2) => app.mode = Mode::Workers,
+                KeyCode::F(3) => app.mode = Mode::Proxies,
                 KeyCode::F(5) => app.mode = Mode::Logs,
                 KeyCode::Up => {
                     app.selected = app.selected.saturating_sub(1);

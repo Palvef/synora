@@ -63,6 +63,7 @@ impl Store {
             synora_core::ProviderConfig::Rsync { .. } => "rsync",
             synora_core::ProviderConfig::Script { .. } => "script",
             synora_core::ProviderConfig::Docker { .. } => "docker",
+            synora_core::ProviderConfig::Http { .. } => "http",
         };
         let provider_config =
             serde_json::to_string(&job.provider).map_err(|e| DbError::Sql(e.to_string()))?;

@@ -81,6 +81,18 @@ async fn main() -> Result<(), String> {
         )
         .init();
 
+    let run_storage = engine::RunStorageCtx::from_config(&cfg);
+    let netroute = if cfg.proxies.is_empty() && cfg.egresses.is_empty() {
+        None
+    } else {
+        Some(std::sync::Arc::new(netroute::NetRoute::new(
+            &cfg.proxies,
+            &cfg.proxy_groups,
+            &cfg.egresses,
+            &cfg.egress_groups,
+            cfg.daemon.default_proxy.as_deref(),
+        )))
+    };
     let worker_cfg: WorkerConfig = cfg
         .extras
         .get("worker")
@@ -186,6 +198,8 @@ async fn main() -> Result<(), String> {
                         let log_dir = PathBuf::from(&worker_cfg.log_dir);
                         let worker_id = worker_id.clone();
                         let cancel = CancellationToken::new();
+                        let run_storage = run_storage.clone();
+                        let netroute = netroute.clone();
                         running.lock().await.insert(
                             a.run_id.clone(),
                             Running { cancel: cancel.clone() },
@@ -199,6 +213,8 @@ async fn main() -> Result<(), String> {
                                 &worker_id,
                                 cancel,
                                 &log_dir,
+                                run_storage.as_ref(),
+                                netroute.as_deref(),
                             )
                             .await;
                             let req = outcome_to_complete(&job, &outcome);

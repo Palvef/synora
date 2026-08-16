@@ -11,6 +11,45 @@ use std::sync::Arc;
 use synora_core::job::{JobSpec, JobStatus};
 use synora_core::Metrics;
 
+/// Storage/snapshot context passed to every run (built from config).
+#[derive(Clone)]
+pub struct RunStorageCtx {
+    pub manager: Option<std::sync::Arc<storage::StorageManager>>,
+    pub storages: std::collections::HashMap<String, config::StorageConfig>,
+    pub retention: synora_core::RetentionPolicy,
+    pub min_free_bytes: Option<u64>,
+}
+
+impl RunStorageCtx {
+    pub fn from_config(cfg: &ResolvedConfig) -> Option<RunStorageCtx> {
+        if cfg.storages.is_empty()
+            && cfg.snapshot_retention == synora_core::RetentionPolicy::default()
+            && cfg.min_free_bytes.is_none()
+        {
+            return None;
+        }
+        Some(RunStorageCtx {
+            manager: Some(std::sync::Arc::new(storage::StorageManager::new(&cfg.storages))),
+            storages: cfg.storages.clone(),
+            retention: cfg.snapshot_retention.clone(),
+            min_free_bytes: cfg.min_free_bytes,
+        })
+    }
+
+    /// The storage entry whose mountpoint matches the job's storage path.
+    pub fn storage_for(&self, job: &JobSpec) -> Option<(&String, &config::StorageConfig)> {
+        let path = job.storage.to_string_lossy();
+        self.storages
+            .iter()
+            .find(|(_, c)| {
+                c.mountpoint
+                    .as_ref()
+                    .map(|m| m.to_string_lossy() == path)
+                    .unwrap_or(false)
+            })
+    }
+}
+
 /// Worker id used for runs executed locally by the standalone engine.
 pub const LOCAL_WORKER: &str = "local";
 
@@ -35,6 +74,13 @@ pub struct Engine {
     active_runs: std::sync::Mutex<HashMap<String, tokio_util::sync::CancellationToken>>,
     /// Source path + overrides for `reload()`.
     config_source: std::sync::RwLock<Option<(PathBuf, CliOverrides)>>,
+    /// Storage/snapshot runtime (None when no storage sections configured).
+    pub run_storage: Option<RunStorageCtx>,
+    /// Consecutive-failure counters per job (alert dedup, spec §91).
+    pub failure_streak: std::sync::Mutex<std::collections::HashMap<String, u32>>,
+    /// Network routing (proxies/egress). Built when any proxy/egress config
+    /// exists; None = pure direct mode.
+    pub netroute: Option<std::sync::Arc<netroute::NetRoute>>,
     /// Worker picker for distributed dispatch (None = standalone/local).
     planner: std::sync::RwLock<Option<WorkerPlanner>>,
     shutdown: Arc<AtomicBool>,
@@ -81,6 +127,18 @@ impl Engine {
             .await
             .map_err(|e| e.to_string())?;
 
+        let run_storage = RunStorageCtx::from_config(&cfg);
+        let netroute = if cfg.proxies.is_empty() && cfg.egresses.is_empty() {
+            None
+        } else {
+            Some(std::sync::Arc::new(netroute::NetRoute::new(
+                &cfg.proxies,
+                &cfg.proxy_groups,
+                &cfg.egresses,
+                &cfg.egress_groups,
+                cfg.daemon.default_proxy.as_deref(),
+            )))
+        };
         let mut job_locks = HashMap::new();
         let mut live_jobs = HashMap::new();
         for j in &cfg.jobs {
@@ -98,6 +156,9 @@ impl Engine {
             active_runs: std::sync::Mutex::new(HashMap::new()),
             config_source: std::sync::RwLock::new(None),
             planner: std::sync::RwLock::new(None),
+            run_storage,
+            netroute,
+            failure_streak: std::sync::Mutex::new(std::collections::HashMap::new()),
             shutdown: Arc::new(AtomicBool::new(false)),
         });
         Ok(engine)
@@ -204,12 +265,52 @@ impl Engine {
     }
 
     /// Dispatch one job: create a QUEUED run row. Serialized per job.
+    /// Dependencies (spec §93): a dep whose latest run is not Success marks
+    /// this run SKIPPED (a terminal status — it never executes).
     pub async fn dispatch(&self, job_name: &str) -> Result<String, String> {
         let job = self
             .job(job_name)
             .ok_or_else(|| format!("unknown job `{job_name}`"))?;
         if !job.enabled {
             return Err(format!("job `{job_name}` is disabled"));
+        }
+        for dep in &job.depends_on {
+            let dep_ok = self
+                .store
+                .run_history(dep, 1)
+                .await
+                .map(|runs| runs.first().map(|r| r.status == JobStatus::Success).unwrap_or(false))
+                .unwrap_or(false);
+            if !dep_ok {
+                let run_id = synora_core::RunId::new().to_string();
+                let _ = self
+                    .store
+                    .create_run(&run_id, job_name, None, JobStatus::Skipped)
+                    .await;
+                let _ = self
+                    .store
+                    .finish_run(
+                        &run_id,
+                        JobStatus::Skipped,
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(&format!("dependency `{dep}` has not succeeded")),
+                        0,
+                    )
+                    .await;
+                let _ = self
+                    .store
+                    .insert_event(
+                        Some(job_name),
+                        Some(&run_id),
+                        "WARN",
+                        &format!("skipped: dependency `{dep}` has not succeeded"),
+                    )
+                    .await;
+                return Ok(run_id);
+            }
         }
         let lock = self
             .job_locks
@@ -267,6 +368,52 @@ impl Engine {
             self.tick().await;
         }
         Ok(())
+    }
+
+    /// Send a webhook notification (spec §90) with alert dedup (spec §91):
+    /// consecutive failures alert once after the threshold, then RECOVERED.
+    pub async fn notify(&self, event: &str, job: Option<&str>, message: &str) {
+        let Some(url) = self.cfg.notifications.webhook_url.clone() else {
+            return;
+        };
+        let dedup_key = job.unwrap_or("");
+        let (send, effective_event) = {
+            let mut streaks = self.failure_streak.lock().unwrap();
+            match event {
+                "sync_failed" => {
+                    let n = streaks.entry(dedup_key.to_string()).or_insert(0);
+                    *n += 1;
+                    // dedup: only alert once, at the threshold (spec §91)
+                    (*n == self.cfg.notifications.alert_after_failures.max(1), event)
+                }
+                "sync_success" => {
+                    let was_alerted = streaks.remove(dedup_key).unwrap_or(0)
+                        >= self.cfg.notifications.alert_after_failures.max(1);
+                    (was_alerted, if was_alerted { "sync_recovered" } else { event })
+                }
+                _ => (true, event),
+            }
+        };
+        if !send {
+            return;
+        }
+        let payload = serde_json::json!({
+            "event": effective_event,
+            "job": job,
+            "message": message,
+            "ts": unix_now(),
+        });
+        let client = match reqwest::Client::builder().timeout(std::time::Duration::from_secs(5)).build() {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("webhook client failed: {e}");
+                return;
+            }
+        };
+        match client.post(&url).json(&payload).send().await {
+            Ok(_) => {}
+            Err(e) => tracing::warn!("webhook to {url} failed: {e}"),
+        }
     }
 
     /// One scheduler tick: retry requeue, due dispatch, QUEUED execution,
@@ -349,14 +496,36 @@ impl Engine {
                 .execute("UPDATE jobs SET enabled = 0 WHERE name = ?", &[name.clone().into()])
                 .await;
         }
-        {
+        let audit: Vec<(String, Option<String>, Option<String>)> = {
             let mut jobs = self.live_jobs.write().unwrap();
+            let mut rows = Vec::new();
             for job in &new_cfg.jobs {
+                let before = jobs
+                    .get(&job.name)
+                    .map(|old| serde_json::to_string(old).unwrap_or_default());
                 jobs.insert(job.name.clone(), job.clone());
+                if before.is_some() {
+                    rows.push((
+                        job.name.clone(),
+                        Some(before.unwrap_or_default()),
+                        serde_json::to_string(job).ok(),
+                    ));
+                }
             }
             for name in &removed {
                 jobs.remove(name);
             }
+            rows
+        };
+        for (name, before, after) in audit {
+            let _ = self
+                .store
+                .db()
+                .execute(
+                    "INSERT INTO config_history (ts, job_name, before_json, after_json) VALUES (?,?,?,?)",
+                    &[now.into(), name.into(), before.into(), after.into()],
+                )
+                .await;
         }
         let changed = new_cfg.jobs.len() + removed.len();
         let _ = self

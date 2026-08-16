@@ -87,6 +87,14 @@ pub enum ProviderConfig {
         #[serde(default)]
         keep_container: bool,
     },
+    Http {
+        /// Directory-listing parser name (spec §14): nginx|apache|caddy|s3|
+        /// directory-listing|fallback.
+        parser: String,
+        /// Delete local files absent from the index (like rsync --delete).
+        #[serde(default)]
+        delete: bool,
+    },
 }
 
 /// What to do when a scheduled time was missed because the machine was offline (spec §7).

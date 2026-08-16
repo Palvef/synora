@@ -273,6 +273,11 @@ impl Client {
         self.json(reqwest::Method::GET, &path, None::<&()>).await
     }
 
+    pub async fn list_proxies(&self) -> Result<serde_json::Value, ApiError> {
+        self.json(reqwest::Method::GET, &format!("{API_V1}/proxies"), None::<&()>)
+            .await
+    }
+
     pub async fn job_history(&self, job: &str) -> Result<Vec<RunDTO>, ApiError> {
         self.json(reqwest::Method::GET, &format!("{API_V1}/jobs/{job}/history"), None::<&()>)
             .await

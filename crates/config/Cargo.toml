@@ -13,3 +13,4 @@ glob.workspace = true
 time.workspace = true
 regex.workspace = true
 time-tz.workspace = true
+parser.workspace = true

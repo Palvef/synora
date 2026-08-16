@@ -42,6 +42,19 @@ async fn main() -> Result<(), String> {
         )
         .init();
 
+    // Proxy/egress probing (user: per-proxy latency + egress IP, default CF
+    // egress for probe traffic). Built before cfg moves into the engine.
+    let netroute = if cfg.proxies.is_empty() && cfg.egresses.is_empty() {
+        None
+    } else {
+        Some(std::sync::Arc::new(netroute::NetRoute::new(
+            &cfg.proxies,
+            &cfg.proxy_groups,
+            &cfg.egresses,
+            &cfg.egress_groups,
+            cfg.daemon.default_proxy.as_deref(),
+        )))
+    };
     let engine = Engine::new(cfg, &PathBuf::from("migrations")).await?;
     engine.set_config_source(path.clone(), overrides);
     engine.sync_config().await?;
@@ -50,6 +63,22 @@ async fn main() -> Result<(), String> {
     let picker = router::WorkerPicker::new(engine.clone());
     let picker_clone = picker.clone();
     engine.set_planner(move |job| picker_clone.pick(job));
+
+    // (netroute is built above, before cfg moves into the engine)
+    let _ = netroute;
+    let probes: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<String, netroute::ProxyProbe>>> =
+        std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+    if let Some(nr) = netroute.clone() {
+        let probes = probes.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                tick.tick().await;
+                let results = nr.probe_all().await;
+                *probes.write().unwrap() = results;
+            }
+        });
+    }
 
     // Periodic refresh: worker snapshot + reaper (lease expiry → LOST,
     // heartbeat timeout → OFFLINE, spec §28–§29).
@@ -106,11 +135,36 @@ async fn main() -> Result<(), String> {
                     &[],
                 )
                 .await;
+            // Worker lifecycle gauges (spec §36).
+            if let Ok(rows) = reaper_engine.store.list_workers().await {
+                for row in &rows {
+                    let cell = |n: &str| row.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone());
+                    let id = cell("id").and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
+                    let status = cell("status").and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
+                    let value = match status.as_str() {
+                        "ONLINE" => 1.0,
+                        "DRAINING" => 2.0,
+                        "MAINTENANCE" => 3.0,
+                        _ => 0.0,
+                    };
+                    reaper_engine.metrics.set_gauge(
+                        "synora_worker_status",
+                        &[("worker", id.as_str())],
+                        value,
+                    );
+                    let running = cell("jobs_running").and_then(|v| v.as_i64()).unwrap_or(0);
+                    reaper_engine.metrics.set_gauge(
+                        "synora_worker_jobs_running",
+                        &[("worker", id.as_str())],
+                        running as f64,
+                    );
+                }
+            }
             reaper_picker.refresh().await;
         }
     });
 
-    let (router, state) = router::build(engine.clone(), picker.clone());
+    let (router, state) = router::build(engine.clone(), picker.clone(), probes.clone());
     let listen = engine.cfg.api.listen;
     let tls = engine.cfg.api.tls.clone();
     // Bind BEFORE spawning: a taken port must fail startup, not run silently

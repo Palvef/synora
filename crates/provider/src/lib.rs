@@ -7,19 +7,32 @@
 //! enum arm becomes a `Custom(Box<dyn ...>)` or the trait gets boxed futures.
 
 pub mod docker;
+pub mod http;
 pub mod rsync;
 pub mod script;
 
 
 /// Spawn the child as its own process-group leader so the whole tree
 /// (shell + grandchildren) can be killed on cancel (spec §74).
-pub(crate) fn spawn_group(cmd: &mut tokio::process::Command) -> Result<tokio::process::Child, ProviderError> {
+/// Lightweight handle the engine provides; the provider attaches children.
+pub trait CgroupScopeRef: Send + Sync {
+    fn attach(&self, pid: u32);
+}
+
+pub(crate) fn spawn_group(
+    cmd: &mut tokio::process::Command,
+    ctx: &SyncContext,
+) -> Result<tokio::process::Child, ProviderError> {
     // process_group comes from CommandExt on unix; the import is needed inside
     // the function body.
     #[allow(unused_imports)]
     use std::os::unix::process::CommandExt;
     cmd.process_group(0);
-    cmd.spawn().map_err(|e| ProviderError::Spawn(e.to_string()))
+    let child = cmd.spawn().map_err(|e| ProviderError::Spawn(e.to_string()))?;
+    if let Some(cg) = &ctx.cgroup {
+        cg.attach(child.id().unwrap_or(0));
+    }
+    Ok(child)
 }
 
 /// Kill the child's whole process group and reap it.
@@ -63,6 +76,16 @@ pub struct SyncContext {
     /// Cancel signal: providers must kill their child process on cancel
     /// (timeout / `synora stop`).
     pub cancel: tokio_util::sync::CancellationToken,
+    /// Optional cgroup scope (user-requested resource limits): providers
+    /// attach their child right after spawn.
+    pub cgroup: Option<std::sync::Arc<dyn crate::CgroupScopeRef>>,
+    /// Resolved proxy environment (empty = direct — mirror sync defaults to
+    /// the machine's own network).
+    pub proxy_env: Vec<(String, String)>,
+    /// Resolved egress source bind address (rsync --address etc.).
+    pub egress_address: Option<String>,
+    /// Resolved address family for the connection: ipv4 | ipv6 | any.
+    pub family: String,
 }
 
 /// Result of one provider run (spec §17: size comes from the provider when it
@@ -116,6 +139,7 @@ pub enum Provider {
     Rsync(rsync::RsyncProvider),
     Script(script::ScriptProvider),
     Docker(docker::DockerProvider),
+    Http(http::HttpProvider),
 }
 
 impl Provider {
@@ -124,6 +148,7 @@ impl Provider {
             Provider::Rsync(_) => "rsync",
             Provider::Script(_) => "script",
             Provider::Docker(_) => "docker",
+            Provider::Http(_) => "http",
         }
     }
 
@@ -132,6 +157,7 @@ impl Provider {
             Provider::Rsync(p) => p.sync(ctx).await,
             Provider::Script(p) => p.sync(ctx).await,
             Provider::Docker(p) => p.sync(ctx).await,
+            Provider::Http(p) => p.sync(ctx).await,
         }
     }
 }
@@ -160,5 +186,11 @@ pub fn build_provider(job: &JobSpec) -> Result<Provider, ProviderError> {
             volumes: volumes.clone(),
             keep_container: *keep_container,
         })),
+        synora_core::ProviderConfig::Http { parser, delete } => {
+            Ok(Provider::Http(http::HttpProvider {
+                parser: parser.clone(),
+                delete: *delete,
+            }))
+        }
     }
 }

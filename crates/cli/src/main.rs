@@ -202,6 +202,7 @@ fn print_summary(cfg: &config::ResolvedConfig, path: &std::path::Path) {
             synora_core::ProviderConfig::Rsync { .. } => "rsync",
             synora_core::ProviderConfig::Script { .. } => "script",
             synora_core::ProviderConfig::Docker { .. } => "docker",
+            synora_core::ProviderConfig::Http { .. } => "http",
         };
         println!(
             "  {:<20} {:<24} {:>8} {:>9} {}",

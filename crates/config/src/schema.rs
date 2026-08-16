@@ -159,6 +159,10 @@ pub struct JobDoc {
     pub volumes: Vec<String>,
     #[serde(default = "no")]
     pub keep_container: bool,
+    // http (Phase 5)
+    pub parser: Option<String>,
+    #[serde(default = "no")]
+    pub delete: bool,
     // common
     pub upstream: Option<String>,
     pub storage: Option<String>,
@@ -168,8 +172,9 @@ pub struct JobDoc {
     /// sync goes direct; family/bind are the knobs).
     #[serde(default = "default_family")]
     pub family: String,
-    #[serde(default = "default_timeout")]
-    pub timeout: TomlDuration,
+    /// None = no limit (user requirement: runs are unlimited unless a
+    /// timeout is explicitly configured). Accepts seconds or "1m"/"1h"/"1d".
+    pub timeout: Option<TomlDuration>,
     #[serde(default = "default_retry")]
     pub retry: u32,
     #[serde(default = "default_retry_delay")]
@@ -292,9 +297,6 @@ fn default_tunasync_json() -> String {
 }
 fn default_role() -> String {
     "admin".into()
-}
-fn default_timeout() -> TomlDuration {
-    TomlDuration::Seconds(7200)
 }
 fn default_retry() -> u32 {
     3

@@ -22,6 +22,13 @@ impl DockerProvider {
         if !self.keep_container {
             cmd.arg("--rm");
         }
+        // Resource limits via docker's own cgroup integration.
+        if let Some(mem) = ctx.job.memory_limit {
+            cmd.arg("--memory").arg(mem.to_string());
+        }
+        if let Some(cpu) = ctx.job.cpu_limit {
+            cmd.arg("--cpus").arg(format!("{cpu}"));
+        }
         // Container convention (spec §77): host storage → /data.
         let host_storage = ctx
             .storage
@@ -33,6 +40,9 @@ impl DockerProvider {
         }
         for e in &self.env {
             cmd.arg("-e").arg(e);
+        }
+        for (k, v) in &ctx.proxy_env {
+            cmd.arg("-e").arg(format!("{k}={v}"));
         }
         // SYNORA_* env for scripts inside the container.
         cmd.arg("-e").arg(format!("SYNORA_JOB={}", ctx.job_name));
@@ -48,7 +58,7 @@ impl DockerProvider {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let mut child = spawn_group(&mut cmd).map_err(|e| ProviderError::Spawn(format!("docker run: {e}")))?;
+        let mut child = spawn_group(&mut cmd, ctx).map_err(|e| ProviderError::Spawn(format!("docker run: {e}")))?;
         // Read pipes and wait for exit concurrently with cancellation: a
         // long-running child keeps its pipes open, so a plain read_to_end
         // before the select would swallow cancels until the child exits.

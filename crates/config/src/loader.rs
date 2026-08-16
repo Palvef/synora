@@ -682,9 +682,11 @@ fn extra_table<'a>(
     root.extras.get(key).and_then(|v| v.as_table())
 }
 
-fn parse_proxies(
-    root: &RootDoc,
-) -> Result<(HashMap<String, ProxyConfig>, HashMap<String, ProxyGroupConfig>), ConfigError> {
+type ProxyMap = HashMap<String, ProxyConfig>;
+type ProxyGroupMap = HashMap<String, ProxyGroupConfig>;
+type EgressMap = HashMap<String, EgressGroupConfig>;
+
+fn parse_proxies(root: &RootDoc) -> Result<(ProxyMap, ProxyGroupMap), ConfigError> {
     let mut proxies = HashMap::new();
     if let Some(table) = extra_table(root, "proxy") {
         for (name, value) in table {
@@ -776,9 +778,7 @@ fn parse_env_table(t: &toml::value::Table) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
-fn parse_egress(
-    root: &RootDoc,
-) -> Result<(Vec<EgressConfig>, HashMap<String, EgressGroupConfig>), ConfigError> {
+fn parse_egress(root: &RootDoc) -> Result<(Vec<EgressConfig>, EgressMap), ConfigError> {
     let mut egresses = Vec::new();
     if let Some(arr) = root.extras.get("egress").and_then(|v| v.as_array()) {
         for item in arr {
@@ -892,17 +892,14 @@ fn parse_cgroup(root: &RootDoc) -> Result<Option<CgroupConfig>, ConfigError> {
     }
 }
 
-fn parse_misc(
-    root: &RootDoc,
-) -> Result<
-    (
-        synora_core::RetentionPolicy,
-        NotificationConfig,
-        HashMap<String, Vec<String>>,
-        Option<u64>,
-    ),
-    ConfigError,
-> {
+type MiscSections = (
+    synora_core::RetentionPolicy,
+    NotificationConfig,
+    HashMap<String, Vec<String>>,
+    Option<u64>,
+);
+
+fn parse_misc(root: &RootDoc) -> Result<MiscSections, ConfigError> {
     let retention = extra_table(root, "snapshot")
         .and_then(|t| t.get("policy").and_then(|v| v.as_table()))
         .map(|t| synora_core::RetentionPolicy {
@@ -997,12 +994,14 @@ fn resolve_job(doc: &JobDoc, file: &str, line: usize) -> Result<JobSpec, ConfigE
     }
 
     let timeout = match &doc.timeout {
-        TomlDuration::Seconds(s) => Duration::seconds(*s as i64),
-        TomlDuration::Human(s) => Duration::seconds(
+        Some(TomlDuration::Seconds(s)) => Duration::seconds(*s as i64),
+        Some(TomlDuration::Human(s)) => Duration::seconds(
             schedule::parse_duration_human(s)
                 .map_err(|e| err(format!("invalid timeout: {e}")))?
                 .whole_seconds(),
         ),
+        // No timeout configured = unlimited.
+        None => Duration::seconds(i64::MAX / 4),
     };
     let retry_delay = schedule::parse_duration_human(&doc.retry_delay)
         .map_err(|e| err(format!("invalid retry_delay: {e}")))?;
@@ -1260,8 +1259,21 @@ fn resolve_provider(
                 keep_container: doc.keep_container,
             })
         }
+        "http" => {
+            let parser = doc
+                .parser
+                .as_deref()
+                .ok_or_else(|| err("provider = \"http\" requires `parser`".into()))?;
+            if parser::parser_for(parser).is_none() {
+                return Err(err(format!("unknown parser `{parser}`")));
+            }
+            Ok(ProviderConfig::Http {
+                parser: parser.to_string(),
+                delete: doc.delete,
+            })
+        }
         other => Err(err(format!(
-            "invalid provider `{other}`: expected rsync|script|docker"
+            "invalid provider `{other}`: expected rsync|script|docker|http"
         ))),
     }
 }

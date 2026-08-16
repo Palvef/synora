@@ -20,6 +20,8 @@ use synora_core::job::{JobSpec, JobStatus};
 pub struct AppState {
     pub engine: Arc<Engine>,
     pub picker: WorkerPicker,
+    pub proxy_probes:
+        Arc<RwLock<std::collections::HashMap<String, netroute::ProxyProbe>>>,
 }
 
 /// Snapshot of workers for sync dispatch decisions, refreshed by the reaper
@@ -111,10 +113,15 @@ impl WorkerPicker {
     }
 }
 
-pub fn build(engine: Arc<Engine>, picker: WorkerPicker) -> (Router, AppState) {
+pub fn build(
+    engine: Arc<Engine>,
+    picker: WorkerPicker,
+    proxy_probes: Arc<RwLock<std::collections::HashMap<String, netroute::ProxyProbe>>>,
+) -> (Router, AppState) {
     let state = AppState {
         engine,
         picker: picker.clone(),
+        proxy_probes,
     };
     let authed = Router::new()
         .route("/workers/register", post(register))
@@ -129,16 +136,115 @@ pub fn build(engine: Arc<Engine>, picker: WorkerPicker) -> (Router, AppState) {
         .route("/jobs/{name}/history", get(history))
         .route("/jobs/{name}/logs", get(job_logs))
         .route("/workers", get(list_workers))
+        .route("/proxies", get(list_proxies))
         .route("/reload", post(reload))
         .with_state(state.clone())
         .layer(axum::middleware::from_fn_with_state(state.clone(), crate::auth::require_auth));
 
-    let router = Router::new()
+    let json_paths = (
+        state.engine.cfg.api.synora_json_path.clone(),
+        state.engine.cfg.api.tunasync_json_path.clone(),
+    );
+    let mut router = Router::new()
         .nest(API_V1, authed)
         .route("/metrics", get(metrics))
-        .route("/healthz", get(|| async { "ok" }))
-        .with_state(state.clone());
-    (router, state)
+        .route("/healthz", get(|| async { "ok" }));
+    // Status JSON for mirror-web frontends (paths configurable, spec §88–§89).
+    if !json_paths.0.is_empty() {
+        router = router.route(&json_paths.0, get(synora_json));
+    }
+    if !json_paths.1.is_empty() {
+        router = router.route(&json_paths.1, get(tunasync_json));
+    }
+    (router.with_state(state.clone()), state)
+}
+
+/// Native status JSON (spec §89).
+async fn synora_json(State(state): State<AppState>) -> axum::Json<serde_json::Value> {
+    axum::Json(serde_json::json!({
+        "jobs": status_entries(&state).await,
+    }))
+}
+
+/// tunasync-compatible JSON for mirror-web drop-in (user requirement).
+/// Format mirrors TUNA's /static/tunasync.json (a bare array of mirrors).
+async fn tunasync_json(State(state): State<AppState>) -> axum::Json<serde_json::Value> {
+    let entries = status_entries(&state).await;
+    axum::Json(serde_json::Value::Array(
+        entries
+            .into_iter()
+            .map(|e| {
+                serde_json::json!({
+                    "name": e.get("name"),
+                    "status": e.get("status"),
+                    "upstream": e.get("upstream"),
+                    "size": e.get("size_human"),
+                    "last_started_ts": e.get("last_started"),
+                    "last_started": e.get("last_started_human"),
+                    "last_ended_ts": e.get("last_finished"),
+                    "last_ended": e.get("last_finished_human"),
+                    "last_update_ts": e.get("last_finished"),
+                    "last_update": e.get("last_finished_human"),
+                    "next_schedule_ts": e.get("next_run"),
+                    "next_schedule": e.get("next_run_human"),
+                    "is_master": true,
+                })
+            })
+            .collect(),
+    ))
+}
+
+/// Shared status collection for both JSON shapes.
+async fn status_entries(state: &AppState) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    if let (Ok(statuses), Ok(schedules)) = (
+        state.engine.store.job_status_list().await,
+        state.engine.store.all_schedules().await,
+    ) {
+        for (name, status) in statuses {
+            let job = state.engine.job(&name);
+            let last = state
+                .engine
+                .store
+                .run_history(&name, 1)
+                .await
+                .ok()
+                .and_then(|mut v| v.pop());
+            let next_run = schedules.iter().find(|(n, _)| *n == name).and_then(|(_, r)| r.next_run);
+            let size = state
+                .engine
+                .store
+                .repository_size(
+                    &job.as_ref().map(|j| j.storage.display().to_string()).unwrap_or_default(),
+                )
+                .await
+                .ok()
+                .flatten();
+            out.push(serde_json::json!({
+                "name": name,
+                "status": format!("{status:?}").to_lowercase(),
+                "worker": last.as_ref().and_then(|r| r.worker_id.clone()),
+                "upstream": job.as_ref().and_then(|j| j.upstream.clone()),
+                "size_bytes": size,
+                "size_human": size.map(|s| synora_core::human_size(s as u64)),
+                "last_started": last.as_ref().and_then(|r| r.started_at),
+                "last_finished": last.as_ref().and_then(|r| r.finished_at),
+                "last_started_human": last.as_ref().and_then(|r| r.started_at).map(fmt_local),
+                "last_finished_human": last.as_ref().and_then(|r| r.finished_at).map(fmt_local),
+                "next_run": next_run,
+                "next_run_human": next_run.map(fmt_local),
+            }));
+        }
+    }
+    out
+}
+
+fn fmt_local(ts: i64) -> String {
+    time::OffsetDateTime::from_unix_timestamp(ts)
+        .map(|t| t.to_offset(time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC)))
+        .ok()
+        .and_then(|t| t.format(&time::format_description::well_known::Rfc3339).ok())
+        .unwrap_or_else(|| "-".into())
 }
 
 // ---------------------------------------------------------------------------
@@ -205,6 +311,18 @@ async fn heartbeat(
         .touch_heartbeat(&worker_id, body.jobs_running, &body.status)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    state.engine.metrics.set_gauge(
+        "synora_worker_jobs_running",
+        &[("worker", worker_id.as_str())],
+        body.jobs_running as f64,
+    );
+    // Lifecycle gauge (spec §36): 1=ONLINE, 0=OFFLINE, 2=DRAINING, 3=MAINTENANCE.
+    // Busy/idle is a separate dimension: synora_worker_jobs_running.
+    state.engine.metrics.set_gauge(
+        "synora_worker_status",
+        &[("worker", worker_id.as_str())],
+        1.0,
+    );
 
     let mut response = HeartbeatResponse {
         assignment: None,
@@ -321,6 +439,13 @@ async fn complete(
                     "synora_repository_size_bytes",
                     &[("repository", job.name.as_str())],
                     size as f64,
+                );
+            }
+            if let Some(bytes) = body.bytes_transferred {
+                state.engine.metrics.inc_counter(
+                    "synora_job_bytes_transferred_total",
+                    &[("job", job.name.as_str()), ("worker", auth.name.as_str())],
+                    bytes as f64,
                 );
             }
         }
@@ -469,6 +594,7 @@ async fn list_jobs(
                     synora_core::ProviderConfig::Rsync { .. } => "rsync",
                     synora_core::ProviderConfig::Script { .. } => "script",
                     synora_core::ProviderConfig::Docker { .. } => "docker",
+                    synora_core::ProviderConfig::Http { .. } => "http",
                 })
                 .unwrap_or("")
                 .to_string(),
@@ -601,6 +727,40 @@ async fn list_workers(
         });
     }
     Ok(axum::Json(out))
+}
+
+/// Proxy list with probe results (latency + detected egress IP), for the TUI
+/// and operator tooling.
+async fn list_proxies(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthUser>,
+) -> Result<axum::Json<serde_json::Value>, StatusCode> {
+    require(&auth, "workers.read")?;
+    let proxies: Vec<serde_json::Value> = state
+        .engine
+        .cfg
+        .proxies
+        .iter()
+        .map(|(name, p)| {
+            let probe = state.proxy_probes.read().unwrap().get(name).cloned().unwrap_or_default();
+            serde_json::json!({
+                "name": name,
+                "type": match &p.kind {
+                    config::ProxyKind::Direct => "direct",
+                    config::ProxyKind::Forward { url, .. } if url.starts_with("socks5h://") => "socks5h",
+                    config::ProxyKind::Forward { .. } => "http",
+                    config::ProxyKind::Command { .. } => "command",
+                },
+                "expose": p.expose,
+                "healthcheck": p.healthcheck,
+                "latency_ms": probe.latency_ms,
+                "egress_ip": probe.egress_ip,
+                "healthy": probe.healthy,
+                "last_probe_at": probe.last_probe_at,
+            })
+        })
+        .collect();
+    Ok(axum::Json(serde_json::json!({ "proxies": proxies })))
 }
 
 async fn reload(
