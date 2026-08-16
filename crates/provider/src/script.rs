@@ -10,6 +10,8 @@ use std::process::Stdio;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
+use crate::{cancelled_after_wait, kill_group, spawn_group};
+
 pub struct ScriptProvider {
     pub command: String,
 }
@@ -62,7 +64,7 @@ impl ScriptProvider {
         if let Some(e) = &ctx.egress {
             cmd.env("SYNORA_EGRESS", e);
         }
-        cmd.env("SYNORA_RUN_ID", ctx.run_id.to_string());
+        cmd.env("SYNORA_RUN_ID", &ctx.run_id);
         // tunasync-scripts compatibility (alignment decision).
         cmd.env("TUNASYNC_MIRROR_NAME", &ctx.job_name);
         if let Some(up) = &ctx.upstream {
@@ -73,27 +75,44 @@ impl ScriptProvider {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let mut child = cmd
-            .spawn()
+        let mut child = spawn_group(&mut cmd)
             .map_err(|e| ProviderError::Spawn(format!("`{}`: {e}", self.command)))?;
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        if let Some(mut s) = child.stdout.take() {
-            let _ = s.read_to_end(&mut stdout).await;
+        // Read pipes and wait for exit concurrently with cancellation: a
+        // long-running child keeps its pipes open, so a plain read_to_end
+        // before the select would swallow cancels until the child exits.
+        let stdout_pipe = child.stdout.take();
+        let stderr_pipe = child.stderr.take();
+        let read_fut = async {
+            let mut out = Vec::new();
+            let mut err = Vec::new();
+            if let Some(mut s) = stdout_pipe {
+                let _ = s.read_to_end(&mut out).await;
+            }
+            if let Some(mut s) = stderr_pipe {
+                let _ = s.read_to_end(&mut err).await;
+            }
+            (out, err)
+        };
+        tokio::pin!(read_fut);
+        let stdout: Vec<u8>;
+        let stderr: Vec<u8>;
+        tokio::select! {
+            _ = ctx.cancel.cancelled() => {
+                kill_group(&mut child).await;
+                return Err(ProviderError::Cancelled);
+            }
+            r = &mut read_fut => {
+                (stdout, stderr) = r;
+            }
         }
-        if let Some(mut s) = child.stderr.take() {
-            let _ = s.read_to_end(&mut stderr).await;
-        }
-        // Kill the child on cancel (timeout / synora stop) — a leaked child
-        // would keep writing to a closed pipe and hang forever.
         let status = tokio::select! {
             _ = ctx.cancel.cancelled() => {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                return Err(ProviderError::Timeout);
+                kill_group(&mut child).await;
+                return Err(ProviderError::Cancelled);
             }
             r = child.wait() => r.map_err(|e| ProviderError::Other(e.to_string()))?,
         };
+        cancelled_after_wait(ctx, &mut child).await?;
 
         let parsed = parse_output(&stdout);
         let result = SyncResult {

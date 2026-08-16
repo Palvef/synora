@@ -412,8 +412,12 @@ fn parse_job_table(
     file: &str,
     line: usize,
 ) -> Result<JobDoc, ConfigError> {
-    toml::from_str::<JobDoc>(&t.to_string())
-        .map_err(|e| ConfigError::new(file, line, format!("invalid job: {}", e.message())))
+    // `Table::to_string()` does not render sub-tables ([jobs.hooks] would be
+    // silently dropped) — round-trip through a DocumentMut instead.
+    let mut doc = toml_edit::DocumentMut::new();
+    *doc.as_table_mut() = t.clone();
+    toml_edit::de::from_document(doc)
+        .map_err(|e| ConfigError::new(file, line, format!("invalid job: {e}")))
 }
 
 /// Expand an include entry: glob or plain path, relative to `base`.

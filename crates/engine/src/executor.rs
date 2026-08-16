@@ -6,7 +6,6 @@ use provider::{build_provider, SyncContext};
 use std::sync::Arc;
 use synora_core::job::{JobSpec, JobStatus};
 use synora_core::state::retry_decision;
-use synora_core::RunId;
 
 /// Execute one claimed run. Called from a spawned task; drops the global
 /// semaphore permit when done.
@@ -70,8 +69,9 @@ pub async fn execute_run(
     }
 
     let cancel = tokio_util::sync::CancellationToken::new();
+    engine.register_run(&job.name, cancel.clone());
     let ctx = SyncContext {
-        run_id: RunId::new(),
+        run_id: run_id.clone(),
         job_name: job.name.clone(),
         upstream: job.upstream.clone(),
         storage: job.storage.clone(),
@@ -91,6 +91,8 @@ pub async fn execute_run(
         }
     };
 
+    run_hooks(&job.hooks.before_sync, &ctx, logger.as_mut()).await;
+
     // Timeout wraps the provider; cancel kills the child process.
     let outcome = tokio::select! {
         r = tokio::time::timeout(
@@ -106,6 +108,44 @@ pub async fn execute_run(
             }
         }
     };
+
+    run_hooks(&job.hooks.after_sync, &ctx, logger.as_mut()).await;
+
+    // Operator cancellation: CANCELLED, no retry (spec §5).
+    if matches!(outcome, Err(provider::ProviderError::Cancelled)) {
+        let ended = unix_now();
+        let duration = ended - started;
+        let _ = engine
+            .store
+            .finish_run(&run_id, JobStatus::Cancelled, None, None, None, None, Some("cancelled by operator"), duration)
+            .await;
+        engine.metrics.set_gauge(
+            "synora_job_status",
+            &[("job", job.name.as_str()), ("worker", LOCAL_WORKER)],
+            status_value(JobStatus::Cancelled),
+        );
+        engine.metrics.set_gauge(
+            "synora_job_last_end_timestamp",
+            &[("job", job.name.as_str())],
+            ended as f64,
+        );
+        engine.metrics.set_gauge(
+            "synora_job_duration_seconds",
+            &[("job", job.name.as_str())],
+            duration as f64,
+        );
+        if let Some(l) = logger.as_mut() {
+            let _ = l.line(&format!("run {run_id} cancelled"));
+        }
+        let _ = engine
+            .store
+            .insert_event(Some(&job.name), Some(&run_id), "WARN", "run cancelled")
+            .await;
+        run_hooks(&job.hooks.on_failure, &ctx, logger.as_mut()).await;
+        engine.remove_run(&job.name);
+        engine.active_dec(&job.name);
+        return;
+    }
 
     let result = match outcome {
         Ok(result) => {
@@ -137,6 +177,7 @@ pub async fn execute_run(
     };
 
     finish_run(engine, &run_id, &job, result, logger.as_mut(), started).await;
+    engine.remove_run(&job.name);
     engine.active_dec(&job.name);
 }
 
@@ -173,7 +214,7 @@ async fn finish_run(
     run_id: &str,
     job: &JobSpec,
     outcome: Result<provider::SyncResult, provider::ProviderError>,
-    logger: Option<&mut RunLogger>,
+    mut logger: Option<&mut RunLogger>,
     started: i64,
 ) {
     let ended = unix_now();
@@ -225,13 +266,14 @@ async fn finish_run(
                 size as f64,
             );
         }
-        if let Some(l) = logger {
+        if let Some(l) = logger.as_mut() {
             let _ = l.line(&format!("run {run_id} succeeded in {duration}s"));
         }
         let _ = engine
             .store
             .insert_event(Some(&job.name), Some(run_id), "INFO", "run succeeded")
             .await;
+        run_hooks(&job.hooks.on_success, &hook_ctx(job, run_id), logger).await;
     } else {
         // Failure: classify, maybe retry (spec §54).
         let kind = outcome
@@ -297,14 +339,14 @@ async fn finish_run(
                 engine
                     .metrics
                     .inc_counter("synora_job_failures_total", &[("job", job.name.as_str())], 1.0);
-                if let Some(l) = logger {
+                if let Some(l) = logger.as_mut() {
                     let _ = l.line(&format!("run {run_id} failed: {message}"));
                 }
                 let _ = engine
                     .store
                     .insert_event(Some(&job.name), Some(run_id), "ERROR", &format!("run failed: {message}"))
                     .await;
-                // on_failure hooks land in M2 (same executor machinery).
+                run_hooks(&job.hooks.on_failure, &hook_ctx(job, run_id), logger).await;
             }
         }
     }
@@ -343,5 +385,57 @@ fn size_after(job: &JobSpec, result: Option<&provider::SyncResult>) -> Option<i6
     match job.statistics {
         synora_core::StatisticsMode::Filesystem => Some(walk_size(&job.storage) as i64),
         synora_core::StatisticsMode::Provider => None,
+    }
+}
+
+/// Run a hook list via the same process machinery as the script provider.
+/// Hook failures are warnings — they never change the run verdict (spec §50).
+async fn run_hooks(
+    hooks: &[String],
+    ctx: &SyncContext,
+    mut logger: Option<&mut RunLogger>,
+) {
+    for hook in hooks {
+        let mut cmd = tokio::process::Command::new("/bin/sh");
+        cmd.arg("-c").arg(hook);
+        cmd.current_dir(&ctx.storage);
+        cmd.env("SYNORA_JOB", &ctx.job_name);
+        if let Some(up) = &ctx.upstream {
+            cmd.env("SYNORA_UPSTREAM", up);
+        }
+        cmd.env("SYNORA_STORAGE", ctx.storage.display().to_string());
+        cmd.env("SYNORA_RUN_ID", &ctx.run_id);
+        let out = cmd.output().await;
+        match out {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => {
+                tracing::warn!("hook `{hook}` exited with {:?}", o.status.code());
+                if let Some(l) = logger.as_mut() {
+                    let _ = l.line(&format!("hook `{hook}` exited with {:?}", o.status.code()));
+                    let _ = l.raw(&o.stderr);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("hook `{hook}` failed to run: {e}");
+                if let Some(l) = logger.as_mut() {
+                    let _ = l.line(&format!("hook `{hook}` failed to run: {e}"));
+                }
+            }
+        }
+    }
+}
+
+/// Minimal context for hooks called from `finish_run` (no provider cancel).
+fn hook_ctx(job: &JobSpec, run_id: &str) -> SyncContext {
+    SyncContext {
+        run_id: run_id.to_string(),
+        job_name: job.name.clone(),
+        upstream: job.upstream.clone(),
+        storage: job.storage.clone(),
+        worker: Some(LOCAL_WORKER.to_string()),
+        proxy: job.proxy.clone(),
+        egress: job.egress.clone(),
+        job: job.clone(),
+        cancel: tokio_util::sync::CancellationToken::new(),
     }
 }

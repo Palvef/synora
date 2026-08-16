@@ -61,6 +61,18 @@ enum Command {
         #[arg(short, long)]
         config: Option<PathBuf>,
     },
+    /// Cancel a running job (asks the daemon via a control file)
+    Stop {
+        job: String,
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+    },
+    /// Hot-reload configuration (SIGHUP to the daemon; job/schedule changes
+    /// apply, non-reloadable changes are rejected)
+    Reload {
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -118,6 +130,8 @@ async fn run(cli: Cli) -> Result<(), String> {
             cmd: JobCmd::List { config },
         } => cmd_status(config).await?,
         Command::Logs { job, lines, config } => cmd_logs(job, lines, config)?,
+        Command::Stop { job, config } => cmd_stop(job, config)?,
+        Command::Reload { config } => cmd_reload(config)?,
     }
     Ok(())
 }
@@ -167,15 +181,22 @@ fn print_summary(cfg: &config::ResolvedConfig, path: &std::path::Path) {
 }
 
 async fn cmd_start(config: Option<PathBuf>, db: Option<String>) -> Result<(), String> {
-    let (cfg, _) = load_config(config, db.as_deref())?;
+    let (cfg, config_path) = load_config(config, db.as_deref())?;
     let migrations = PathBuf::from("migrations");
     let engine = Engine::new(cfg, &migrations).await?;
+    engine.set_config_source(config_path.clone(), cli_overrides(db.as_deref()));
     engine.sync_config().await?;
 
     tracing_subscriber::fmt()
         .with_target(false)
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .init();
+
+    // Pid file: `synora reload` / `synora stop` talk to the daemon.
+    let pid_dir = engine.cfg.daemon.log_dir.clone();
+    std::fs::create_dir_all(&pid_dir).map_err(|e| e.to_string())?;
+    std::fs::write(pid_dir.join("synora.pid"), std::process::id().to_string())
+        .map_err(|e| e.to_string())?;
 
     // Metrics endpoint (spec §36).
     let metrics_engine = engine.clone();
@@ -184,14 +205,25 @@ async fn cmd_start(config: Option<PathBuf>, db: Option<String>) -> Result<(), St
         serve_metrics(metrics_engine, listen).await;
     });
 
-    // Signals: SIGINT/SIGTERM stop the loop gracefully.
+    // Signals: SIGINT/SIGTERM stop the loop gracefully; SIGHUP hot-reloads.
     let engine_sig = engine.clone();
+    let engine_hup = engine.clone();
     let signal_task = tokio::spawn(async move {
         let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .expect("SIGTERM handler");
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = sigterm.recv() => {}
+        let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+            .expect("SIGHUP handler");
+        loop {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => break,
+                _ = sigterm.recv() => break,
+                _ = sighup.recv() => {
+                    match engine_hup.reload().await {
+                        Ok(n) => tracing::info!("config reloaded: {n} job(s) applied"),
+                        Err(e) => tracing::warn!("reload rejected: {e}"),
+                    }
+                }
+            }
         }
         tracing::info!("shutdown requested");
         engine_sig.shutdown();
@@ -200,7 +232,20 @@ async fn cmd_start(config: Option<PathBuf>, db: Option<String>) -> Result<(), St
     let result = engine.clone().run().await;
     metrics_task.abort();
     signal_task.abort();
+    let _ = std::fs::remove_file(pid_dir.join("synora.pid"));
     result
+}
+
+fn cli_overrides(db: Option<&str>) -> CliOverrides {
+    let mut o = CliOverrides::default();
+    if let Some(s) = db {
+        if s.contains("://") {
+            o.db_url = Some(s.to_string());
+        } else {
+            o.db_path = Some(s.to_string());
+        }
+    }
+    o
 }
 
 async fn serve_metrics(engine: Arc<Engine>, listen: std::net::SocketAddr) {
@@ -280,6 +325,32 @@ fn cmd_logs(job: String, lines: usize, config: Option<PathBuf>) -> Result<(), St
     for l in &all[start..] {
         println!("{l}");
     }
+    Ok(())
+}
+
+/// `synora stop`: drop a control file the daemon's tick picks up.
+fn cmd_stop(job: String, config: Option<PathBuf>) -> Result<(), String> {
+    let (cfg, _) = load_config(config, None)?;
+    let control = cfg.daemon.log_dir.join("control");
+    std::fs::create_dir_all(&control).map_err(|e| e.to_string())?;
+    std::fs::write(control.join(format!("stop-{job}")), b"").map_err(|e| e.to_string())?;
+    println!("cancel requested for `{job}` (the daemon will pick it up within a tick)");
+    Ok(())
+}
+
+/// `synora reload`: SIGHUP the daemon from its pid file.
+fn cmd_reload(config: Option<PathBuf>) -> Result<(), String> {
+    let (cfg, _) = load_config(config, None)?;
+    let pid_path = cfg.daemon.log_dir.join("synora.pid");
+    let pid: i32 = std::fs::read_to_string(&pid_path)
+        .map_err(|e| format!("cannot read {}: {e} (is the daemon running?)", pid_path.display()))?
+        .trim()
+        .parse()
+        .map_err(|e| format!("bad pid file {}: {e}", pid_path.display()))?;
+    unsafe {
+        libc::kill(pid, libc::SIGHUP);
+    }
+    println!("SIGHUP sent to pid {pid}; reload will be validated and applied");
     Ok(())
 }
 

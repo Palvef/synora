@@ -316,6 +316,7 @@ dependencies = [
  "config",
  "db",
  "engine",
+ "libc",
  "synora-core",
  "time",
  "tokio",
@@ -1521,6 +1522,7 @@ dependencies = [
 name = "provider"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "regex",
  "serde_json",
  "synora-core",

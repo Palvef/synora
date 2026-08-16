@@ -1,6 +1,6 @@
 //! Engine: owns config, DB, metrics, and the run loop.
 
-use config::{DbKind, ResolvedConfig};
+use config::{CliOverrides, ConfigLoader, DbKind, ResolvedConfig};
 use db::store::Store;
 use db::migrator::Migrator;
 use db::SqliteDb;
@@ -15,15 +15,23 @@ use synora_core::Metrics;
 pub const LOCAL_WORKER: &str = "local";
 
 pub struct Engine {
+    /// Static daemon config: NOT hot-reloadable (spec §85). Reloadable job
+    /// definitions live in `live_jobs`.
     pub cfg: ResolvedConfig,
     pub store: Store,
     pub metrics: Arc<Metrics>,
+    /// Live job definitions — swapped by `reload()`.
+    live_jobs: std::sync::RwLock<HashMap<String, JobSpec>>,
     /// Per-job mutex: serializes dispatch decisions (spec §8).
-    job_locks: HashMap<String, Arc<tokio::sync::Mutex<()>>>,
+    job_locks: std::sync::RwLock<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// Global concurrency gate (spec §8).
     global_sem: Arc<tokio::sync::Semaphore>,
     /// Active runs per job (per-job concurrency gate).
     pub(crate) active: std::sync::Mutex<HashMap<String, usize>>,
+    /// Cancel tokens for running runs, keyed by job name.
+    active_runs: std::sync::Mutex<HashMap<String, tokio_util::sync::CancellationToken>>,
+    /// Source path + overrides for `reload()`.
+    config_source: std::sync::RwLock<Option<(PathBuf, CliOverrides)>>,
     shutdown: Arc<AtomicBool>,
 }
 
@@ -58,35 +66,32 @@ impl Engine {
             .map_err(|e| e.to_string())?;
 
         let mut job_locks = HashMap::new();
+        let mut live_jobs = HashMap::new();
         for j in &cfg.jobs {
             job_locks.insert(j.name.clone(), Arc::new(tokio::sync::Mutex::new(())));
+            live_jobs.insert(j.name.clone(), j.clone());
         }
         let engine = Arc::new(Engine {
             cfg,
             store,
             metrics: Arc::new(Metrics::new()),
-            job_locks,
+            live_jobs: std::sync::RwLock::new(live_jobs),
+            job_locks: std::sync::RwLock::new(job_locks),
             global_sem: Arc::new(tokio::sync::Semaphore::new(16)),
             active: std::sync::Mutex::new(HashMap::new()),
+            active_runs: std::sync::Mutex::new(HashMap::new()),
+            config_source: std::sync::RwLock::new(None),
             shutdown: Arc::new(AtomicBool::new(false)),
         });
-        // Refresh the global concurrency cap from config.
-        engine.refresh_global_sem();
         Ok(engine)
-    }
-
-    fn refresh_global_sem(&self) {
-        // tokio Semaphore capacity is fixed at construction; a config value
-        // larger than the initial 16 is rare enough to ignore for M1.
-        // ponytail: rebuild with the right capacity when reload lands in M2.
-        let _ = self.cfg.daemon.max_concurrency;
     }
 
     /// Sync config-defined jobs + schedules into the DB (idempotent, keeps
     /// interval anchors). Jobs removed from config get disabled.
     pub async fn sync_config(&self) -> Result<(), String> {
         let now = unix_now();
-        for job in &self.cfg.jobs {
+        let jobs: Vec<JobSpec> = self.live_jobs.read().unwrap().values().cloned().collect();
+        for job in &jobs {
             self.store.sync_job(job).await.map_err(|e| e.to_string())?;
             self.sync_schedule_for(job, now).await?;
         }
@@ -96,7 +101,7 @@ impl Engine {
             .await
             .map_err(|e| e.to_string())?
         {
-            if !self.cfg.jobs.iter().any(|j| j.name == name) {
+            if !jobs.iter().any(|j| j.name == name) {
                 let _ = self
                     .store
                     .db()
@@ -174,7 +179,11 @@ impl Engine {
     }
 
     pub fn job(&self, name: &str) -> Option<JobSpec> {
-        self.cfg.jobs.iter().find(|j| j.name == name).cloned()
+        self.live_jobs.read().unwrap().get(name).cloned()
+    }
+
+    pub fn jobs(&self) -> Vec<JobSpec> {
+        self.live_jobs.read().unwrap().values().cloned().collect()
     }
 
     /// Dispatch one job: create a QUEUED run row. Serialized per job.
@@ -187,6 +196,8 @@ impl Engine {
         }
         let lock = self
             .job_locks
+            .read()
+            .unwrap()
             .get(job_name)
             .cloned()
             .unwrap_or_else(|| Arc::new(tokio::sync::Mutex::new(())));
@@ -208,7 +219,7 @@ impl Engine {
     pub async fn run(self: Arc<Self>) -> Result<(), String> {
         let boot = unix_now();
         // Startup jobs: dispatch once per daemon boot (alignment decision).
-        for job in &self.cfg.jobs {
+        for job in self.jobs() {
             if matches!(job.schedule.kind, synora_core::ScheduleKind::Startup) && job.enabled {
                 if let Err(e) = self.dispatch(&job.name).await {
                     tracing::warn!("startup dispatch of `{}` failed: {e}", job.name);
@@ -232,13 +243,134 @@ impl Engine {
         Ok(())
     }
 
-    /// One scheduler tick: retry requeue, due dispatch, QUEUED execution.
-    /// Public so tests can drive the loop without a daemon.
+    /// One scheduler tick: retry requeue, due dispatch, QUEUED execution,
+    /// control-file processing. Public so tests can drive the loop.
     pub async fn tick(self: &Arc<Self>) {
         let now = unix_now();
         crate::scheduler::retry_tick(self, now).await;
         crate::scheduler::dispatch_due(self, now).await;
         crate::scheduler::execute_queued(self).await;
+        self.process_control_dir().await;
+    }
+
+    /// Remember where the config came from so `reload()` can re-read it.
+    pub fn set_config_source(&self, path: PathBuf, overrides: CliOverrides) {
+        *self.config_source.write().unwrap() = Some((path, overrides));
+    }
+
+    /// Hot reload (spec §85, Yuki's `yukictl reload` convention): re-read the
+    /// config, apply job/schedule changes, reject non-reloadable changes
+    /// (db backend, listen address, tls, log dir) as a whole.
+    pub async fn reload(&self) -> Result<usize, String> {
+        let (path, overrides) = self
+            .config_source
+            .read()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| "no config source set (started without -c?)".to_string())?;
+        let new_cfg = ConfigLoader::load(&path, &overrides).map_err(|e| e.to_string())?;
+        // Non-reloadable fields (spec §85).
+        let old = &self.cfg;
+        let reject = |field: &str, a: &dyn std::fmt::Debug, b: &dyn std::fmt::Debug| {
+            Err(format!("reload rejected: `{field}` is not hot-reloadable (old {a:?}, new {b:?})"))
+        };
+        if old.daemon.db != new_cfg.daemon.db {
+            return reject("daemon.db", &old.daemon.db, &new_cfg.daemon.db);
+        }
+        if old.daemon.log_dir != new_cfg.daemon.log_dir {
+            return reject("daemon.log_dir", &old.daemon.log_dir, &new_cfg.daemon.log_dir);
+        }
+        if old.api.listen != new_cfg.api.listen {
+            return reject("api.listen", &old.api.listen, &new_cfg.api.listen);
+        }
+        if old.api.tls != new_cfg.api.tls {
+            return reject("api.tls", &old.api.tls, &new_cfg.api.tls);
+        }
+
+        // Apply job changes: upsert changed jobs + schedules, disable removed.
+        // (Keep the live-jobs lock across awaits is forbidden — guards are not
+        // Send — so: short lock for the diff, awaits, short lock to apply.)
+        let now = unix_now();
+        let removed: Vec<String> = {
+            let jobs = self.live_jobs.read().unwrap();
+            jobs.keys()
+                .filter(|n| !new_cfg.jobs.iter().any(|j| &j.name == *n))
+                .cloned()
+                .collect()
+        };
+        for job in &new_cfg.jobs {
+            self.store.sync_job(job).await.map_err(|e| e.to_string())?;
+            self.sync_schedule_for(job, now).await?;
+        }
+        for name in &removed {
+            let _ = self
+                .store
+                .db()
+                .execute("UPDATE jobs SET enabled = 0 WHERE name = ?", &[name.clone().into()])
+                .await;
+        }
+        {
+            let mut jobs = self.live_jobs.write().unwrap();
+            for job in &new_cfg.jobs {
+                jobs.insert(job.name.clone(), job.clone());
+            }
+            for name in &removed {
+                jobs.remove(name);
+            }
+        }
+        let changed = new_cfg.jobs.len() + removed.len();
+        let _ = self
+            .store
+            .insert_event(None, None, "INFO", &format!("config reloaded ({changed} job(s) applied)"))
+            .await;
+        Ok(changed)
+    }
+
+    /// Cancel a running run of `job` (spec §5 cancel path). The provider's
+    /// cancel token kills the child; the executor records CANCELLED.
+    pub async fn stop_job(&self, job_name: &str) -> Result<(), String> {
+        let token = self
+            .active_runs
+            .lock()
+            .unwrap()
+            .get(job_name)
+            .cloned()
+            .ok_or_else(|| format!("job `{job_name}` is not running"))?;
+        token.cancel();
+        tracing::info!("job `{job_name}`: cancel requested");
+        Ok(())
+    }
+
+    pub(crate) fn register_run(&self, job: &str, token: tokio_util::sync::CancellationToken) {
+        self.active_runs
+            .lock()
+            .unwrap()
+            .insert(job.to_string(), token);
+    }
+
+    pub(crate) fn remove_run(&self, job: &str) {
+        self.active_runs.lock().unwrap().remove(job);
+    }
+
+    /// `synora stop <job>` drops a file into <log_dir>/control/stop-<job>;
+    /// the tick picks it up and cancels the run.
+    async fn process_control_dir(&self) {
+        let dir = self.cfg.daemon.log_dir.join("control");
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let Some(job) = name.strip_prefix("stop-") else {
+                continue;
+            };
+            if self.stop_job(job).await.is_ok() {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
     }
 
     pub fn shutdown(&self) {

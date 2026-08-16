@@ -181,3 +181,111 @@ fail_on_match = "FATAL"
     let status = wait_terminal(&engine, &run_id, 15).await;
     assert_eq!(status, synora_core::JobStatus::Failed, "fail_on_match must force failure");
 }
+
+#[tokio::test]
+async fn hooks_run_on_success() {
+    let dir = temp_dir("hooks");
+    let marker = dir.join("marker");
+    write(
+        &dir,
+        "jobs/h.toml",
+        &format!(
+            r#"[[jobs]]
+name = "h"
+schedule = "startup"
+provider = "script"
+command = "echo ok"
+storage = "{}"
+
+[jobs.hooks]
+on_success = ["echo HOOKED > {}/marker"]
+"#,
+            dir.join("repo").display(),
+            dir.display()
+        ),
+    );
+    write(&dir, "synora.toml", &config_text(&dir));
+    let engine = engine_for(&dir).await;
+    engine.sync_config().await.unwrap();
+    let job = engine.job("h").unwrap();
+    assert_eq!(job.hooks.on_success.len(), 1, "hook parsed from config");
+    let run_id = engine.dispatch("h").await.unwrap();
+    let status = wait_terminal(&engine, &run_id, 15).await;
+    assert_eq!(status, synora_core::job::JobStatus::Success);
+    assert!(marker.exists(), "on_success hook must have run");
+    assert_eq!(std::fs::read_to_string(&marker).unwrap().trim(), "HOOKED");
+}
+
+#[tokio::test]
+async fn rsync_local_upstream_syncs_and_sizes() {
+    let dir = temp_dir("rsync");
+    let upstream = dir.join("upstream");
+    let repo = dir.join("repo/rsync");
+    std::fs::create_dir_all(&upstream).unwrap();
+    std::fs::write(upstream.join("data.txt"), b"upstream-data").unwrap();
+    write(
+        &dir,
+        "jobs/r.toml",
+        &format!(
+            r#"[[jobs]]
+name = "r"
+schedule = "startup"
+provider = "rsync"
+upstream = "{}"
+storage = "{}"
+statistics = "filesystem"
+"#,
+            upstream.display(),
+            repo.display()
+        ),
+    );
+    write(&dir, "synora.toml", &config_text(&dir));
+    let engine = engine_for(&dir).await;
+    engine.sync_config().await.unwrap();
+    let run_id = engine.dispatch("r").await.unwrap();
+    let status = wait_terminal(&engine, &run_id, 30).await;
+    assert_eq!(status, synora_core::job::JobStatus::Success);
+    assert_eq!(
+        std::fs::read_to_string(repo.join("data.txt")).unwrap(),
+        "upstream-data"
+    );
+    // statistics = "filesystem" → size comes from the walk.
+    let size = engine
+        .store
+        .repository_size(&repo.display().to_string())
+        .await
+        .unwrap();
+    assert_eq!(size, Some(13));
+}
+
+#[tokio::test]
+async fn stop_job_cancels_running_script() {
+    let dir = temp_dir("cancel");
+    write(
+        &dir,
+        "jobs/slow.toml",
+        &format!(
+            r#"[[jobs]]
+name = "slow"
+schedule = "startup"
+provider = "script"
+command = "sleep 30"
+storage = "{}"
+timeout = "5m"
+"#,
+            dir.join("repo/slow").display()
+        ),
+    );
+    write(&dir, "synora.toml", &config_text(&dir));
+    let engine = engine_for(&dir).await;
+    engine.sync_config().await.unwrap();
+    let run_id = engine.dispatch("slow").await.unwrap();
+    // One tick starts the run; then stop cancels it.
+    engine.tick().await;
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    engine.stop_job("slow").await.unwrap();
+    let status = wait_terminal(&engine, &run_id, 15).await;
+    assert_eq!(status, synora_core::job::JobStatus::Cancelled);
+    let log = std::fs::read_to_string(dir.join("logs/slow/current.log")).unwrap();
+    assert!(log.contains("cancelled"), "{log}");
+}

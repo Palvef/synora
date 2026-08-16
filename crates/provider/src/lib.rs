@@ -6,15 +6,51 @@
 //! open provider SDK (spec §115) is a Phase 7 concern; when it lands, the
 //! enum arm becomes a `Custom(Box<dyn ...>)` or the trait gets boxed futures.
 
+pub mod docker;
+pub mod rsync;
 pub mod script;
 
+
+/// Spawn the child as its own process-group leader so the whole tree
+/// (shell + grandchildren) can be killed on cancel (spec §74).
+pub(crate) fn spawn_group(cmd: &mut tokio::process::Command) -> Result<tokio::process::Child, ProviderError> {
+    // process_group comes from CommandExt on unix; the import is needed inside
+    // the function body.
+    #[allow(unused_imports)]
+    use std::os::unix::process::CommandExt;
+    cmd.process_group(0);
+    cmd.spawn().map_err(|e| ProviderError::Spawn(e.to_string()))
+}
+
+/// Kill the child's whole process group and reap it.
+pub(crate) async fn kill_group(child: &mut tokio::process::Child) {
+    let pid = child.id().unwrap_or(0) as i32;
+    unsafe {
+        libc::kill(-pid, libc::SIGKILL);
+    }
+    let _ = child.wait().await;
+}
+
+/// After `wait()` resolved: if a cancel raced us, the run is cancelled —
+/// never treat a killed process as a normal exit.
+pub(crate) async fn cancelled_after_wait(
+    ctx: &SyncContext,
+    child: &mut tokio::process::Child,
+) -> Result<(), ProviderError> {
+    if ctx.cancel.is_cancelled() {
+        kill_group(child).await;
+        return Err(ProviderError::Cancelled);
+    }
+    Ok(())
+}
+
 use std::path::PathBuf;
-use synora_core::job::{ErrorKind, JobSpec, RunId};
+use synora_core::job::{ErrorKind, JobSpec};
 
 /// Everything a provider needs for one run.
 #[derive(Clone)]
 pub struct SyncContext {
-    pub run_id: RunId,
+    pub run_id: String,
     pub job_name: String,
     pub upstream: Option<String>,
     pub storage: PathBuf,
@@ -56,6 +92,8 @@ pub enum ProviderError {
     Exit(i32),
     #[error("provider timed out")]
     Timeout,
+    #[error("cancelled by operator")]
+    Cancelled,
     #[error("invalid provider config: {0}")]
     Config(String),
     #[error("provider failed: {0}")]
@@ -75,19 +113,25 @@ impl ProviderError {
 
 /// One of the concrete providers.
 pub enum Provider {
+    Rsync(rsync::RsyncProvider),
     Script(script::ScriptProvider),
+    Docker(docker::DockerProvider),
 }
 
 impl Provider {
     pub fn name(&self) -> &'static str {
         match self {
+            Provider::Rsync(_) => "rsync",
             Provider::Script(_) => "script",
+            Provider::Docker(_) => "docker",
         }
     }
 
     pub async fn sync(&self, ctx: &SyncContext) -> Result<SyncResult, ProviderError> {
         match self {
+            Provider::Rsync(p) => p.sync(ctx).await,
             Provider::Script(p) => p.sync(ctx).await,
+            Provider::Docker(p) => p.sync(ctx).await,
         }
     }
 }
@@ -95,16 +139,26 @@ impl Provider {
 /// Build the provider for a job.
 pub fn build_provider(job: &JobSpec) -> Result<Provider, ProviderError> {
     match &job.provider {
+        synora_core::ProviderConfig::Rsync { options } => {
+            Ok(Provider::Rsync(rsync::RsyncProvider {
+                options: options.clone(),
+            }))
+        }
         synora_core::ProviderConfig::Script { command } => Ok(Provider::Script(
             script::ScriptProvider {
                 command: command.clone(),
             },
         )),
-        synora_core::ProviderConfig::Rsync { .. } => Err(ProviderError::Config(
-            "rsync provider lands in M2".to_string(),
-        )),
-        synora_core::ProviderConfig::Docker { .. } => Err(ProviderError::Config(
-            "docker provider lands in M2".to_string(),
-        )),
+        synora_core::ProviderConfig::Docker {
+            image,
+            env,
+            volumes,
+            keep_container,
+        } => Ok(Provider::Docker(docker::DockerProvider {
+            image: image.clone(),
+            env: env.clone(),
+            volumes: volumes.clone(),
+            keep_container: *keep_container,
+        })),
     }
 }
