@@ -42,6 +42,7 @@ impl HttpProvider {
         );
         Ok(SyncResult {
             exit_code: Some(0),
+            stdout: stats.log_lines.join("\n").into_bytes(),
             bytes_transferred: Some(stats.downloaded_bytes),
             size_hint: stats.total_size_hint,
             message: Some(format!(

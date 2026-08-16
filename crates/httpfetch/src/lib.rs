@@ -59,6 +59,8 @@ pub struct FetchStats {
     /// Sum of remote sizes of everything planned for download; `None` when
     /// any planned file's size was unknown.
     pub total_size_hint: Option<u64>,
+    /// Per-file detail lines (downloaded/skipped/deleted) for run logs.
+    pub log_lines: Vec<String>,
 }
 
 /// A planned sync: what to download (url → destination) and what to delete.
@@ -159,8 +161,12 @@ impl Fetcher {
                 let _permit = sem
                     .acquire_owned()
                     .await
-                    .map_err(|_| FetchError::Cancelled)?;
-                download_one(&client, &url, &dest, &cancel).await
+                    .map_err(|_| (FetchError::Cancelled, url.clone()))?;
+                let u2 = url.clone();
+                download_one(&client, &url, &dest, &cancel)
+                    .await
+                    .map(|b| (b, u2.clone()))
+                    .map_err(|e| (e, u2))
             }));
         }
         // Single-file failures must not sink the whole sync: warn (done in
@@ -168,12 +174,16 @@ impl Fetcher {
         let mut cancelled = false;
         for task in tasks {
             match task.await {
-                Ok(Ok(bytes)) => {
+                Ok(Ok((bytes, url))) => {
                     stats.downloaded_bytes += bytes;
                     stats.files_downloaded += 1;
+                    stats.log_lines.push(format!("downloaded {url} ({bytes} bytes)"));
                 }
-                Ok(Err(FetchError::Cancelled)) => cancelled = true,
-                Ok(Err(_e)) => stats.files_skipped += 1,
+                Ok(Err((FetchError::Cancelled, _))) => cancelled = true,
+                Ok(Err((e, url))) => {
+                    stats.files_skipped += 1;
+                    stats.log_lines.push(format!("skipped {url}: {e}"));
+                }
                 Err(_) => {
                     tracing::warn!("download task panicked");
                     stats.files_skipped += 1;
@@ -194,9 +204,11 @@ impl Fetcher {
                     error_chain(&e)
                 );
                 stats.files_skipped += 1;
+                stats.log_lines.push(format!("skipped delete of {}: {}", path.display(), error_chain(&e)));
                 continue;
             }
             stats.files_deleted += 1;
+            stats.log_lines.push(format!("deleted {}", path.display()));
         }
         Ok(stats)
     }
