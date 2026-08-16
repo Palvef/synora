@@ -2668,6 +2668,7 @@ dependencies = [
  "anyhow",
  "api",
  "clap",
+ "config",
  "crossterm",
  "ratatui",
  "synora-core",

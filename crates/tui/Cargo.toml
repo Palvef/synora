@@ -10,6 +10,7 @@ path = "src/main.rs"
 [dependencies]
 synora-core.workspace = true
 api.workspace = true
+config.workspace = true
 tokio.workspace = true
 time.workspace = true
 anyhow.workspace = true
