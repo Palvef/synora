@@ -8,7 +8,7 @@ name = "synora-manager"
 path = "src/main.rs"
 
 [dependencies]
-domain.workspace = true
+synora-core.workspace = true
 config.workspace = true
 db.workspace = true
 engine.workspace = true

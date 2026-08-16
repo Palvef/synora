@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-domain.workspace = true
+synora-core.workspace = true
 config.workspace = true
 db.workspace = true
 provider.workspace = true

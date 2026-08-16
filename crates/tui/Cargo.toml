@@ -8,7 +8,7 @@ name = "synora-tui"
 path = "src/main.rs"
 
 [dependencies]
-domain.workspace = true
+synora-core.workspace = true
 api.workspace = true
 tokio.workspace = true
 time.workspace = true

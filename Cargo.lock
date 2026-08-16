@@ -86,10 +86,10 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 name = "api"
 version = "0.1.0"
 dependencies = [
- "domain",
  "reqwest",
  "serde",
  "serde_json",
+ "synora-core",
  "thiserror 2.0.20",
  "uuid",
 ]
@@ -341,8 +341,8 @@ dependencies = [
  "clap",
  "config",
  "db",
- "domain",
  "engine",
+ "synora-core",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -397,10 +397,10 @@ dependencies = [
 name = "config"
 version = "0.1.0"
 dependencies = [
- "domain",
  "glob",
  "regex",
  "serde",
+ "synora-core",
  "thiserror 2.0.20",
  "time",
  "time-tz",
@@ -532,10 +532,10 @@ dependencies = [
 name = "db"
 version = "0.1.0"
 dependencies = [
- "domain",
  "postgres-types",
  "rusqlite",
  "serde_json",
+ "synora-core",
  "thiserror 2.0.20",
  "time",
  "tokio",
@@ -577,19 +577,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "domain"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "cron",
- "serde",
- "thiserror 2.0.20",
- "time",
- "time-tz",
- "uuid",
-]
-
-[[package]]
 name = "dunce"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -607,8 +594,8 @@ version = "0.1.0"
 dependencies = [
  "config",
  "db",
- "domain",
  "provider",
+ "synora-core",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
@@ -1277,11 +1264,11 @@ dependencies = [
  "axum",
  "config",
  "db",
- "domain",
  "engine",
  "hyper-rustls",
  "serde",
  "serde_json",
+ "synora-core",
  "tokio",
  "tower",
  "tower-http",
@@ -1591,9 +1578,9 @@ dependencies = [
 name = "provider"
 version = "0.1.0"
 dependencies = [
- "domain",
  "regex",
  "serde_json",
+ "synora-core",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
@@ -2283,6 +2270,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "synora-core"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "cron",
+ "serde",
+ "thiserror 2.0.20",
+ "time",
+ "time-tz",
+ "uuid",
+]
+
+[[package]]
 name = "synstructure"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2668,8 +2668,8 @@ dependencies = [
  "api",
  "clap",
  "crossterm",
- "domain",
  "ratatui",
+ "synora-core",
  "time",
  "tokio",
 ]
@@ -3142,8 +3142,8 @@ dependencies = [
  "anyhow",
  "api",
  "config",
- "domain",
  "engine",
+ "synora-core",
  "tokio",
  "tracing",
  "tracing-subscriber",

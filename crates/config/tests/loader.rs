@@ -100,7 +100,7 @@ fn valid_config_all_schedule_kinds() {
     assert_eq!(ubuntu.retry, 3);
     // docker job
     let c = cfg.jobs.iter().find(|j| j.name == "cronjob").unwrap();
-    assert!(matches!(c.provider, domain::ProviderConfig::Docker { .. }));
+    assert!(matches!(c.provider, synora_core::ProviderConfig::Docker { .. }));
 }
 
 #[test]

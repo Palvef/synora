@@ -9,10 +9,10 @@
 
 use crate::error::ConfigError;
 use crate::schema::{DbDoc, JobDoc, RootDoc, TomlDuration};
-use domain::job::{
+use synora_core::job::{
     Hooks, JobSpec, MisfirePolicy, OnWorkerLost, ProviderConfig, Safety, StatisticsMode,
 };
-use domain::schedule::{self, Schedule, ScheduleKind};
+use synora_core::schedule::{self, Schedule, ScheduleKind};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};

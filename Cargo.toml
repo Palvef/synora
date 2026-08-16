@@ -8,7 +8,7 @@ edition = "2021"
 
 [workspace.dependencies]
 # --- internal (path) ---
-domain = { path = "crates/domain" }
+synora-core = { path = "crates/synora-core" }
 config = { path = "crates/config" }
 db = { path = "crates/db" }
 provider = { path = "crates/provider" }

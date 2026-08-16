@@ -8,7 +8,7 @@ name = "synora-worker"
 path = "src/main.rs"
 
 [dependencies]
-domain.workspace = true
+synora-core.workspace = true
 config.workspace = true
 engine.workspace = true
 api.workspace = true

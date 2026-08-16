@@ -60,9 +60,9 @@ fn run(cli: Cli) -> Result<(), String> {
     for j in &cfg.jobs {
         let state = if j.enabled { "enabled " } else { "disabled" };
         let provider = match &j.provider {
-            domain::ProviderConfig::Rsync { .. } => "rsync",
-            domain::ProviderConfig::Script { .. } => "script",
-            domain::ProviderConfig::Docker { .. } => "docker",
+            synora_core::ProviderConfig::Rsync { .. } => "rsync",
+            synora_core::ProviderConfig::Script { .. } => "script",
+            synora_core::ProviderConfig::Docker { .. } => "docker",
         };
         println!(
             "  {:<20} {} {:<24} {:>7} {}",
