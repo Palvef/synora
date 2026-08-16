@@ -1,0 +1,22 @@
+# script job, daily at a fixed time (spec §6.2/§16).
+# The script gets SYNORA_* env vars plus TUNASYNC_MIRROR_NAME /
+# TUNASYNC_UPSTREAM_URL / TUNASYNC_WORKING_DIR for tunasync-scripts compat.
+# A line like `SYNORA_SIZE=39710000000` on stdout updates the repo size.
+[[jobs]]
+name = "archlinux"
+enabled = true
+
+schedule = "daily"
+at = "03:30:00"
+
+provider = "script"
+command = "/opt/synora/scripts/archlinux.sh"
+upstream = "rsync://mirror.pkgbuild.com/archlinux/"
+storage = "/srv/mirror/archlinux"
+
+# treat the run as failed if the output matches this regex, even with exit 0
+fail_on_match = "FATAL|no space left"
+retry = 3
+
+[hooks]
+on_failure = ["/opt/scripts/alert.sh archlinux"]

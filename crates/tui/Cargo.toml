@@ -1,0 +1,18 @@
+[package]
+name = "tui"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "synora-tui"
+path = "src/main.rs"
+
+[dependencies]
+domain.workspace = true
+api.workspace = true
+tokio.workspace = true
+time.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true

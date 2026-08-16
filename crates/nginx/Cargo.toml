@@ -1,0 +1,9 @@
+[package]
+name = "nginx"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+regex.workspace = true
+time.workspace = true

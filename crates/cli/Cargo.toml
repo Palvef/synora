@@ -1,0 +1,20 @@
+[package]
+name = "cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "synora"
+path = "src/main.rs"
+
+[dependencies]
+domain.workspace = true
+config.workspace = true
+db.workspace = true
+engine.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+axum.workspace = true

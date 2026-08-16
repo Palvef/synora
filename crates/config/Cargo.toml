@@ -1,0 +1,15 @@
+[package]
+name = "config"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+domain.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+toml_edit.workspace = true
+glob.workspace = true
+time.workspace = true
+regex.workspace = true
+time-tz.workspace = true

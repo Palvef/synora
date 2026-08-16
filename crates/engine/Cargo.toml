@@ -1,0 +1,13 @@
+[package]
+name = "engine"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+domain.workspace = true
+config.workspace = true
+db.workspace = true
+provider.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+thiserror.workspace = true

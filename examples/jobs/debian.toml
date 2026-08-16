@@ -1,0 +1,19 @@
+# cron job (spec §6.1): every 4 hours on the hour
+[[jobs]]
+name = "debian"
+enabled = true
+
+schedule = "cron"
+cron = "0 */4 * * *"
+
+provider = "rsync"
+upstream = "rsync://ftp.debian.org/debian/"
+storage = "/srv/mirror/debian"
+options = ["--delete", "--delay-updates"]
+success_exit_codes = [23, 24]
+retry = 3
+timeout = "3h"
+
+[safety]
+max_delete_files = 50000
+max_delete_ratio = 0.30

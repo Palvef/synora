@@ -1,0 +1,14 @@
+# weekly job (spec §6.3)
+[[jobs]]
+name = "fedora"
+enabled = true
+
+schedule = "weekly"
+weekday = "Sunday"
+at = "04:00:00"
+
+provider = "rsync"
+upstream = "rsync://dl.fedoraproject.org/fedora/"
+storage = "/srv/mirror/fedora"
+options = ["--delete", "--delay-updates"]
+retry = 2

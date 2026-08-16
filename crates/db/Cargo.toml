@@ -1,0 +1,16 @@
+[package]
+name = "db"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+domain.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+serde_json.workspace = true
+time.workspace = true
+uuid.workspace = true
+rusqlite.workspace = true
+tokio-postgres.workspace = true
+postgres-types.workspace = true

@@ -1,0 +1,23 @@
+# rsync job, fixed period, no drift (spec §6.4/§13)
+[[jobs]]
+name = "ubuntu"
+enabled = true
+
+schedule = "interval"
+every = "6h"
+timezone = "Asia/Shanghai"
+
+provider = "rsync"
+upstream = "rsync://archive.ubuntu.com/ubuntu/"
+storage = "/srv/mirror/ubuntu"
+options = ["--delete", "--delay-updates", "--partial"]
+
+# rsync exit codes 23/24 mean "done, with transfer errors" — count as success
+# (tunasync convention).
+success_exit_codes = [23, 24]
+
+retry = 3
+retry_delay = "5m"
+retry_backoff = 2.0
+timeout = "2h"
+misfire_policy = "run-immediately"

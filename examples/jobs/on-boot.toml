@@ -1,0 +1,18 @@
+# docker job, runs once on daemon startup (spec §6/§18)
+[[jobs]]
+name = "on-boot"
+enabled = true
+
+schedule = "startup"
+
+provider = "docker"
+image = "ustcmirror/rsync:latest"
+upstream = "rsync://example.org/repo/"
+storage = "/srv/mirror/boot"
+env = [
+    "RSYNC_HOST=example.org",
+    "RSYNC_PATH=repo/",
+]
+volumes = [
+    "/srv/mirror/boot:/data",
+]

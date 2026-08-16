@@ -1,0 +1,43 @@
+# Synora example configuration (spec §78–§82).
+# Run `synora check -c examples/simple.toml` from the repo root.
+
+version = 1
+
+# Included files are loaded after this file (they override it).
+# Patterns support *, ?, [..] and may be absolute or relative to this file.
+include = [
+    "jobs/*.toml",
+]
+
+[daemon]
+# Global cap on concurrently running jobs (spec §8).
+max_concurrency = 16
+# Where run logs land (per-job dirs, spec §49).
+log_dir = "/var/log/synora"
+
+[daemon.db]
+# SQLite-first (default). For PostgreSQL:
+#   kind = "postgres"
+#   url = "postgres://user:pass@host/dbname"
+kind = "sqlite"
+path = "data/synora.db"
+
+[api]
+listen = "127.0.0.1:8100"
+
+# HTTPS is optional: set cert+key to serve TLS, client_ca for mTLS (spec §64,
+# tunasync-style). Workers set `ca_cert` to verify the manager.
+[api.tls]
+# cert = "/etc/synora/cert.pem"
+# key  = "/etc/synora/key.pem"
+# client_ca = "/etc/synora/client-ca.pem"
+
+# API tokens for the REST API (admin/operator/viewer roles).
+[[api.tokens]]
+name = "local-admin"
+token = "change-me"
+role = "admin"
+
+# ${VAR} expansion: values come from the environment at load time.
+# Unset variables are a config error with file:line. Use $${ to escape.
+# e.g. path = "${SYNORA_DB_PATH}"
