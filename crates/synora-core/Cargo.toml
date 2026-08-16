@@ -7,7 +7,5 @@ edition.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 time.workspace = true
-cron.workspace = true
-chrono.workspace = true
 time-tz.workspace = true
 uuid.workspace = true

@@ -1,9 +1,12 @@
-//! `synora` — unified CLI (spec §45). M0: `check` / `config validate`.
+//! `synora` — unified CLI (spec §45).
 
 use clap::{Parser, Subcommand};
-use config::{CliOverrides, ConfigLoader};
+use config::{CliOverrides, ConfigLoader, DbKind};
+use engine::Engine;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Arc;
+use synora_core::job::JobStatus;
 
 #[derive(Parser)]
 #[command(name = "synora", version, about = "Synora — mirror synchronization engine")]
@@ -25,6 +28,48 @@ enum Command {
         #[command(subcommand)]
         cmd: ConfigCmd,
     },
+    /// Run the standalone daemon: scheduler + executor + metrics endpoint
+    Start {
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+        /// DB override (path or postgres:// URL)
+        #[arg(long)]
+        db: Option<String>,
+    },
+    /// Trigger one job now and wait for it to finish
+    Run {
+        job: String,
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+    },
+    /// Show job statuses and next run times
+    Status {
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+    },
+    /// Job subcommands
+    Job {
+        #[command(subcommand)]
+        cmd: JobCmd,
+    },
+    /// Tail a job's latest run log
+    Logs {
+        job: String,
+        /// Lines to show (default 50)
+        #[arg(short = 'n', long, default_value_t = 50)]
+        lines: usize,
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum JobCmd {
+    /// List jobs with their current status
+    List {
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -38,7 +83,14 @@ enum ConfigCmd {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    match run(cli) {
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match rt.block_on(run(cli)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(msg) => {
             eprintln!("error: {msg}");
@@ -47,16 +99,55 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: Cli) -> Result<(), String> {
-    let path = match &cli.command {
-        Command::Check { config } => config.clone(),
+async fn run(cli: Cli) -> Result<(), String> {
+    match cli.command {
+        Command::Check { config } => {
+            let (cfg, path) = load_config(config, None)?;
+            print_summary(&cfg, &path);
+        }
         Command::Config {
             cmd: ConfigCmd::Validate { config },
-        } => config.clone(),
+        } => {
+            let (cfg, path) = load_config(config, None)?;
+            print_summary(&cfg, &path);
+        }
+        Command::Start { config, db } => cmd_start(config, db).await?,
+        Command::Run { job, config } => cmd_run(job, config).await?,
+        Command::Status { config } => cmd_status(config).await?,
+        Command::Job {
+            cmd: JobCmd::List { config },
+        } => cmd_status(config).await?,
+        Command::Logs { job, lines, config } => cmd_logs(job, lines, config)?,
+    }
+    Ok(())
+}
+
+fn load_config(
+    config: Option<PathBuf>,
+    db_override: Option<&str>,
+) -> Result<(config::ResolvedConfig, PathBuf), String> {
+    let path = find_config(config)?;
+    let overrides = CliOverrides {
+        db_kind: None,
+        db_path: None,
+        db_url: match db_override {
+            Some(s) if s.contains("://") => Some(s.to_string()),
+            _ => None,
+        },
+        api_listen: None,
     };
-    let path = find_config(path)?;
-    let cfg = ConfigLoader::load(&path, &CliOverrides::default()).map_err(|e| e.to_string())?;
-    println!("config OK: {} job(s)", cfg.jobs.len());
+    let mut overrides = overrides;
+    if let Some(s) = db_override {
+        if !s.contains("://") {
+            overrides.db_path = Some(s.to_string());
+        }
+    }
+    let cfg = ConfigLoader::load(&path, &overrides).map_err(|e| e.to_string())?;
+    Ok((cfg, path))
+}
+
+fn print_summary(cfg: &config::ResolvedConfig, path: &std::path::Path) {
+    println!("config OK ({}): {} job(s)", path.display(), cfg.jobs.len());
     for j in &cfg.jobs {
         let state = if j.enabled { "enabled " } else { "disabled" };
         let provider = match &j.provider {
@@ -65,7 +156,7 @@ fn run(cli: Cli) -> Result<(), String> {
             synora_core::ProviderConfig::Docker { .. } => "docker",
         };
         println!(
-            "  {:<20} {} {:<24} {:>7} {}",
+            "  {:<20} {:<24} {:>8} {:>9} {}",
             j.name,
             j.schedule.describe(),
             provider,
@@ -73,7 +164,136 @@ fn run(cli: Cli) -> Result<(), String> {
             j.storage.display()
         );
     }
+}
+
+async fn cmd_start(config: Option<PathBuf>, db: Option<String>) -> Result<(), String> {
+    let (cfg, _) = load_config(config, db.as_deref())?;
+    let migrations = PathBuf::from("migrations");
+    let engine = Engine::new(cfg, &migrations).await?;
+    engine.sync_config().await?;
+
+    tracing_subscriber::fmt()
+        .with_target(false)
+        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .init();
+
+    // Metrics endpoint (spec §36).
+    let metrics_engine = engine.clone();
+    let listen = metrics_engine.cfg.api.listen;
+    let metrics_task = tokio::spawn(async move {
+        serve_metrics(metrics_engine, listen).await;
+    });
+
+    // Signals: SIGINT/SIGTERM stop the loop gracefully.
+    let engine_sig = engine.clone();
+    let signal_task = tokio::spawn(async move {
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("SIGTERM handler");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = sigterm.recv() => {}
+        }
+        tracing::info!("shutdown requested");
+        engine_sig.shutdown();
+    });
+
+    let result = engine.clone().run().await;
+    metrics_task.abort();
+    signal_task.abort();
+    result
+}
+
+async fn serve_metrics(engine: Arc<Engine>, listen: std::net::SocketAddr) {
+    use axum::routing::get;
+    let app = axum::Router::new()
+        .route("/metrics", get(metrics_handler))
+        .route("/healthz", get(|| async { "ok" }))
+        .with_state(engine);
+    let listener = match tokio::net::TcpListener::bind(listen).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::warn!("cannot bind metrics endpoint on {listen}: {e}");
+            return;
+        }
+    };
+    tracing::info!("metrics endpoint on http://{listen}/metrics");
+    let _ = axum::serve(listener, app).await;
+}
+
+async fn metrics_handler(axum::extract::State(engine): axum::extract::State<Arc<Engine>>) -> String {
+    engine.metrics().render()
+}
+
+async fn cmd_run(job: String, config: Option<PathBuf>) -> Result<(), String> {
+    let (cfg, _) = load_config(config, None)?;
+    let engine = Engine::new(cfg, &PathBuf::from("migrations")).await?;
+    let status = engine.clone().run_once(&job).await?;
+    match status {
+        JobStatus::Success => println!("{job}: SUCCESS"),
+        other => {
+            println!("{job}: {other:?}");
+            return Err(format!("job `{job}` finished with status {other:?}"));
+        }
+    }
     Ok(())
+}
+
+async fn cmd_status(config: Option<PathBuf>) -> Result<(), String> {
+    let (cfg, _) = load_config(config, None)?;
+    if cfg.daemon.db.kind != DbKind::Sqlite {
+        return Err("status requires a sqlite database".to_string());
+    }
+    let db = db::SqliteDb::open(&PathBuf::from(&cfg.daemon.db.path)).map_err(|e| e.to_string())?;
+    db::migrator::Migrator::new(&PathBuf::from("migrations"))
+        .run(&db)
+        .await
+        .map_err(|e| e.to_string())?;
+    let store = db::store::Store::new(db);
+    let statuses = store.job_status_list().await.map_err(|e| e.to_string())?;
+    let schedules = store.all_schedules().await.map_err(|e| e.to_string())?;
+    println!("{:<20} {:<12} {:<24} LAST RUN", "JOB", "STATUS", "NEXT RUN");
+    for (name, status) in &statuses {
+        let next = schedules
+            .iter()
+            .find(|(n, _)| n == name)
+            .and_then(|(_, r)| r.next_run)
+            .map(format_ts)
+            .unwrap_or_else(|| "-".to_string());
+        let last = store
+            .run_history(name, 1)
+            .await
+            .ok()
+            .and_then(|mut v| v.pop())
+            .map(|r| format!("{} {:?}", format_ts(r.created_at), r.status))
+            .unwrap_or_else(|| "-".to_string());
+        println!("{name:<20} {status:<12?} {next:<24} {last}");
+    }
+    Ok(())
+}
+
+fn cmd_logs(job: String, lines: usize, config: Option<PathBuf>) -> Result<(), String> {
+    let (cfg, _) = load_config(config, None)?;
+    let path = cfg.daemon.log_dir.join(&job).join("current.log");
+    let content = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let all: Vec<&str> = content.lines().collect();
+    let start = all.len().saturating_sub(lines);
+    for l in &all[start..] {
+        println!("{l}");
+    }
+    Ok(())
+}
+
+fn format_ts(ts: i64) -> String {
+    if ts <= 0 {
+        return "-".into();
+    }
+    match time::OffsetDateTime::from_unix_timestamp(ts) {
+        Ok(t) => t
+            .to_offset(time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC))
+            .format(&time::format_description::well_known::Rfc3339)
+            .unwrap_or_else(|_| "?".into()),
+        Err(_) => "-".into(),
+    }
 }
 
 fn find_config(explicit: Option<PathBuf>) -> Result<PathBuf, String> {
