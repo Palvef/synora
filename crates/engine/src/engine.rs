@@ -14,6 +14,9 @@ use synora_core::Metrics;
 /// Worker id used for runs executed locally by the standalone engine.
 pub const LOCAL_WORKER: &str = "local";
 
+/// Worker picker for distributed dispatch.
+pub type WorkerPlanner = Arc<dyn Fn(&JobSpec) -> Option<String> + Send + Sync>;
+
 pub struct Engine {
     /// Static daemon config: NOT hot-reloadable (spec §85). Reloadable job
     /// definitions live in `live_jobs`.
@@ -32,6 +35,8 @@ pub struct Engine {
     active_runs: std::sync::Mutex<HashMap<String, tokio_util::sync::CancellationToken>>,
     /// Source path + overrides for `reload()`.
     config_source: std::sync::RwLock<Option<(PathBuf, CliOverrides)>>,
+    /// Worker picker for distributed dispatch (None = standalone/local).
+    planner: std::sync::RwLock<Option<WorkerPlanner>>,
     shutdown: Arc<AtomicBool>,
 }
 
@@ -92,6 +97,7 @@ impl Engine {
             active: std::sync::Mutex::new(HashMap::new()),
             active_runs: std::sync::Mutex::new(HashMap::new()),
             config_source: std::sync::RwLock::new(None),
+            planner: std::sync::RwLock::new(None),
             shutdown: Arc::new(AtomicBool::new(false)),
         });
         Ok(engine)
@@ -213,9 +219,18 @@ impl Engine {
             .cloned()
             .unwrap_or_else(|| Arc::new(tokio::sync::Mutex::new(())));
         let _guard = lock.lock().await;
+        // Manager mode: planner picks (None = stay QUEUED, visible, spec §8).
+        // Standalone: everything runs on the local worker.
+        let worker: Option<String> = {
+            let planner = self.planner.read().unwrap();
+            match planner.as_ref() {
+                None => Some(LOCAL_WORKER.to_string()),
+                Some(p) => p(&job),
+            }
+        };
         let run_id = synora_core::RunId::new().to_string();
         self.store
-            .create_run(&run_id, job_name, Some(LOCAL_WORKER), JobStatus::Queued)
+            .create_run(&run_id, job_name, worker.as_deref(), JobStatus::Queued)
             .await
             .map_err(|e| e.to_string())?;
         let _ = self
@@ -262,6 +277,20 @@ impl Engine {
         crate::scheduler::dispatch_due(self, now).await;
         crate::scheduler::execute_queued(self).await;
         self.process_control_dir().await;
+    }
+
+    /// True when a planner is installed (manager mode): unassigned runs stay
+    /// QUEUED for remote workers instead of being executed locally.
+    pub fn has_planner(&self) -> bool {
+        self.planner.read().unwrap().is_some()
+    }
+
+    /// Install the worker picker (manager mode). Without it, runs stay local.
+    pub fn set_planner<F>(&self, f: F)
+    where
+        F: Fn(&JobSpec) -> Option<String> + Send + Sync + 'static,
+    {
+        *self.planner.write().unwrap() = Some(Arc::new(f));
     }
 
     /// Remember where the config came from so `reload()` can re-read it.

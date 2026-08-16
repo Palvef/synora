@@ -5,4 +5,5 @@ pub mod executor;
 pub mod logs;
 pub mod scheduler;
 
-pub use engine::Engine;
+pub use engine::{Engine, LOCAL_WORKER};
+pub use executor::{run_once, status_value, RunOutcome};

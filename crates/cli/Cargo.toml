@@ -12,6 +12,7 @@ synora-core.workspace = true
 config.workspace = true
 db.workspace = true
 engine.workspace = true
+api.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

@@ -98,6 +98,16 @@ pub async fn execute_queued(engine: &Arc<Engine>) {
     else {
         return;
     };
+    // Manager mode: NULL-worker runs wait for a remote worker — only execute
+    // runs explicitly assigned to the local worker (spec §8).
+    let queued: Vec<_> = if engine.has_planner() {
+        queued
+            .into_iter()
+            .filter(|r| r.worker_id.as_deref() == Some(crate::engine::LOCAL_WORKER))
+            .collect()
+    } else {
+        queued
+    };
     for run in queued {
         if engine.is_shutdown() {
             return;

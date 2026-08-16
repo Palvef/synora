@@ -23,6 +23,11 @@ pub struct RunRow {
     pub retry_count: u32,
     pub next_retry_at: Option<i64>,
     pub created_at: i64,
+    pub started_at: Option<i64>,
+    pub finished_at: Option<i64>,
+    pub duration_secs: Option<i64>,
+    pub exit_code: Option<i32>,
+    pub message: Option<String>,
 }
 
 pub struct Store {
@@ -257,7 +262,9 @@ impl Store {
                  ON CONFLICT(id) DO UPDATE SET
                    hostname=excluded.hostname, address=excluded.address,
                    version=excluded.version, labels=excluded.labels,
-                   last_heartbeat=excluded.last_heartbeat",
+                   last_heartbeat=excluded.last_heartbeat,
+                   status = CASE WHEN workers.status IN ('DRAINING','MAINTENANCE')
+                                 THEN workers.status ELSE 'ONLINE' END",
                 &[
                     id.into(),
                     hostname.into(),
@@ -270,6 +277,162 @@ impl Store {
             )
             .await?;
         Ok(())
+    }
+
+    // --- workers (M3: manager-side) -----------------------------------------
+
+    pub async fn list_workers(&self) -> DbResult<Vec<Vec<(String, DbValue)>>> {
+        self.db
+            .query(
+                "SELECT id, hostname, address, version, labels, capabilities, status,
+                        jobs_running, last_heartbeat, registered_at
+                 FROM workers ORDER BY id",
+                &[],
+            )
+            .await
+    }
+
+    pub async fn get_worker(&self, id: &str) -> DbResult<Option<Vec<(String, DbValue)>>> {
+        let mut rows = self
+            .db
+            .query(
+                "SELECT id, hostname, address, version, labels, capabilities, status,
+                        jobs_running, last_heartbeat, registered_at
+                 FROM workers WHERE id = ?",
+                &[id.into()],
+            )
+            .await?;
+        Ok(rows.pop())
+    }
+
+    pub async fn touch_heartbeat(&self, id: &str, jobs_running: u32, status: &str) -> DbResult<()> {
+        let _ = status; // heartbeat "idle/running" is informational; worker
+        // lifecycle status (ONLINE/OFFLINE/DRAINING/MAINTENANCE) is managed
+        // by register/reaper/drain only.
+        self.db
+            .execute(
+                "UPDATE workers SET last_heartbeat = ?, jobs_running = ? WHERE id = ?",
+                &[unix_now().into(), (jobs_running as i64).into(), id.into()],
+            )
+            .await?;
+        // Refresh the lease of this worker's active runs (spec §29).
+        self.db
+            .execute(
+                "UPDATE job_runs SET lease_expires_at = ?
+                 WHERE worker_id = ? AND status IN ('STARTING','RUNNING')",
+                &[(unix_now() + 60).into(), id.into()],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn set_worker_status(&self, id: &str, status: &str) -> DbResult<()> {
+        self.db
+            .execute(
+                "UPDATE workers SET status = ? WHERE id = ?",
+                &[status.into(), id.into()],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn delete_worker(&self, id: &str) -> DbResult<()> {
+        self.db
+            .execute("DELETE FROM workers WHERE id = ?", &[id.into()])
+            .await?;
+        Ok(())
+    }
+
+    /// Workers eligible for dispatch: ONLINE, under their concurrency cap.
+    pub async fn eligible_workers(&self, max_jobs: u32) -> DbResult<Vec<(String, Vec<String>)>> {
+        let rows = self
+            .db
+            .query(
+                "SELECT id, labels FROM workers
+                 WHERE status = 'ONLINE' AND jobs_running < ? ORDER BY jobs_running, id",
+                &[(max_jobs as i64).into()],
+            )
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|r| {
+                let labels: Vec<String> = cell(r, "labels")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or_default();
+                (
+                    cell(r, "id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    labels,
+                )
+            })
+            .collect())
+    }
+
+    /// QUEUED runs a specific worker should be offered (assigned to it).
+    pub async fn assigned_runs(&self, worker: &str) -> DbResult<Vec<RunRow>> {
+        self.runs_where("status = 'QUEUED' AND worker_id = ?", &[worker.into()])
+            .await
+    }
+
+    /// Active (claimed) runs of a worker.
+    pub async fn active_runs_of(&self, worker: &str) -> DbResult<Vec<RunRow>> {
+        self.runs_where(
+            "worker_id = ? AND status IN ('STARTING','RUNNING')",
+            &[worker.into()],
+        )
+        .await
+    }
+
+    /// Runs this worker holds that are marked CANCELLING (stop requests).
+    pub async fn cancelling_runs_of(&self, worker: &str) -> DbResult<Vec<RunRow>> {
+        self.runs_where(
+            "worker_id = ? AND status = 'CANCELLING'",
+            &[worker.into()],
+        )
+        .await
+    }
+
+    /// Runs whose lease expired (worker vanished) — the reaper marks LOST.
+    pub async fn expired_runs(&self, now: i64) -> DbResult<Vec<RunRow>> {
+        self.runs_where(
+            "status IN ('STARTING','RUNNING') AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?",
+            &[now.into()],
+        )
+        .await
+    }
+
+    pub async fn set_run_lost(&self, id: &str) -> DbResult<()> {
+        self.db
+            .execute(
+                "UPDATE job_runs SET status = 'LOST', finished_at = ?, message = 'lease expired (worker lost)'
+                 WHERE id = ?",
+                &[unix_now().into(), id.into()],
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// New run row on worker loss (LOST does not burn the retry budget, §29).
+    pub async fn create_lost_requeue(&self, id: &str, job_name: &str, worker: Option<&str>) -> DbResult<Option<String>> {
+        let new_id = synora_core::RunId::new().to_string();
+        self.db
+            .execute(
+                "INSERT INTO job_runs (id, job_id, worker_id, status, lost_count, created_at)
+                 SELECT ?, job_id, ?, 'QUEUED',
+                        COALESCE((SELECT lost_count FROM job_runs WHERE id = ?), 0) + 1,
+                        ?
+                 FROM job_runs WHERE id = ?",
+                &[
+                    new_id.clone().into(),
+                    worker.map(|w| w.to_string()).into(),
+                    id.into(),
+                    unix_now().into(),
+                    id.into(),
+                ],
+            )
+            .await?;
+        let _ = job_name;
+        Ok(Some(new_id))
     }
 
     // --- runs ---------------------------------------------------------------
@@ -304,9 +467,16 @@ impl Store {
         let n = self
             .db
             .execute(
-                "UPDATE job_runs SET status = 'STARTING', worker_id = ?, started_at = ?
+                "UPDATE job_runs SET status = 'STARTING', worker_id = ?, started_at = ?,
+                        lease_expires_at = ?
                  WHERE id = ? AND status = 'QUEUED' AND (worker_id IS NULL OR worker_id = ?)",
-                &[worker.into(), unix_now().into(), id.into(), worker.into()],
+                &[
+                    worker.into(),
+                    unix_now().into(),
+                    (unix_now() + 60).into(),
+                    id.into(),
+                    worker.into(),
+                ],
             )
             .await?;
         if n > 0 {
@@ -416,7 +586,8 @@ impl Store {
 
     async fn runs_where(&self, cond: &str, params: &[Param]) -> DbResult<Vec<RunRow>> {
         let sql = format!(
-            "SELECT id, job_id, worker_id, status, retry_count, next_retry_at, created_at
+            "SELECT id, job_id, worker_id, status, retry_count, next_retry_at, created_at,
+                    started_at, finished_at, duration_secs, exit_code, message
              FROM job_runs WHERE {cond} ORDER BY created_at"
         );
         let rows = self.db.query(&sql, params).await?;
@@ -432,25 +603,38 @@ impl Store {
                 retry_count: cell(r, "retry_count").and_then(|v| v.as_i64()).unwrap_or(0) as u32,
                 next_retry_at: cell(r, "next_retry_at").and_then(|v| v.as_i64()),
                 created_at: cell(r, "created_at").and_then(|v| v.as_i64()).unwrap_or(0),
+                started_at: cell(r, "started_at").and_then(|v| v.as_i64()),
+                finished_at: cell(r, "finished_at").and_then(|v| v.as_i64()),
+                duration_secs: cell(r, "duration_secs").and_then(|v| v.as_i64()),
+                exit_code: cell(r, "exit_code").and_then(|v| v.as_i64()).map(|v| v as i32),
+                message: cell(r, "message").and_then(|v| v.as_str()).map(String::from),
             })
             .collect())
     }
 
     /// Run history for one job, newest first.
     pub async fn run_history(&self, job_name: &str, limit: u32) -> DbResult<Vec<RunRow>> {
-        self.runs_where("job_id = ?", &[job_name.into()])
-            .await
-            .map(|mut v| {
-                v.reverse();
-                v.truncate(limit as usize);
-                v.reverse();
-                v
-            })
+        let mut v = self.runs_where("job_id = ?", &[job_name.into()]).await?;
+        v.reverse(); // created_at ascending → newest first
+        v.truncate(limit as usize);
+        Ok(v)
     }
 
     pub async fn get_run(&self, id: &str) -> DbResult<Option<RunRow>> {
         let mut rows = self.runs_where("id = ?", &[id.into()]).await?;
         Ok(rows.pop())
+    }
+
+    /// Mark a job's active runs CANCELLING (operator stop) — the worker picks
+    /// the id up in its next heartbeat and cancels locally.
+    pub async fn set_cancelling_by_job(&self, job_name: &str) -> DbResult<usize> {
+        self.db
+            .execute(
+                "UPDATE job_runs SET status = 'CANCELLING'
+                 WHERE job_id = ? AND status IN ('STARTING','RUNNING')",
+                &[job_name.into()],
+            )
+            .await
     }
 
     // --- repositories / events / logs ---------------------------------------

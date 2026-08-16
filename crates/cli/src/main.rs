@@ -73,6 +73,36 @@ enum Command {
         #[arg(short, long)]
         config: Option<PathBuf>,
     },
+    /// Worker management (talks to the manager API)
+    Worker {
+        #[command(subcommand)]
+        cmd: WorkerCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum WorkerCmd {
+    /// List registered workers
+    List {
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+        /// Manager base URL override (default: config api.listen)
+        #[arg(long)]
+        manager: Option<String>,
+        /// API token override (default: first configured token)
+        #[arg(long)]
+        token: Option<String>,
+    },
+    /// Drain a worker (no new runs; unregister when idle)
+    Drain {
+        id: String,
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+        #[arg(long)]
+        manager: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -132,6 +162,10 @@ async fn run(cli: Cli) -> Result<(), String> {
         Command::Logs { job, lines, config } => cmd_logs(job, lines, config)?,
         Command::Stop { job, config } => cmd_stop(job, config)?,
         Command::Reload { config } => cmd_reload(config)?,
+        Command::Worker { cmd } => match cmd {
+            WorkerCmd::List { config, manager, token } => cmd_worker_list(config, manager, token).await?,
+            WorkerCmd::Drain { id, config, manager, token } => cmd_worker_drain(id, config, manager, token).await?,
+        },
     }
     Ok(())
 }
@@ -337,6 +371,64 @@ fn cmd_stop(job: String, config: Option<PathBuf>) -> Result<(), String> {
     std::fs::create_dir_all(&control).map_err(|e| e.to_string())?;
     std::fs::write(control.join(format!("stop-{job}")), b"").map_err(|e| e.to_string())?;
     println!("cancel requested for `{job}` (the daemon will pick it up within a tick)");
+    Ok(())
+}
+
+/// Resolve manager URL + token from flags or the config's api section.
+fn manager_creds(
+    config: Option<PathBuf>,
+    manager: Option<String>,
+    token: Option<String>,
+) -> Result<(String, String), String> {
+    let (cfg, _) = load_config(config, None)?;
+    let url = match manager {
+        Some(u) => u,
+        None => format!("http://{}", cfg.api.listen),
+    };
+    let token = match token {
+        Some(t) => t,
+        None => cfg
+            .api
+            .tokens
+            .first()
+            .map(|t| t.token.clone())
+            .ok_or("no api token configured (set one in [api.tokens] or pass --token)")?,
+    };
+    Ok((url, token))
+}
+
+async fn cmd_worker_list(
+    config: Option<PathBuf>,
+    manager: Option<String>,
+    token: Option<String>,
+) -> Result<(), String> {
+    let (url, token) = manager_creds(config, manager, token)?;
+    let client = api::Client::new(&url, &token).map_err(|e| e.to_string())?;
+    let workers = client.list_workers().await.map_err(|e| e.to_string())?;
+    println!("{:<16} {:<20} {:<10} {:<8} LABELS", "ID", "HOSTNAME", "STATUS", "RUNNING");
+    for w in workers {
+        println!(
+            "{:<16} {:<20} {:<10} {:<8} {}",
+            w.id,
+            w.hostname,
+            w.status,
+            w.jobs_running,
+            w.labels.join(",")
+        );
+    }
+    Ok(())
+}
+
+async fn cmd_worker_drain(
+    id: String,
+    config: Option<PathBuf>,
+    manager: Option<String>,
+    token: Option<String>,
+) -> Result<(), String> {
+    let (url, token) = manager_creds(config, manager, token)?;
+    let client = api::Client::new(&url, &token).map_err(|e| e.to_string())?;
+    client.drain_worker(&id).await.map_err(|e| e.to_string())?;
+    println!("worker `{id}` draining");
     Ok(())
 }
 
