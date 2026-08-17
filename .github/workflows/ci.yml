@@ -5,6 +5,10 @@ on:
     branches: [master, main]
   pull_request:
 
+# CI only reads the repository — least privilege for the GITHUB_TOKEN.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
