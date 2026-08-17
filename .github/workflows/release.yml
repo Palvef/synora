@@ -89,6 +89,9 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      - name: List artifacts
+        run: find artifacts -type f | sort
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
