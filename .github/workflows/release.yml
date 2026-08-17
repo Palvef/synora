@@ -67,10 +67,10 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: synora-${{ matrix.target }}
-          path: |
-            synora-*.tar.gz
-            synora-manager-*.tar.gz
-            synora-worker-*.tar.gz
+          # synora-*.tar.gz already covers manager and worker: overlapping
+          # patterns upload each file twice and break the release step
+          # with "ReleaseAsset.name already exists".
+          path: synora-*.tar.gz
           if-no-files-found: error
 
   publish:
@@ -99,6 +99,5 @@ jobs:
         run: |
           gh release create "v$VER" \
             artifacts/synora-*.tar.gz \
-            artifacts/synora-manager-*.tar.gz \
-            artifacts/synora-worker-*.tar.gz \
-            --title "v$VER" --notes-file RELEASE_NOTES.md
+            --title "v$VER" --notes-file RELEASE_NOTES.md \
+          || gh release upload "v$VER" artifacts/synora-*.tar.gz --clobber
