@@ -20,8 +20,7 @@ use synora_core::job::{JobSpec, JobStatus};
 pub struct AppState {
     pub engine: Arc<Engine>,
     pub picker: WorkerPicker,
-    pub proxy_probes:
-        Arc<RwLock<std::collections::HashMap<String, netroute::ProxyProbe>>>,
+    pub proxy_probes: Arc<RwLock<std::collections::HashMap<String, netroute::ProxyProbe>>>,
 }
 
 /// Snapshot of workers for sync dispatch decisions, refreshed by the reaper
@@ -53,13 +52,18 @@ impl WorkerPicker {
         if let Ok(rows) = self.engine.store.list_workers().await {
             for row in &rows {
                 let cell = |n: &str| row.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone());
-                let id = cell("id").and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
+                let id = cell("id")
+                    .and_then(|v| v.as_str().map(String::from))
+                    .unwrap_or_default();
                 let labels: Vec<String> = cell("labels")
                     .and_then(|v| v.as_str().map(String::from))
                     .and_then(|s| serde_json::from_str(&s).ok())
                     .unwrap_or_default();
-                let jobs_running = cell("jobs_running").and_then(|v| v.as_i64()).unwrap_or(0) as u32;
-                let status = cell("status").and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
+                let jobs_running =
+                    cell("jobs_running").and_then(|v| v.as_i64()).unwrap_or(0) as u32;
+                let status = cell("status")
+                    .and_then(|v| v.as_str().map(String::from))
+                    .unwrap_or_default();
                 let max_concurrency = cell("capabilities")
                     .and_then(|v| v.as_str().map(String::from))
                     .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
@@ -106,7 +110,11 @@ impl WorkerPicker {
             }
             None => online
                 .iter()
-                .filter(|(_, w)| job.resources.iter().all(|r| w.labels.iter().any(|l| l == r)))
+                .filter(|(_, w)| {
+                    job.resources
+                        .iter()
+                        .all(|r| w.labels.iter().any(|l| l == r))
+                })
                 .min_by_key(|(_, w)| w.jobs_running)
                 .map(|(id, _)| (*id).clone()),
         }
@@ -134,12 +142,16 @@ pub fn build(
         .route("/jobs/{name}/run", post(trigger_run))
         .route("/jobs/{name}/stop", post(stop_run))
         .route("/jobs/{name}/history", get(history))
+        .route("/jobs/{name}/spec", get(job_spec))
         .route("/jobs/{name}/logs", get(job_logs))
         .route("/workers", get(list_workers))
         .route("/proxies", get(list_proxies))
         .route("/reload", post(reload))
         .with_state(state.clone())
-        .layer(axum::middleware::from_fn_with_state(state.clone(), crate::auth::require_auth));
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::auth::require_auth,
+        ));
 
     let json_paths = (
         state.engine.cfg.api.synora_json_path.clone(),
@@ -149,11 +161,14 @@ pub fn build(
         .nest(API_V1, authed)
         .route("/metrics", get(metrics))
         .route("/healthz", get(|| async { "ok" }));
-    // Status JSON for mirror-web frontends (paths configurable, spec §88–§89).
-    if !json_paths.0.is_empty() {
+    // Status JSON for mirror-web frontends (paths configurable, spec
+    // §88–§89). `status_format` picks which shape(s) to expose:
+    // "synora", "tunasync", or "both" (default).
+    let format = state.engine.cfg.api.status_format.as_str();
+    if !json_paths.0.is_empty() && matches!(format, "synora" | "both") {
         router = router.route(&json_paths.0, get(synora_json));
     }
-    if !json_paths.1.is_empty() {
+    if !json_paths.1.is_empty() && matches!(format, "tunasync" | "both") {
         router = router.route(&json_paths.1, get(tunasync_json));
     }
     (router.with_state(state.clone()), state)
@@ -194,6 +209,17 @@ async fn tunasync_json(State(state): State<AppState>) -> axum::Json<serde_json::
     ))
 }
 
+/// Strip userinfo from a URL (rsync/git upstreams embed credentials).
+fn strip_userinfo(u: &str) -> String {
+    match u.split_once("://") {
+        Some((scheme, rest)) => match rest.find('@') {
+            Some(at) if rest[..at].contains(':') => format!("{scheme}://{}", &rest[at + 1..]),
+            _ => u.to_string(),
+        },
+        None => u.to_string(),
+    }
+}
+
 /// Shared status collection for both JSON shapes.
 async fn status_entries(state: &AppState) -> Vec<serde_json::Value> {
     let mut out = Vec::new();
@@ -210,12 +236,17 @@ async fn status_entries(state: &AppState) -> Vec<serde_json::Value> {
                 .await
                 .ok()
                 .and_then(|mut v| v.pop());
-            let next_run = schedules.iter().find(|(n, _)| *n == name).and_then(|(_, r)| r.next_run);
+            let next_run = schedules
+                .iter()
+                .find(|(n, _)| *n == name)
+                .and_then(|(_, r)| r.next_run);
             let size = state
                 .engine
                 .store
                 .repository_size(
-                    &job.as_ref().map(|j| j.storage.display().to_string()).unwrap_or_default(),
+                    &job.as_ref()
+                        .map(|j| j.storage.display().to_string())
+                        .unwrap_or_default(),
                 )
                 .await
                 .ok()
@@ -224,7 +255,10 @@ async fn status_entries(state: &AppState) -> Vec<serde_json::Value> {
                 "name": name,
                 "status": format!("{status:?}").to_lowercase(),
                 "worker": last.as_ref().and_then(|r| r.worker_id.clone()),
-                "upstream": job.as_ref().and_then(|j| j.upstream.clone()),
+                "upstream": job
+                    .as_ref()
+                    .and_then(|j| j.upstream.clone())
+                    .map(|u| strip_userinfo(&u)),
                 "size_bytes": size,
                 "size_human": size.map(|s| synora_core::human_size(s as u64)),
                 "last_started": last.as_ref().and_then(|r| r.started_at),
@@ -241,9 +275,14 @@ async fn status_entries(state: &AppState) -> Vec<serde_json::Value> {
 
 fn fmt_local(ts: i64) -> String {
     time::OffsetDateTime::from_unix_timestamp(ts)
-        .map(|t| t.to_offset(time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC)))
+        .map(|t| {
+            t.to_offset(time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC))
+        })
         .ok()
-        .and_then(|t| t.format(&time::format_description::well_known::Rfc3339).ok())
+        .and_then(|t| {
+            t.format(&time::format_description::well_known::Rfc3339)
+                .ok()
+        })
         .unwrap_or_else(|| "-".into())
 }
 
@@ -276,9 +315,23 @@ async fn register(
             &body.address,
             &body.version,
             &body.labels,
+            &auth.name,
         )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // The worker restarted: runs it had claimed are lost (a restarted
+    // process never resumes them). Mark them LOST so the reaper can
+    // re-dispatch instead of the heartbeat lease keeping them alive forever.
+    let _ = state
+        .engine
+        .store
+        .db()
+        .execute(
+            "UPDATE job_runs SET status = 'LOST'
+             WHERE worker_id = ? AND status IN ('STARTING','RUNNING')",
+            &[worker_id.clone().into()],
+        )
+        .await;
     // Persist capabilities (incl. max_concurrency).
     let _ = state
         .engine
@@ -286,10 +339,7 @@ async fn register(
         .db()
         .execute(
             "UPDATE workers SET capabilities = ? WHERE id = ?",
-            &[
-                capabilities.to_string().into(),
-                worker_id.clone().into(),
-            ],
+            &[capabilities.to_string().into(), worker_id.clone().into()],
         )
         .await;
     state.picker.refresh().await;
@@ -300,6 +350,14 @@ async fn register(
     }))
 }
 
+/// Identity gate: the calling token must have registered this worker.
+async fn token_owns_worker(state: &AppState, auth: &AuthUser, worker_id: &str) -> bool {
+    match state.engine.store.worker_token(worker_id).await {
+        Ok(Some(t)) => t == auth.name,
+        _ => false,
+    }
+}
+
 async fn heartbeat(
     State(state): State<AppState>,
     axum::Extension(auth): axum::Extension<AuthUser>,
@@ -307,6 +365,9 @@ async fn heartbeat(
     axum::Json(body): axum::Json<HeartbeatRequest>,
 ) -> Result<axum::Json<HeartbeatResponse>, StatusCode> {
     require(&auth, "runs.manage")?;
+    if !token_owns_worker(&state, &auth, &worker_id).await {
+        return Err(StatusCode::FORBIDDEN);
+    }
     state
         .engine
         .store
@@ -335,9 +396,25 @@ async fn heartbeat(
     if let Ok(runs) = state.engine.store.assigned_runs(&worker_id).await {
         if let Some(run) = runs.first() {
             if let Some(job) = state.engine.job(&run.job_id) {
+                // The manager resolves the proxy here and ships the concrete
+                // settings with the assignment (worker never re-resolves).
+                let proxy_env = state
+                    .engine
+                    .netroute
+                    .read()
+                    .ok()
+                    .and_then(|g| {
+                        g.as_ref().map(|nr| {
+                            let sel = nr.select_proxy(job.proxy.as_deref());
+                            let cfg = job.proxy.as_deref().and_then(|n| nr.proxy_configs().get(n));
+                            netroute::dispatch_proxy_env(cfg, &sel)
+                        })
+                    })
+                    .unwrap_or_default();
                 response.assignment = Some(RunAssignment {
                     run_id: run.id.clone(),
                     job,
+                    proxy_env,
                 });
             }
         }
@@ -358,12 +435,26 @@ async fn claim(
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<axum::Json<RunAssignment>, StatusCode> {
     require(&auth, "runs.manage")?;
-    // Worker id: registered name via ?worker=, else legacy token name.
+    // Per-job concurrency gate: never claim a run while another run of the
+    // same job is active (prevents two workers — or two claims — racing on
+    // one mirror's directory/container name).
+    if let Ok(Some(row)) = state.engine.store.get_run(&run_id).await {
+        if let Ok(active) = state.engine.store.active_runs_of_job(&row.job_id).await {
+            if !active.is_empty() {
+                return Err(StatusCode::CONFLICT);
+            }
+        }
+    }
+    // Worker id: registered name via ?worker= (must be owned by this
+    // token), else the token's own name.
     let worker = params
         .get("worker")
         .cloned()
         .filter(|w| !w.is_empty())
         .unwrap_or_else(|| auth.name.clone());
+    if !token_owns_worker(&state, &auth, &worker).await {
+        return Err(StatusCode::FORBIDDEN);
+    }
     let claimed = state
         .engine
         .store
@@ -381,7 +472,24 @@ async fn claim(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
     let job = state.engine.job(&run.job_id).ok_or(StatusCode::NOT_FOUND)?;
-    Ok(axum::Json(RunAssignment { run_id, job }))
+    let proxy_env = state
+        .engine
+        .netroute
+        .read()
+        .ok()
+        .and_then(|g| {
+            g.as_ref().map(|nr| {
+                let sel = nr.select_proxy(job.proxy.as_deref());
+                let cfg = job.proxy.as_deref().and_then(|n| nr.proxy_configs().get(n));
+                netroute::dispatch_proxy_env(cfg, &sel)
+            })
+        })
+        .unwrap_or_default();
+    Ok(axum::Json(RunAssignment {
+        run_id,
+        job,
+        proxy_env,
+    }))
 }
 
 async fn complete(
@@ -398,13 +506,13 @@ async fn complete(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
-    // Identity: the caller must be the worker the run is assigned to —
-    // either by its registered id or, for legacy workers, its token name.
-    if run.worker_id.as_deref() != Some(body.worker_id.as_str())
-        && run.worker_id.as_deref() != Some(auth.name.as_str())
-    {
+    // Identity: the calling token must own the worker this run is
+    // assigned to (register-time binding, verified against the DB).
+    let run_worker = run.worker_id.clone().unwrap_or_default();
+    if !token_owns_worker(&state, &auth, &run_worker).await {
         return Err(StatusCode::FORBIDDEN);
     }
+    let _ = &body.worker_id;
     let Some(job) = state.engine.job(&run.job_id) else {
         return Err(StatusCode::NOT_FOUND);
     };
@@ -417,6 +525,20 @@ async fn complete(
     // own id; auth.name is only the token name).
     let worker_label = run.worker_id.clone().unwrap_or_else(|| auth.name.clone());
     let mut new_status = JobStatus::Success;
+    // Store the worker-reported log (distributed runs: the log lives on the
+    // worker host; the manager keeps the text for job_logs).
+    if let Some(log) = body.log.as_deref().filter(|l| !l.is_empty()) {
+        let _ = state
+            .engine
+            .store
+            .insert_log_with(
+                &run_id,
+                &job.name,
+                &format!("/var/log/synora/{}/current.log", job.name),
+                log,
+            )
+            .await;
+    }
 
     match body.status.as_str() {
         "cancelled" => {
@@ -424,7 +546,16 @@ async fn complete(
             let _ = state
                 .engine
                 .store
-                .finish_run(&run_id, JobStatus::Cancelled, None, None, None, None, body.message.as_deref(), duration)
+                .finish_run(
+                    &run_id,
+                    JobStatus::Cancelled,
+                    None,
+                    None,
+                    None,
+                    None,
+                    body.message.as_deref(),
+                    duration,
+                )
                 .await;
         }
         "success" => {
@@ -457,7 +588,10 @@ async fn complete(
             if let Some(bytes) = body.bytes_transferred {
                 state.engine.metrics.inc_counter(
                     "synora_job_bytes_transferred_total",
-                    &[("job", job.name.as_str()), ("worker", worker_label.as_str())],
+                    &[
+                        ("job", job.name.as_str()),
+                        ("worker", worker_label.as_str()),
+                    ],
                     bytes as f64,
                 );
             }
@@ -484,22 +618,33 @@ async fn complete(
                         .store
                         .set_run_status(&run_id, JobStatus::Retrying)
                         .await;
-                    state
-                        .engine
-                        .metrics
-                        .inc_counter("synora_job_retries_total", &[("job", job.name.as_str())], 1.0);
+                    state.engine.metrics.inc_counter(
+                        "synora_job_retries_total",
+                        &[("job", job.name.as_str())],
+                        1.0,
+                    );
                 }
                 synora_core::RetryDecision::NoRetry => {
                     new_status = JobStatus::Failed;
                     let _ = state
                         .engine
                         .store
-                        .finish_run(&run_id, JobStatus::Failed, body.exit_code.map(|v| v as i32), None, None, None, body.message.as_deref(), duration)
+                        .finish_run(
+                            &run_id,
+                            JobStatus::Failed,
+                            body.exit_code.map(|v| v as i32),
+                            None,
+                            None,
+                            None,
+                            body.message.as_deref(),
+                            duration,
+                        )
                         .await;
-                    state
-                        .engine
-                        .metrics
-                        .inc_counter("synora_job_failures_total", &[("job", job.name.as_str())], 1.0);
+                    state.engine.metrics.inc_counter(
+                        "synora_job_failures_total",
+                        &[("job", job.name.as_str())],
+                        1.0,
+                    );
                 }
             }
         }
@@ -507,7 +652,10 @@ async fn complete(
     }
     state.engine.metrics.set_gauge(
         "synora_job_status",
-        &[("job", job.name.as_str()), ("worker", worker_label.as_str())],
+        &[
+            ("job", job.name.as_str()),
+            ("worker", worker_label.as_str()),
+        ],
         engine::status_value(new_status),
     );
     state.engine.metrics.set_gauge(
@@ -530,6 +678,9 @@ async fn drain(
     Path(worker_id): Path<String>,
 ) -> Result<axum::Json<serde_json::Value>, StatusCode> {
     require(&auth, "workers.write")?;
+    if !token_owns_worker(&state, &auth, &worker_id).await {
+        return Err(StatusCode::FORBIDDEN);
+    }
     state
         .engine
         .store
@@ -547,6 +698,9 @@ async fn unregister(
     Path(worker_id): Path<String>,
 ) -> Result<axum::Json<serde_json::Value>, StatusCode> {
     require(&auth, "workers.write")?;
+    if !token_owns_worker(&state, &auth, &worker_id).await {
+        return Err(StatusCode::FORBIDDEN);
+    }
     // Only unregister when nothing is running on it (spec §11).
     if let Ok(runs) = state.engine.store.active_runs_of(&worker_id).await {
         if !runs.is_empty() {
@@ -574,8 +728,14 @@ async fn list_jobs(
 ) -> Result<axum::Json<Vec<JobDTO>>, StatusCode> {
     require(&auth, "jobs.read")?;
     let store = &state.engine.store;
-    let statuses = store.job_status_list().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let schedules = store.all_schedules().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let statuses = store
+        .job_status_list()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let schedules = store
+        .all_schedules()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let mut out = Vec::new();
     for (name, status) in statuses {
         let job = state.engine.job(&name);
@@ -609,6 +769,7 @@ async fn list_jobs(
                     synora_core::ProviderConfig::Rsync { .. } => "rsync",
                     synora_core::ProviderConfig::Script { .. } => "script",
                     synora_core::ProviderConfig::Docker { .. } => "docker",
+                    synora_core::ProviderConfig::Git { .. } => "git",
                     synora_core::ProviderConfig::Http { .. } => "http",
                 })
                 .unwrap_or("")
@@ -638,7 +799,7 @@ async fn trigger_run(
     require(&auth, "jobs.write")?;
     state
         .engine
-        .dispatch(&name)
+        .dispatch(&name, true)
         .await
         .map_err(|_| StatusCode::NOT_FOUND)
         .map(axum::Json)
@@ -652,7 +813,12 @@ async fn stop_run(
     require(&auth, "jobs.write")?;
     // Local runs (standalone-mode manager) cancel via the engine; remote runs
     // get marked CANCELLING and the worker cancels on its next heartbeat.
-    if let Ok(runs) = state.engine.store.active_runs_of(engine::LOCAL_WORKER).await {
+    if let Ok(runs) = state
+        .engine
+        .store
+        .active_runs_of(engine::LOCAL_WORKER)
+        .await
+    {
         if runs.iter().any(|r| r.job_id == name) {
             let _ = state.engine.stop_job(&name).await;
             return Ok(StatusCode::OK);
@@ -665,6 +831,20 @@ async fn stop_run(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(StatusCode::OK)
+}
+
+/// Full job definition (for the TUI's structured editor).
+async fn job_spec(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthUser>,
+    Path(name): Path<String>,
+) -> Result<axum::Json<JobSpec>, StatusCode> {
+    require(&auth, "jobs.read")?;
+    state
+        .engine
+        .job(&name)
+        .map(axum::Json)
+        .ok_or(StatusCode::NOT_FOUND)
 }
 
 async fn history(
@@ -689,10 +869,18 @@ async fn job_logs(
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<String, StatusCode> {
     require(&auth, "logs.read")?;
+    // The name must be a configured job — a raw path segment must never
+    // reach log_dir.join (path traversal).
+    if state.engine.job(&name).is_none() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    // Cap the tail at 10_000 lines: the caller wants the tail, not the
+    // whole file replayed.
     let tail: usize = params
         .get("tail")
         .and_then(|t| t.parse().ok())
-        .unwrap_or(50);
+        .unwrap_or(50)
+        .min(10_000);
     let path = state
         .engine
         .cfg
@@ -700,11 +888,45 @@ async fn job_logs(
         .log_dir
         .join(&name)
         .join("current.log");
-    let content =
-        std::fs::read_to_string(&path).map_err(|_| StatusCode::NOT_FOUND)?;
-    let lines: Vec<&str> = content.lines().collect();
-    let start = lines.len().saturating_sub(tail);
-    Ok(lines[start..].join("\n"))
+    let mut content = tail_of_file(&path, tail);
+    if content.as_deref().unwrap_or("").trim().is_empty() {
+        // Distributed runs: worker logs arrive with `complete` and are
+        // stored in job_logs.content.
+        match state.engine.store.latest_log_content(&name).await {
+            Ok(Some(c)) if !c.is_empty() => content = Some(tail_of_str(&c, tail)),
+            _ => return Err(StatusCode::NOT_FOUND),
+        }
+    }
+    match content {
+        Some(c) => Ok(c),
+        None => Err(StatusCode::NOT_FOUND),
+    }
+}
+
+/// Read the last `n` lines of a file without loading the whole thing:
+/// seek to the end, walk back over at most the final 4 MiB.
+fn tail_of_file(path: &std::path::Path, n: usize) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let size = f.metadata().ok()?.len();
+    let want = size.min(4 * 1024 * 1024);
+    f.seek(SeekFrom::End(-(want as i64))).ok()?;
+    let mut buf = Vec::with_capacity(want as usize);
+    f.read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf);
+    // The window starts mid-line; drop the first partial line.
+    let skip = usize::from(size > want);
+    Some(tail_of_str_skip(&text, n, skip))
+}
+
+fn tail_of_str(s: &str, n: usize) -> String {
+    tail_of_str_skip(s, n, 0)
+}
+
+fn tail_of_str_skip(s: &str, n: usize, skip_first: usize) -> String {
+    let lines: Vec<&str> = s.lines().collect();
+    let start = lines.len().saturating_sub(n).saturating_sub(skip_first);
+    lines[start..].join("\n")
 }
 
 async fn list_workers(
@@ -724,10 +946,18 @@ async fn list_workers(
     let mut out = Vec::new();
     for row in &rows {
         out.push(WorkerDTO {
-            id: cell(row, "id").and_then(|v| v.as_str().map(String::from)).unwrap_or_default(),
-            hostname: cell(row, "hostname").and_then(|v| v.as_str().map(String::from)).unwrap_or_default(),
-            address: cell(row, "address").and_then(|v| v.as_str().map(String::from)).unwrap_or_default(),
-            version: cell(row, "version").and_then(|v| v.as_str().map(String::from)).unwrap_or_default(),
+            id: cell(row, "id")
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_default(),
+            hostname: cell(row, "hostname")
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_default(),
+            address: cell(row, "address")
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_default(),
+            version: cell(row, "version")
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_default(),
             labels: cell(row, "labels")
                 .and_then(|v| v.as_str().map(String::from))
                 .and_then(|s| serde_json::from_str(&s).ok())
@@ -736,9 +966,15 @@ async fn list_workers(
                 .and_then(|v| v.as_str().map(String::from))
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or(serde_json::Value::Null),
-            status: cell(row, "status").and_then(|v| v.as_str().map(String::from)).unwrap_or_default(),
-            jobs_running: cell(row, "jobs_running").and_then(|v| v.as_i64()).unwrap_or(0) as u32,
-            last_heartbeat: cell(row, "last_heartbeat").and_then(|v| v.as_i64()).unwrap_or(0),
+            status: cell(row, "status")
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_default(),
+            jobs_running: cell(row, "jobs_running")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0) as u32,
+            last_heartbeat: cell(row, "last_heartbeat")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0),
         });
     }
     Ok(axum::Json(out))
@@ -806,7 +1042,11 @@ async fn reload(
     axum::Extension(auth): axum::Extension<AuthUser>,
 ) -> Result<axum::Json<ReloadResponse>, StatusCode> {
     require(&auth, "jobs.write")?;
-    let applied = state.engine.reload().await.map_err(|_| StatusCode::BAD_REQUEST)?;
+    let applied = state
+        .engine
+        .reload()
+        .await
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
     Ok(axum::Json(ReloadResponse { applied }))
 }
 
@@ -876,7 +1116,10 @@ pub async fn serve(
                     .await
                     .map_err(|e| e.to_string())?
             };
-            tracing::info!("serving https://{listen} (mTLS: {})", tls.client_ca.is_some());
+            tracing::info!(
+                "serving https://{listen} (mTLS: {})",
+                tls.client_ca.is_some()
+            );
             axum_server::bind_rustls(listen, config)
                 .serve(router.into_make_service())
                 .await
@@ -898,4 +1141,33 @@ pub async fn serve_plain(
     axum::serve(listener, router)
         .await
         .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{tail_of_file, tail_of_str_skip};
+
+    #[test]
+    fn tail_of_str_skip_drops_partial_first_line() {
+        let text = "l1\nl2\nl3\nl4\nl5\n";
+        assert_eq!(tail_of_str_skip(text, 2, 0), "l4\nl5");
+        assert_eq!(tail_of_str_skip(text, 2, 1), "l3\nl4\nl5");
+        // tail larger than the file: everything
+        assert_eq!(tail_of_str_skip(text, 99, 0), "l1\nl2\nl3\nl4\nl5");
+    }
+
+    #[test]
+    fn tail_of_file_reads_last_lines_only() {
+        let dir = std::env::temp_dir().join("synora-tail-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("log.txt");
+        let big = (0..100_000)
+            .map(|i| format!("line-{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&path, big).unwrap();
+        let tail = tail_of_file(&path, 3).unwrap();
+        assert_eq!(tail, "line-99997\nline-99998\nline-99999");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

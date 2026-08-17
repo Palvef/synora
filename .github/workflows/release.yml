@@ -1,0 +1,97 @@
+name: Release
+
+# Bumping the VERSION file on master builds every platform and publishes a
+# GitHub release tagged v<version>.
+on:
+  push:
+    branches: [master]
+    paths:
+      - "VERSION"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+          - target: aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: version
+        run: echo "value=$(cat VERSION | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Check VERSION matches Cargo.toml
+        run: |
+          cargo_ver=$(grep -m1 '^version' Cargo.toml | sed 's/.*= *"\([0-9.]*\)".*/\1/')
+          ver=$(cat VERSION | tr -d '[:space:]')
+          test "$ver" = "$cargo_ver" || { echo "VERSION ($ver) != Cargo.toml ($cargo_ver)"; exit 1; }
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install cross toolchain (linux aarch64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Build release binaries
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+        run: cargo build --workspace --release --locked --target ${{ matrix.target }}
+
+      - name: Package
+        env:
+          VER: ${{ steps.version.outputs.value }}
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../synora-$VER-${{ matrix.target }}.tar.gz \
+            synora synora-manager synora-worker
+          cd ../../..
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: synora-${{ matrix.target }}
+          path: |
+            synora-*.tar.gz
+            synora-*.zip
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: version
+        run: echo "value=$(cat VERSION | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.value }}
+          name: v${{ steps.version.outputs.value }}
+          files: |
+            artifacts/synora-*.tar.gz
+          generate_release_notes: true

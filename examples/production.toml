@@ -1,0 +1,67 @@
+# 生产部署示例（Manager + Worker 分离，SQLite + ZFS 存储 + 代理 + 快照）
+# 参考 /etc/synora/synora.toml 与 /etc/synora/worker.toml
+include = ["/etc/synora/jobs/*.toml"]
+
+[daemon]
+log_dir = "/var/log/synora"
+default_proxy = "cf-warp"          # 探测/工具流量走 CF 出口；镜像同步默认本机直连
+
+[daemon.db]
+kind = "sqlite"
+path = "/var/lib/synora/synora.db"
+
+[api]
+listen = "0.0.0.0:8100"
+synora_json_path = "/synora.json"       # 自研状态 JSON
+tunasync_json_path = "/tunasync.json"   # tunasync/mirror-web 兼容 JSON
+
+[[api.tokens]]
+name = "operator"
+token = "${SYNORA_API_TOKEN}"
+role = "admin"
+
+[[api.tokens]]
+name = "worker-zfs-1"
+token = "${SYNORA_WORKER_TOKEN}"
+role = "operator"
+permissions = ["runs.manage", "jobs.read"]
+
+# ZFS 存储后端：创建 dataset 时用配置指定的 -o 参数
+[storage.mirror]
+kind = "zfs"
+mountpoint = "/datas"
+pool = "datas"
+dataset = "mirror"
+zfs_options = "-o recordsize=1M -o xattr=off -o atime=off -o setuid=off -o exec=off -o devices=off -o sync=disabled -o secondarycache=metadata -o redundant_metadata=most"
+auto_create = true
+
+# 代理：CF One / WARP 本地出口（TUI 里 w 键自动注册同一段）
+[proxy.cf-warp]
+type = "socks5h"
+url = "socks5h://127.0.0.1:40000"
+healthcheck = "https://cloudflare.com/cdn-cgi/trace"
+timeout = "10s"
+expose = "127.0.0.1:4000"
+
+[proxy_groups.default]
+proxies = ["cf-warp"]
+strategy = "failover"
+
+# 快照保留（仅对开启 snapshot policy 的 job 生效）
+[snapshot_retention]
+keep_last = 8
+keep_daily = 14
+keep_weekly = 8
+keep_monthly = 6
+
+# 失败通知（连续失败去重）
+[notification]
+webhook_url = "https://alert.example.org/hook"
+alert_after_failures = 3
+
+# 任务组（synora run-group <name> 批量触发）
+[groups.weekly]
+jobs = ["debian", "ubuntu", "centos"]
+
+# 存储剩余空间保护
+min_free_bytes = 107374182400      # 100 GiB

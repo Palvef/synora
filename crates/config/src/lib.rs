@@ -7,7 +7,7 @@ mod schema;
 
 pub use error::ConfigError;
 pub use loader::{
-    ApiConfig, ApiToken, CgroupConfig, CliOverrides, ConfigLoader, DaemonConfig, DbConfig,
-    DbKind, EgressConfig, EgressGroupConfig, NotificationConfig, ProxyConfig, ProxyGroupConfig,
-    ProxyKind, ResolvedConfig, StorageConfig, StorageKind, TlsConfig,
+    ApiConfig, ApiToken, CgroupConfig, CliOverrides, ConfigLoader, DaemonConfig, DbConfig, DbKind,
+    EgressConfig, EgressGroupConfig, NotificationConfig, ProxyConfig, ProxyGroupConfig, ProxyKind,
+    ResolvedConfig, StorageConfig, StorageKind, TlsConfig,
 };

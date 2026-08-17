@@ -89,6 +89,16 @@ pub enum ProviderConfig {
         /// Keep the container after exit for debugging (spec §18).
         #[serde(default)]
         keep_container: bool,
+        /// Command to run inside the container (argv). Empty = the image's
+        /// own entrypoint (tunasync-scripts style).
+        #[serde(default)]
+        command: Vec<String>,
+    },
+    Git {
+        /// Clone only this branch (single-branch checkout); default is a
+        /// full `--mirror` clone of all refs.
+        #[serde(default)]
+        branch: Option<String>,
     },
     Http {
         /// Directory-listing parser name (spec §14): nginx|apache|caddy|s3|
@@ -193,6 +203,16 @@ pub struct JobSpec {
     /// Local repository path. Canonicalized and `..`-checked at config load,
     /// re-checked at exec time.
     pub storage: PathBuf,
+    /// tunasync `mirror_subdir`: store under `<storage>/<sub_dir>` instead of the
+    /// storage root (applied at config load; the runtime only ever sees the
+    /// final path).
+    #[serde(default)]
+    pub mirror_subdir: Option<String>,
+    /// Which `[storage.<name>]` section this job's storage belongs to.
+    /// Workers may define the same name with different local pools/mounts;
+    /// the actual path is then `<storage mountpoint>/<job storage>`.
+    #[serde(default)]
+    pub storage_name: Option<String>,
     /// Proxy / proxy-group name (parsed, inert until Phase 3).
     pub proxy: Option<String>,
     /// Egress / egress-group name — the source address to bind (Phase 3).

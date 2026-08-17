@@ -27,9 +27,13 @@ fn write(dir: &Path, rel: &str, content: &str) {
 
 async fn engine_for(dir: &Path) -> Arc<Engine> {
     let cfg = ConfigLoader::load(&dir.join("synora.toml"), &CliOverrides::default()).unwrap();
-    Engine::new(cfg, &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations"), true)
-        .await
-        .unwrap()
+    Engine::new(
+        cfg,
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations"),
+        true,
+    )
+    .await
+    .unwrap()
 }
 
 fn config_text(dir: &Path) -> String {
@@ -52,7 +56,11 @@ listen = "127.0.0.1:0"
 }
 
 /// Drive ticks until the run reaches a terminal state (bounded).
-async fn wait_terminal(engine: &Arc<Engine>, run_id: &str, timeout_secs: u64) -> synora_core::job::JobStatus {
+async fn wait_terminal(
+    engine: &Arc<Engine>,
+    run_id: &str,
+    timeout_secs: u64,
+) -> synora_core::job::JobStatus {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     loop {
         engine.tick().await;
@@ -96,7 +104,7 @@ storage = "{}"
     write(&dir, "synora.toml", &config_text(&dir));
     let engine = engine_for(&dir).await;
     engine.sync_config().await.unwrap();
-    let run_id = engine.dispatch("smoke").await.unwrap();
+    let run_id = engine.dispatch("smoke", true).await.unwrap();
     let status = wait_terminal(&engine, &run_id, 15).await;
     assert_eq!(status, synora_core::JobStatus::Success);
     // SYNORA_SIZE= recorded into repositories + metrics (spec §17/§38).
@@ -143,7 +151,7 @@ retry_delay = "1s"
     write(&dir, "synora.toml", &config_text(&dir));
     let engine = engine_for(&dir).await;
     engine.sync_config().await.unwrap();
-    let run_id = engine.dispatch("flaky").await.unwrap();
+    let run_id = engine.dispatch("flaky", true).await.unwrap();
     let status = wait_terminal(&engine, &run_id, 30).await;
     assert_eq!(status, synora_core::JobStatus::Failed);
     // retry = 2 → two scheduled retries, then terminal failure (spec §54).
@@ -177,9 +185,13 @@ fail_on_match = "FATAL"
     write(&dir, "synora.toml", &config_text(&dir));
     let engine = engine_for(&dir).await;
     engine.sync_config().await.unwrap();
-    let run_id = engine.dispatch("m").await.unwrap();
+    let run_id = engine.dispatch("m", true).await.unwrap();
     let status = wait_terminal(&engine, &run_id, 15).await;
-    assert_eq!(status, synora_core::JobStatus::Failed, "fail_on_match must force failure");
+    assert_eq!(
+        status,
+        synora_core::JobStatus::Failed,
+        "fail_on_match must force failure"
+    );
 }
 
 #[tokio::test]
@@ -209,7 +221,7 @@ on_success = ["echo HOOKED > {}/marker"]
     engine.sync_config().await.unwrap();
     let job = engine.job("h").unwrap();
     assert_eq!(job.hooks.on_success.len(), 1, "hook parsed from config");
-    let run_id = engine.dispatch("h").await.unwrap();
+    let run_id = engine.dispatch("h", true).await.unwrap();
     let status = wait_terminal(&engine, &run_id, 15).await;
     assert_eq!(status, synora_core::job::JobStatus::Success);
     assert!(marker.exists(), "on_success hook must have run");
@@ -242,7 +254,7 @@ statistics = "filesystem"
     write(&dir, "synora.toml", &config_text(&dir));
     let engine = engine_for(&dir).await;
     engine.sync_config().await.unwrap();
-    let run_id = engine.dispatch("r").await.unwrap();
+    let run_id = engine.dispatch("r", true).await.unwrap();
     let status = wait_terminal(&engine, &run_id, 30).await;
     assert_eq!(status, synora_core::job::JobStatus::Success);
     assert_eq!(
@@ -279,7 +291,7 @@ timeout = "5m"
     write(&dir, "synora.toml", &config_text(&dir));
     let engine = engine_for(&dir).await;
     engine.sync_config().await.unwrap();
-    let run_id = engine.dispatch("slow").await.unwrap();
+    let run_id = engine.dispatch("slow", true).await.unwrap();
     // One tick starts the run; then stop cancels it.
     engine.tick().await;
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;

@@ -27,13 +27,22 @@ pub struct Schedule {
 pub enum ScheduleKind {
     /// 6-field cron "sec min hour dom mon dow"; a 5-field expression gets
     /// seconds prepended at parse time.
-    Cron { expr: String },
+    Cron {
+        expr: String,
+    },
     /// Every day at a fixed time.
-    Daily { at: Time },
+    Daily {
+        at: Time,
+    },
     /// A fixed weekday + time.
-    Weekly { weekday: Weekday, at: Time },
+    Weekly {
+        weekday: Weekday,
+        at: Time,
+    },
     /// Fixed period anchored to a persistent anchor time (no drift).
-    Interval { every: Duration },
+    Interval {
+        every: Duration,
+    },
     Manual,
     Startup,
 }
@@ -134,7 +143,11 @@ fn weekly_next(
 /// Next slot on the anchor grid strictly after `now`: anchor is the alignment
 /// point; run times are anchor + k*every. Immune to run duration and restarts
 /// (spec §6.5).
-pub fn interval_next(anchor: OffsetDateTime, every: Duration, now: OffsetDateTime) -> OffsetDateTime {
+pub fn interval_next(
+    anchor: OffsetDateTime,
+    every: Duration,
+    now: OffsetDateTime,
+) -> OffsetDateTime {
     let every_secs = every.whole_seconds().max(1) as u64;
     let span_secs = (now - anchor).whole_seconds().max(0) as u64;
     let k = span_secs / every_secs;
@@ -149,7 +162,12 @@ fn cron_next(expr: &str, now: OffsetDateTime, tz: &time_tz::Tz) -> Option<Offset
     let cron = CronExpr::parse(expr).ok()?;
     let now_local = wall(now, tz);
     // Minute granularity: start at the next minute boundary.
-    let t0 = now_local.time().replace_nanosecond(0).ok()?.replace_second(0).ok()?;
+    let t0 = now_local
+        .time()
+        .replace_nanosecond(0)
+        .ok()?
+        .replace_second(0)
+        .ok()?;
     let mut candidate = now_local.date().with_time(t0);
     candidate += Duration::minutes(1);
     // Worst case (a cron that fires once a year) scans ~1M minutes — still
@@ -217,7 +235,10 @@ impl CronExpr {
     fn parse(expr: &str) -> Result<CronExpr, String> {
         let fields: Vec<&str> = expr.split_whitespace().collect();
         if fields.len() != 6 {
-            return Err(format!("expected 6 fields `sec min hour dom mon dow`, got {}", fields.len()));
+            return Err(format!(
+                "expected 6 fields `sec min hour dom mon dow`, got {}",
+                fields.len()
+            ));
         }
         let (sec_s, min_s, hour_s, dom_s, mon_s, dow_s) = (
             fields[0], fields[1], fields[2], fields[3], fields[4], fields[5],
@@ -246,7 +267,9 @@ impl CronExpr {
         let dom_restricted = !self.dom.is_full_range(1, 31);
         let dow_restricted = !self.dow.is_full_range(0, 7);
         let day_ok = match (dom_restricted, dow_restricted) {
-            (true, true) => self.dom.matches(t.day() as u32) || self.dow.matches(dow_num(t.weekday())),
+            (true, true) => {
+                self.dom.matches(t.day() as u32) || self.dow.matches(dow_num(t.weekday()))
+            }
             (true, false) => self.dom.matches(t.day() as u32),
             (false, true) => self.dow.matches(dow_num(t.weekday())),
             (false, false) => true,
@@ -338,7 +361,9 @@ fn parse_field(s: &str, lo: u32, hi: u32, names: &[(&str, u32)]) -> Result<CronF
         let a = if a == "*" { lo } else { resolve(a)? };
         let b = if b == "*" { hi } else { resolve(b)? };
         if a > b {
-            return Err(format!("invalid cron range `{range}` in `{s}`: start > end"));
+            return Err(format!(
+                "invalid cron range `{range}` in `{s}`: start > end"
+            ));
         }
         if a < lo || b > hi {
             return Err(format!(
@@ -364,11 +389,7 @@ pub fn parse_cron_expr(expr: &str) -> Result<String, String> {
         5 => format!("0 {expr}"),
         6 => expr.to_string(),
         7 if fields[6] == "*" => fields[..6].join(" "),
-        7 => {
-            return Err(format!(
-                "year-restricted cron `{expr}` is not supported"
-            ))
-        }
+        7 => return Err(format!("year-restricted cron `{expr}` is not supported")),
         n => {
             return Err(format!(
                 "invalid cron expression `{expr}`: expected 5 fields, got {n}"
@@ -410,11 +431,17 @@ pub fn parse_duration_human(s: &str) -> Result<Duration, String> {
                 saw_digit = false;
                 saw_unit = true;
             }
-            _ => return Err(format!("invalid duration `{s}`: unexpected character `{c}`")),
+            _ => {
+                return Err(format!(
+                    "invalid duration `{s}`: unexpected character `{c}`"
+                ))
+            }
         }
     }
     if !saw_unit || saw_digit {
-        return Err(format!("invalid duration `{s}`: expected like `6h` or `1h30m`"));
+        return Err(format!(
+            "invalid duration `{s}`: expected like `6h` or `1h30m`"
+        ));
     }
     Ok(total)
 }
@@ -508,8 +535,14 @@ mod tests {
 
     #[test]
     fn time_and_weekday() {
-        assert_eq!(parse_time_at("03:30:00").unwrap(), Time::from_hms(3, 30, 0).unwrap());
-        assert_eq!(parse_time_at("04:00").unwrap(), Time::from_hms(4, 0, 0).unwrap());
+        assert_eq!(
+            parse_time_at("03:30:00").unwrap(),
+            Time::from_hms(3, 30, 0).unwrap()
+        );
+        assert_eq!(
+            parse_time_at("04:00").unwrap(),
+            Time::from_hms(4, 0, 0).unwrap()
+        );
         assert!(parse_time_at("25:00:00").is_err());
         assert_eq!(parse_weekday("Sunday").unwrap(), Weekday::Sunday);
         assert_eq!(parse_weekday("mon").unwrap(), Weekday::Monday);
@@ -524,10 +557,14 @@ mod tests {
             },
         };
         // 2026-08-16T01:30 UTC → next at 04:00 UTC.
-        let next = s.next_after(utc(2026, 8, 16, 1, 30), timezones::db::UTC, None).unwrap();
+        let next = s
+            .next_after(utc(2026, 8, 16, 1, 30), timezones::db::UTC, None)
+            .unwrap();
         assert_eq!(next, utc(2026, 8, 16, 4, 0));
         // exactly on a slot → strictly after.
-        let next = s.next_after(utc(2026, 8, 16, 4, 0), timezones::db::UTC, None).unwrap();
+        let next = s
+            .next_after(utc(2026, 8, 16, 4, 0), timezones::db::UTC, None)
+            .unwrap();
         assert_eq!(next, utc(2026, 8, 16, 8, 0));
     }
 
@@ -539,7 +576,9 @@ mod tests {
             },
         };
         // 2026-08-14 is a Friday; 02:30 Saturday 2026-08-15 is excluded.
-        let next = s.next_after(utc(2026, 8, 14, 10, 0), timezones::db::UTC, None).unwrap();
+        let next = s
+            .next_after(utc(2026, 8, 14, 10, 0), timezones::db::UTC, None)
+            .unwrap();
         assert_eq!(next, utc(2026, 8, 17, 2, 30)); // Monday
     }
 
@@ -552,7 +591,9 @@ mod tests {
         };
         // 01:00 UTC = 09:00 Shanghai (UTC+8): 03:30 local already passed,
         // next occurrence is tomorrow 03:30 +08 = 19:30 UTC.
-        let next = s.next_after(utc(2026, 8, 16, 1, 0), shanghai(), None).unwrap();
+        let next = s
+            .next_after(utc(2026, 8, 16, 1, 0), shanghai(), None)
+            .unwrap();
         assert_eq!(next, utc(2026, 8, 16, 19, 30));
     }
 
@@ -563,12 +604,18 @@ mod tests {
                 at: time!(03:30:00),
             },
         };
-        let next = s.next_after(utc(2026, 8, 16, 1, 0), timezones::db::UTC, None).unwrap();
+        let next = s
+            .next_after(utc(2026, 8, 16, 1, 0), timezones::db::UTC, None)
+            .unwrap();
         assert_eq!(next, utc(2026, 8, 16, 3, 30));
-        let next = s.next_after(utc(2026, 8, 16, 3, 30), timezones::db::UTC, None).unwrap();
+        let next = s
+            .next_after(utc(2026, 8, 16, 3, 30), timezones::db::UTC, None)
+            .unwrap();
         assert_eq!(next, utc(2026, 8, 17, 3, 30));
         // 01:00 UTC = 09:00 Shanghai: next 03:30 local is tomorrow = 19:30 UTC.
-        let next = s.next_after(utc(2026, 8, 16, 1, 0), shanghai(), None).unwrap();
+        let next = s
+            .next_after(utc(2026, 8, 16, 1, 0), shanghai(), None)
+            .unwrap();
         assert_eq!(next, utc(2026, 8, 16, 19, 30));
     }
 
@@ -581,13 +628,19 @@ mod tests {
             },
         };
         // 2026-08-16 is a Sunday; from Monday 08-17 the next is Sunday 08-23.
-        let next = s.next_after(utc(2026, 8, 17, 0, 0), timezones::db::UTC, None).unwrap();
+        let next = s
+            .next_after(utc(2026, 8, 17, 0, 0), timezones::db::UTC, None)
+            .unwrap();
         assert_eq!(next, utc(2026, 8, 23, 4, 0));
         // same Sunday before 04:00 → today.
-        let next = s.next_after(utc(2026, 8, 16, 3, 0), timezones::db::UTC, None).unwrap();
+        let next = s
+            .next_after(utc(2026, 8, 16, 3, 0), timezones::db::UTC, None)
+            .unwrap();
         assert_eq!(next, utc(2026, 8, 16, 4, 0));
         // same Sunday after 04:00 → next week.
-        let next = s.next_after(utc(2026, 8, 16, 5, 0), timezones::db::UTC, None).unwrap();
+        let next = s
+            .next_after(utc(2026, 8, 16, 5, 0), timezones::db::UTC, None)
+            .unwrap();
         assert_eq!(next, utc(2026, 8, 23, 4, 0));
     }
 
@@ -641,7 +694,13 @@ mod tests {
         let st = Schedule {
             kind: ScheduleKind::Startup,
         };
-        assert_eq!(m.next_after(utc(2026, 8, 16, 0, 0), timezones::db::UTC, None), None);
-        assert_eq!(st.next_after(utc(2026, 8, 16, 0, 0), timezones::db::UTC, None), None);
+        assert_eq!(
+            m.next_after(utc(2026, 8, 16, 0, 0), timezones::db::UTC, None),
+            None
+        );
+        assert_eq!(
+            st.next_after(utc(2026, 8, 16, 0, 0), timezones::db::UTC, None),
+            None
+        );
     }
 }

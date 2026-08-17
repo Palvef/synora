@@ -83,12 +83,23 @@ pub struct Fetcher {
 
 impl Fetcher {
     pub fn new() -> Result<Self, FetchError> {
-        let client = reqwest::Client::builder()
-            .no_proxy()
+        Self::with_proxy(None)
+    }
+
+    /// Build a client with an explicit proxy URL (`http://[user:pass@]host:port`)
+    /// when given — the manager-dispatched egress path — and no proxy otherwise.
+    pub fn with_proxy(proxy: Option<&str>) -> Result<Self, FetchError> {
+        let mut builder = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::limited(10))
-            .timeout(REQUEST_TIMEOUT)
-            .build()?;
-        Ok(Self { client })
+            .timeout(REQUEST_TIMEOUT);
+        builder = match proxy {
+            Some(url) => builder
+                .proxy(reqwest::Proxy::all(url).map_err(|e| FetchError::Http(e.to_string()))?),
+            None => builder.no_proxy(),
+        };
+        Ok(Self {
+            client: builder.build()?,
+        })
     }
 
     /// Recursively fetch the index from `base_url` with the given parser and
@@ -177,7 +188,9 @@ impl Fetcher {
                 Ok(Ok((bytes, url))) => {
                     stats.downloaded_bytes += bytes;
                     stats.files_downloaded += 1;
-                    stats.log_lines.push(format!("downloaded {url} ({bytes} bytes)"));
+                    stats
+                        .log_lines
+                        .push(format!("downloaded {url} ({bytes} bytes)"));
                 }
                 Ok(Err((FetchError::Cancelled, _))) => cancelled = true,
                 Ok(Err((e, url))) => {
@@ -204,7 +217,11 @@ impl Fetcher {
                     error_chain(&e)
                 );
                 stats.files_skipped += 1;
-                stats.log_lines.push(format!("skipped delete of {}: {}", path.display(), error_chain(&e)));
+                stats.log_lines.push(format!(
+                    "skipped delete of {}: {}",
+                    path.display(),
+                    error_chain(&e)
+                ));
                 continue;
             }
             stats.files_deleted += 1;

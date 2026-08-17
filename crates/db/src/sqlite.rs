@@ -129,11 +129,7 @@ impl SqliteDb {
         let conn = self.conn.lock().await;
         let mut stmt = conn.prepare(sql).map_err(|e| DbError::Sql(e.to_string()))?;
         let values: Vec<rusqlite::types::Value> = params.iter().map(to_sql_value).collect();
-        let column_names: Vec<String> = stmt
-            .column_names()
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let column_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
         let rows = stmt
             .query_map(rusqlite::params_from_iter(values.iter()), |row| {
                 let mut cells = Vec::with_capacity(column_names.len());

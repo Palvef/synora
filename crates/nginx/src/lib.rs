@@ -32,16 +32,24 @@ impl NginxParser {
         let mut rest = text.as_ref();
         while let Some(pos) = rest.find("<a ") {
             let after_a = &rest[pos + 3..];
-            let Some(tag_end) = after_a.find('>') else { break };
+            let Some(tag_end) = after_a.find('>') else {
+                break;
+            };
             let tag = &after_a[..tag_end];
             let Some(href) = extract_href(tag) else {
                 rest = &after_a[tag_end + 1..];
                 continue;
             };
             let after_tag = &after_a[tag_end + 1..];
-            let Some(link_end) = after_tag.find("</a>") else { break };
+            let Some(link_end) = after_tag.find("</a>") else {
+                break;
+            };
             let label = strip_html(&after_tag[..link_end]);
-            let name = if label.is_empty() { href.clone() } else { label };
+            let name = if label.is_empty() {
+                href.clone()
+            } else {
+                label
+            };
             let trailing = &after_tag[link_end + 4..];
             rest = trailing;
 
@@ -149,8 +157,7 @@ fn find_date(text: &str) -> Option<PrimitiveDateTime> {
         let day = two_digits(w[0], w[1])?;
         let mon = &text[i + 3..i + 6].to_ascii_lowercase();
         let m = MONTHS.iter().position(|m| *m == mon)?;
-        let year = two_digits(w[7], w[8])? as i32 * 100
-            + two_digits(w[9], w[10])? as i32;
+        let year = two_digits(w[7], w[8])? as i32 * 100 + two_digits(w[9], w[10])? as i32;
         let hour = two_digits(w[12], w[13])?;
         let minute = two_digits(w[15], w[16])?;
         let date = Date::from_calendar_date(year, Month::try_from(m as u8 + 1).ok()?, day).ok()?;
@@ -219,7 +226,10 @@ mod tests {
         assert_eq!(gz.kind, EntryKind::File);
         assert_eq!(gz.size, Some(12 * 1024));
         let iso = &entries[3];
-        assert_eq!(iso.size, Some((4.2f64 * 1024.0 * 1024.0 * 1024.0).round() as u64));
+        assert_eq!(
+            iso.size,
+            Some((4.2f64 * 1024.0 * 1024.0 * 1024.0).round() as u64)
+        );
         assert_eq!(entries[4].size, Some(3204));
         let date = entries[0].modified.unwrap();
         assert_eq!(date.year(), 2026);
@@ -290,9 +300,11 @@ mod tests {
     #[test]
     fn large_size_token() {
         assert_eq!(parse_size_token("10T").unwrap(), 10 * 1024u64.pow(4));
-        assert_eq!(parse_size_token("1.5M").unwrap(), (1.5 * 1024.0 * 1024.0) as u64);
+        assert_eq!(
+            parse_size_token("1.5M").unwrap(),
+            (1.5 * 1024.0 * 1024.0) as u64
+        );
         assert_eq!(parse_size_token("42").unwrap(), 42);
         assert!(parse_size_token("abc").is_none());
     }
 }
-

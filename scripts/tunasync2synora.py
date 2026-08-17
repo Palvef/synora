@@ -62,15 +62,21 @@ def parse_list(value):
     return [v.strip().strip('"\'') for v in value.split(",") if v.strip()]
 
 
-def render_job(m, log_dir, storage_dir):
+def render_job(m, log_dir, storage_dir, global_docker_volumes, global_interval):
     lines = ["[[jobs]]", f"name = {toml_str(m['name'])}", "enabled = true", ""]
     provider = m.get("provider", "rsync")
 
     # --- schedule: tunasync interval (minutes) → Synora no-drift interval ---
+    # A mirror without its own interval inherits the worker-level global
+    # `interval` (tunasync semantics), not "manual".
     interval = m.get("interval")
     if interval:
         lines.append('schedule = "interval"')
         lines.append(f"every = {toml_str(f'{int(interval)}m')}")
+    elif global_interval:
+        lines.append('schedule = "interval"')
+        lines.append(f"every = {toml_str(f'{int(global_interval)}m')}")
+        lines.append("  # inherited from the tunasync global interval")
     else:
         lines.append('schedule = "manual"  # no interval configured in tunasync')
 
@@ -92,19 +98,41 @@ def render_job(m, log_dir, storage_dir):
         if codes:
             lines.append(f"success_exit_codes = {codes}")
     elif provider == "command":
-        lines.append('provider = "script"')
-        lines.append(f"command = {toml_str(m.get('command', ''))}")
-        lines.append(f"upstream = {toml_str(m.get('upstream', ''))}")
-        if m.get("fail_on_match"):
-            lines.append(f"fail_on_match = {toml_str(m['fail_on_match'])}")
+        if m.get("docker_image"):
+            # TUNA production mode: the command runs INSIDE the tunasync-scripts
+            # image (toolchain + proxies provided by the image env).
+            lines.append('provider = "docker"')
+            lines.append(f"image = {toml_str(m['docker_image'])}")
+            lines.append(f"docker_command = [{toml_str(m.get('command', ''))}]")
+            lines.append(f"upstream = {toml_str(m.get('upstream', ''))}")
+            env = parse_list(m.get("env")) + m.get("env_table", [])
+            # Fixed proxy envs migrate to the cf-warp exit (manager-shipped).
+            proxy_env = [e for e in env if any(k in e.upper() for k in ("PROXY",))]
+            if proxy_env:
+                lines.append('proxy = "cf-warp"')
+            env = [e for e in env if e not in proxy_env]
+            if env:
+                lines.append(f"env = {toml_list(env)}")
+            volumes = global_docker_volumes + parse_list(m.get("docker_volumes"))
+            if volumes:
+                lines.append(f"volumes = {toml_list(volumes)}")
+        else:
+            lines.append('provider = "script"')
+            lines.append(f"command = {toml_str(m.get('command', ''))}")
+            lines.append(f"upstream = {toml_str(m.get('upstream', ''))}")
+            if m.get("fail_on_match"):
+                lines.append(f"fail_on_match = {toml_str(m['fail_on_match'])}")
     elif provider in ("docker", "two-stage-rsync"):
         image = m.get("docker_image", "ustcmirror/rsync:latest")
         lines.append('provider = "docker"')
         lines.append(f"image = {toml_str(image)}")
         lines.append(f"upstream = {toml_str(m.get('upstream', ''))}")
-        env = []
-        for e in parse_list(m.get("env")):
-            env.append(e)
+        env = parse_list(m.get("env")) + m.get("env_table", [])
+        # Fixed proxy envs migrate to the cf-warp exit (manager-shipped).
+        proxy_env = [e for e in env if any(k in e.upper() for k in ("PROXY",))]
+        if proxy_env:
+            lines.append('proxy = "cf-warp"')
+        env = [e for e in env if e not in proxy_env]
         if env:
             lines.append(f"env = {toml_list(env)}")
         volumes = ["/data"]  # storage is mounted at /data by Synora
@@ -114,18 +142,19 @@ def render_job(m, log_dir, storage_dir):
     else:
         raise SystemExit(f"unsupported provider {provider!r} for mirror {m['name']}")
 
-    # --- storage path: tunasync mirror_dir/subdir composition ---
-    mirror_dir = m.get("mirror_dir") or storage_dir
-    subdir = m.get("mirror_subdir")
-    if mirror_dir and subdir and str(mirror_dir) != str(m.get("mirror_dir")):
-        pass
-    if m.get("mirror_dir"):
-        path = m["mirror_dir"]
-    elif subdir:
-        path = os.path.join(storage_dir, subdir, m["name"])
+    # --- storage: relative path + storage section reference ---------------
+    # tunasync semantics: the mirror lives under the worker's storage_dir
+    # (which differs per machine: /datas here, /data elsewhere). Jobs write
+    # the RELATIVE path and reference the worker's [storage.mirror] section,
+    # so one config works on every machine's local pool/mountpoint.
+    if m.get("mirror_subdir"):
+        # tunasync places the mirror at mirror_dir/<mirror_subdir>/<name>
+        # (e.g. /datas/git/AOSP, one ZFS dataset per mirror).
+        rel = f"{m['mirror_subdir']}/{m['name']}"
     else:
-        path = os.path.join(storage_dir, m["name"])
-    lines.append(f"storage = {toml_str(path)}")
+        rel = m["name"]
+    lines.append(f"storage = {toml_str(rel)}")
+    lines.append('storage_name = "mirror"')
 
     # --- retry / timeout ---
     if m.get("retry"):
@@ -194,6 +223,19 @@ def main():
 
     global_sec = dict(cp.items("global"))
     storage_dir = global_sec.get("mirror_dir", "/srv/mirror").strip('"').strip("'")
+    global_interval = global_sec.get("interval")
+    zpool = ""
+    if cp.has_section("zfs"):
+        zpool = dict(cp.items("zfs")).get("zpool", "").strip('"').strip("'")
+    # [docker] section: shared volumes added to every docker job (TUNA
+    # production mounts the tunasync-scripts checkout read-only).
+    global_docker_volumes = []
+    if cp.has_section("docker"):
+        global_docker_volumes = [
+            v.strip().strip('"').strip("'")
+            for v in dict(cp.items("docker")).get("volumes", "").replace("[", "").replace("]", "").split(",")
+            if v.strip()
+        ]
 
     out = Path(args.out)
     jobs_dir = out / "jobs"
@@ -209,21 +251,37 @@ def main():
     # the first block is everything before the first [[mirrors]] (global etc.)
     for block in blocks[1:]:
         m = {}
+        in_env = False
+        env_table = []
         for line in block.splitlines():
             line = line.split("#", 1)[0].strip()
-            if not line or line.startswith("["):
-                if m and line.startswith("["):
+            if not line:
+                continue
+            if line.startswith("["):
+                if line == "[mirrors.env]" or line.startswith("[mirrors.env]"):
+                    in_env = True
+                    continue
+                if m:
                     break  # next section header ends this mirror block
                 continue
             if "=" not in line:
                 continue
             k, _, v = line.partition("=")
-            m[k.strip()] = v.strip().strip('"').strip("'")
+            k, v = k.strip(), v.strip().strip('"').strip("'")
+            if in_env:
+                env_table.append(f"{k}={v}")
+            else:
+                m[k] = v
+        if env_table:
+            m["env_table"] = env_table
         if m.get("name"):
             mirrors.append(m)
     for m in mirrors:
         target = jobs_dir / f"{m['name']}.toml"
-        target.write_text(render_job(m, args.log_dir, storage_dir), encoding="utf-8")
+        target.write_text(
+            render_job(m, args.log_dir, storage_dir, global_docker_volumes, global_interval),
+            encoding="utf-8",
+        )
         print(f"  {m['name']}: {target}")
         count += 1
 
@@ -242,6 +300,18 @@ path = {toml_str(args.db)}
 
 [api]
 listen = "127.0.0.1:8100"
+
+# Worker-local mirror storage: the pool/dataset and mountpoint follow the
+# tunasync zpool + mirror_dir settings. Jobs reference this section by name
+# and write relative paths, so the same job config works on machines with
+# different pools/mounts.
+[storage.mirror]
+kind = "zfs"
+pool = {toml_str(zpool or "data")}
+dataset = "mirror"
+mountpoint = {toml_str(storage_dir)}
+auto_create = true
+zfs_options = "-o recordsize=1M -o xattr=off -o atime=off -o setuid=off -o exec=off -o devices=off -o sync=disabled -o secondarycache=metadata -o redundant_metadata=most"
 '''
     (out / "synora.toml").write_text(main_toml, encoding="utf-8")
     print(f"wrote {out / 'synora.toml'} ({count} job(s))")

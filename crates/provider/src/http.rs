@@ -16,7 +16,21 @@ impl HttpProvider {
             .upstream
             .as_deref()
             .ok_or_else(|| ProviderError::Config("http provider requires `upstream`".into()))?;
-        let fetcher = httpfetch::Fetcher::new().map_err(|e| ProviderError::Other(e.to_string()))?;
+        // Egress: the manager-dispatched proxy env (e.g. cf-warp expose) wins.
+        // The expose endpoint is an authenticated HTTP CONNECT proxy, so a
+        // socks5h:// dispatch URL is used as http:// here (reqwest tunnels
+        // CONNECT; it has no socks feature).
+        let proxy = ctx
+            .proxy_env
+            .iter()
+            .find(|(k, _)| k == "HTTP_PROXY" || k == "ALL_PROXY")
+            .map(|(_, v)| {
+                v.strip_prefix("socks5h://")
+                    .map(|rest| format!("http://{rest}"))
+                    .unwrap_or_else(|| v.clone())
+            });
+        let fetcher = httpfetch::Fetcher::with_proxy(proxy.as_deref())
+            .map_err(|e| ProviderError::Other(e.to_string()))?;
         let started = std::time::Instant::now();
         let stats = fetcher
             .sync(

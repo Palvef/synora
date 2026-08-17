@@ -23,6 +23,8 @@ pub trait SnapshotProvider: Send + Sync {
     fn create(&self, name: &str) -> Result<SnapshotInfo, SnapshotError>;
     fn delete(&self, name: &str) -> Result<(), SnapshotError>;
     fn list(&self) -> Result<Vec<SnapshotInfo>, SnapshotError>;
+    /// Restore the dataset/subvolume to this snapshot (spec §35).
+    fn rollback(&self, name: &str) -> Result<(), SnapshotError>;
 }
 
 /// ZFS: `zfs snapshot pool/dataset@name`, `zfs destroy ...@name`,
@@ -55,6 +57,12 @@ impl SnapshotProvider for ZfsSnapshotProvider {
         Ok(())
     }
 
+    fn rollback(&self, name: &str) -> Result<(), SnapshotError> {
+        let snap = format!("{}@{name}", self.pool_dataset);
+        run_cli("zfs", &["rollback", snap.as_str()])?;
+        Ok(())
+    }
+
     fn list(&self) -> Result<Vec<SnapshotInfo>, SnapshotError> {
         let out = run_cli(
             "zfs",
@@ -77,8 +85,13 @@ impl SnapshotProvider for ZfsSnapshotProvider {
 impl SnapshotProvider for BtrfsSnapshotProvider {
     fn create(&self, name: &str) -> Result<SnapshotInfo, SnapshotError> {
         let sv = self.subvol.to_string_lossy().into_owned();
-        let target = snapshot_path(&self.subvol, name).to_string_lossy().into_owned();
-        run_cli("btrfs", &["subvolume", "snapshot", "-r", sv.as_str(), target.as_str()])?;
+        let target = snapshot_path(&self.subvol, name)
+            .to_string_lossy()
+            .into_owned();
+        run_cli(
+            "btrfs",
+            &["subvolume", "snapshot", "-r", sv.as_str(), target.as_str()],
+        )?;
         // Btrfs snapshots carry no creation timestamp: 0 = unknown, and
         // pruning falls back to the timestamp in the name (spec §33).
         Ok(SnapshotInfo {
@@ -88,8 +101,25 @@ impl SnapshotProvider for BtrfsSnapshotProvider {
     }
 
     fn delete(&self, name: &str) -> Result<(), SnapshotError> {
-        let target = snapshot_path(&self.subvol, name).to_string_lossy().into_owned();
+        let target = snapshot_path(&self.subvol, name)
+            .to_string_lossy()
+            .into_owned();
         run_cli("btrfs", &["subvolume", "delete", target.as_str()])?;
+        Ok(())
+    }
+
+    fn rollback(&self, name: &str) -> Result<(), SnapshotError> {
+        // Restore: delete the live subvolume, re-snapshot the read-only one
+        // under the live name (standard btrfs rollback).
+        let sv = self.subvol.to_string_lossy().into_owned();
+        let target = snapshot_path(&self.subvol, name)
+            .to_string_lossy()
+            .into_owned();
+        run_cli("btrfs", &["subvolume", "delete", sv.as_str()])?;
+        run_cli(
+            "btrfs",
+            &["subvolume", "snapshot", target.as_str(), sv.as_str()],
+        )?;
         Ok(())
     }
 
@@ -135,7 +165,7 @@ pub fn snapshot_name(now: OffsetDateTime) -> String {
     now.format(&time::macros::format_description!(
         "synora-[year][month][day]-[hour][minute][second]"
     ))
-        .unwrap_or_default()
+    .unwrap_or_default()
 }
 
 /// Retention pruning (spec §33): keep the newest N snapshots in each bucket.
@@ -159,11 +189,21 @@ pub fn prune_plan(
         .iter()
         .filter(|s| matches_synora(&s.name))
         .collect();
-    sorted.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.name.cmp(&b.name)));
+    sorted.sort_by(|a, b| {
+        a.created_at
+            .cmp(&b.created_at)
+            .then_with(|| a.name.cmp(&b.name))
+    });
 
     let mut keep: HashSet<&str> = HashSet::new();
     if let Some(n) = policy.keep_last {
-        keep.extend(sorted.iter().rev().take(n as usize).map(|s| s.name.as_str()));
+        keep.extend(
+            sorted
+                .iter()
+                .rev()
+                .take(n as usize)
+                .map(|s| s.name.as_str()),
+        );
     }
     if let Some(n) = policy.keep_daily {
         keep.extend(periodic_kept(&sorted, n, offset, |s, o| {
@@ -478,8 +518,8 @@ mod tests {
         let snaps = ten_across_days();
         let now = datetime!(2026-08-16 23:59:59 UTC);
         let policy = RetentionPolicy {
-            keep_last: Some(3),   // 08-16's three snapshots
-            keep_daily: Some(2),  // reps of 08-15 and 08-16
+            keep_last: Some(3),  // 08-16's three snapshots
+            keep_daily: Some(2), // reps of 08-15 and 08-16
             ..Default::default()
         };
         let del = prune_plan(&snaps, &policy, now);

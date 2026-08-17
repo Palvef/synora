@@ -33,6 +33,8 @@ struct Cli {
     reload: bool,
     #[arg(long, hide = true, value_name = "JOB")]
     run: Option<String>,
+    #[arg(long, hide = true, value_name = "GROUP")]
+    run_group: Option<String>,
     #[arg(long, hide = true, value_name = "JOB")]
     stop: Option<String>,
     #[arg(long, hide = true, value_name = "JOB")]
@@ -60,6 +62,8 @@ enum Command {
     },
     /// Trigger one job now and wait for it to finish
     Run { job: String },
+    /// Trigger every job in a config `[groups.<name>]` group (spec §94)
+    RunGroup { group: String },
     /// Show job statuses and next run times
     Status {},
     /// Job subcommands
@@ -79,6 +83,20 @@ enum Command {
     /// Hot-reload configuration (SIGHUP to the daemon; job/schedule changes
     /// apply, non-reloadable changes are rejected)
     Reload {},
+    /// Remove a proxy from the config (writes the change, then reloads)
+    ProxyDelete { name: String },
+    /// Terminal console (jobs/workers/proxies/logs/config editor)
+    Tui {
+        #[arg(long)]
+        manager: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+    },
+    /// Snapshot management for a job's storage (spec §35)
+    Snapshot {
+        #[command(subcommand)]
+        cmd: SnapshotCmd,
+    },
     /// Worker management (talks to the manager API)
     Worker {
         #[command(subcommand)]
@@ -113,14 +131,33 @@ enum JobCmd {
     List {},
     /// Trigger one job now and wait for it to finish
     Run { job: String },
+    /// Start a job (alias of run; `-f` cancels any running instance first)
+    Start {
+        job: String,
+        /// Force: stop the running instance, then start
+        #[arg(short = 'f', long)]
+        force: bool,
+    },
     /// Cancel a running job
     Stop { job: String },
+    /// Stop (if running) then start
+    Restart { job: String },
     /// Tail a job's latest run log
     Logs {
         job: String,
         #[arg(short = 'n', long, default_value_t = 50)]
         lines: usize,
     },
+    /// Remove a job from the config (writes the change, then reloads)
+    Delete { job: String },
+}
+
+#[derive(Subcommand)]
+enum SnapshotCmd {
+    /// List snapshots of a job's storage
+    List { job: String },
+    /// Restore a job's storage to a snapshot
+    Rollback { job: String, snapshot: String },
 }
 
 #[derive(Subcommand)]
@@ -131,6 +168,17 @@ enum ConfigCmd {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    // The TUI owns its own runtime (blocking terminal loop) — it must run
+    // outside this binary's async runtime, or nested runtimes panic.
+    if let Some(Command::Tui { manager, token }) = &cli.command {
+        return match tui::run(cli.config.clone(), manager.clone(), token.clone()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let rt = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
         Err(e) => {
@@ -167,6 +215,9 @@ async fn run(cli: Cli) -> Result<(), String> {
     if let Some(job) = cli.run {
         return cmd_run(job, config).await;
     }
+    if let Some(group) = cli.run_group {
+        return cmd_run_group(group, config).await;
+    }
     if let Some(job) = cli.stop {
         return cmd_stop(job, config);
     }
@@ -187,19 +238,41 @@ async fn run(cli: Cli) -> Result<(), String> {
         }
         Command::Start { db } => cmd_start(config, db).await?,
         Command::Run { job } => cmd_run(job, config).await?,
+        Command::RunGroup { group } => cmd_run_group(group, config).await?,
         Command::Status {} => cmd_status(config).await?,
         Command::Job { cmd } => match cmd {
             JobCmd::List {} => cmd_status(config).await?,
             JobCmd::Run { job } => cmd_run(job, config).await?,
+            JobCmd::Start { job, force } => {
+                if force {
+                    let _ = cmd_stop(job.clone(), config.clone());
+                }
+                cmd_run(job, config).await?
+            }
+            JobCmd::Restart { job } => {
+                let _ = cmd_stop(job.clone(), config.clone());
+                cmd_run(job, config).await?
+            }
             JobCmd::Stop { job } => cmd_stop(job, config)?,
             JobCmd::Logs { job, lines } => cmd_logs(job, lines, config)?,
+            JobCmd::Delete { job } => cmd_delete_job(job, config)?,
         },
         Command::Logs { job, lines } => cmd_logs(job, lines, config)?,
         Command::Stop { job } => cmd_stop(job, config)?,
         Command::Reload {} => cmd_reload(config)?,
+        Command::ProxyDelete { name } => cmd_delete_proxy(name, config)?,
+        Command::Tui { manager, token } => tui::run(config, manager, token)?,
+        Command::Snapshot { cmd } => match cmd {
+            SnapshotCmd::List { job } => cmd_snapshot_list(job, config)?,
+            SnapshotCmd::Rollback { job, snapshot } => {
+                cmd_snapshot_rollback(job, snapshot, config)?
+            }
+        },
         Command::Worker { cmd } => match cmd {
             WorkerCmd::List { manager, token } => cmd_worker_list(config, manager, token).await?,
-            WorkerCmd::Drain { id, manager, token } => cmd_worker_drain(id, config, manager, token).await?,
+            WorkerCmd::Drain { id, manager, token } => {
+                cmd_worker_drain(id, config, manager, token).await?
+            }
         },
     }
     Ok(())
@@ -237,6 +310,7 @@ fn print_summary(cfg: &config::ResolvedConfig, path: &std::path::Path) {
             synora_core::ProviderConfig::Rsync { .. } => "rsync",
             synora_core::ProviderConfig::Script { .. } => "script",
             synora_core::ProviderConfig::Docker { .. } => "docker",
+            synora_core::ProviderConfig::Git { .. } => "git",
             synora_core::ProviderConfig::Http { .. } => "http",
         };
         println!(
@@ -259,7 +333,9 @@ async fn cmd_start(config: Option<PathBuf>, db: Option<String>) -> Result<(), St
 
     tracing_subscriber::fmt()
         .with_target(false)
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+        )
         .init();
 
     // Pid file: `synora reload` / `synora stop` talk to the daemon.
@@ -279,15 +355,11 @@ async fn cmd_start(config: Option<PathBuf>, db: Option<String>) -> Result<(), St
     let engine_sig = engine.clone();
     let engine_hup = engine.clone();
     let signal_task = tokio::spawn(async move {
-        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("SIGTERM handler");
-        let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
-            .expect("SIGHUP handler");
         loop {
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => break,
-                _ = sigterm.recv() => break,
-                _ = sighup.recv() => {
+                _ = wait_sigterm() => break,
+                _ = wait_sighup() => {
                     match engine_hup.reload().await {
                         Ok(n) => tracing::info!("config reloaded: {n} job(s) applied"),
                         Err(e) => tracing::warn!("reload rejected: {e}"),
@@ -335,7 +407,9 @@ async fn serve_metrics(engine: Arc<Engine>, listen: std::net::SocketAddr) {
     let _ = axum::serve(listener, app).await;
 }
 
-async fn metrics_handler(axum::extract::State(engine): axum::extract::State<Arc<Engine>>) -> String {
+async fn metrics_handler(
+    axum::extract::State(engine): axum::extract::State<Arc<Engine>>,
+) -> String {
     engine.metrics().render()
 }
 
@@ -349,6 +423,36 @@ async fn cmd_run(job: String, config: Option<PathBuf>) -> Result<(), String> {
             println!("{job}: {other:?}");
             return Err(format!("job `{job}` finished with status {other:?}"));
         }
+    }
+    Ok(())
+}
+
+/// Run every job in a config group, in order (spec §94).
+async fn cmd_run_group(group: String, config: Option<PathBuf>) -> Result<(), String> {
+    let (cfg, _) = load_config(config, None)?;
+    let jobs = cfg
+        .groups
+        .get(&group)
+        .cloned()
+        .ok_or_else(|| format!("no group `{group}` in config (define [groups.{group}])"))?;
+    if jobs.is_empty() {
+        return Err(format!("group `{group}` has no jobs"));
+    }
+    println!("group `{group}`: {} job(s)", jobs.len());
+    let engine = Engine::new(cfg, &PathBuf::from("migrations"), true).await?;
+    let mut failed = 0;
+    for job in &jobs {
+        let status = engine.clone().run_once(job).await?;
+        println!("  {job}: {status:?}");
+        if status != JobStatus::Success {
+            failed += 1;
+        }
+    }
+    if failed > 0 {
+        return Err(format!(
+            "{failed}/{n} job(s) in group `{group}` failed",
+            n = jobs.len()
+        ));
     }
     Ok(())
 }
@@ -368,7 +472,10 @@ async fn cmd_status(config: Option<PathBuf>) -> Result<(), String> {
     let store = db::store::Store::new(db);
     let statuses = store.job_status_list().await.map_err(|e| e.to_string())?;
     let schedules = store.all_schedules().await.map_err(|e| e.to_string())?;
-    println!("{:<20} {:<12} {:<24} LAST RUN", "JOB", "STATUS", "NEXT RUN");
+    println!(
+        "{:<20} {:<12} {:<14} {:<24} LAST RUN",
+        "JOB", "STATUS", "SIZE", "NEXT RUN"
+    );
     for (name, status) in &statuses {
         let next = schedules
             .iter()
@@ -376,6 +483,19 @@ async fn cmd_status(config: Option<PathBuf>) -> Result<(), String> {
             .and_then(|(_, r)| r.next_run)
             .map(format_ts)
             .unwrap_or_else(|| "-".to_string());
+        // Repository size: from the repositories table (path = job storage).
+        let size_str = match cfg.jobs.iter().find(|j| &j.name == name) {
+            Some(j) => match store
+                .repository_size(&j.storage.to_string_lossy())
+                .await
+                .ok()
+                .flatten()
+            {
+                Some(s) if s > 0 => synora_core::human_size(s as u64),
+                _ => "-".to_string(),
+            },
+            None => "-".to_string(),
+        };
         let last = store
             .run_history(name, 1)
             .await
@@ -383,7 +503,7 @@ async fn cmd_status(config: Option<PathBuf>) -> Result<(), String> {
             .and_then(|mut v| v.pop())
             .map(|r| format!("{} {:?}", format_ts(r.created_at), r.status))
             .unwrap_or_else(|| "-".to_string());
-        println!("{name:<20} {status:<12?} {next:<24} {last}");
+        println!("{name:<20} {status:<12?} {size_str:<14} {next:<24} {last}");
     }
     Ok(())
 }
@@ -400,13 +520,153 @@ fn cmd_logs(job: String, lines: usize, config: Option<PathBuf>) -> Result<(), St
     Ok(())
 }
 
+/// Remove a `[[jobs]]` entry (by name) from every file in the include
+/// tree, then reload. The job definition is expected in one of the
+/// `jobs/*.toml` files; a file whose job list becomes empty is removed.
+fn cmd_delete_job(job: String, config: Option<PathBuf>) -> Result<(), String> {
+    if !valid_job_name(&job) {
+        return Err(format!("invalid job name `{job}`"));
+    }
+    let path = find_config(config)?;
+    let mut removed = false;
+    let main_dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    for entry in glob::glob(&format!("{}/**/*.toml", main_dir.display()))
+        .map_err(|e| e.to_string())?
+        .flatten()
+    {
+        let text = std::fs::read_to_string(&entry).map_err(|e| e.to_string())?;
+        let needle = format!("name = \"{job}\"");
+        if !text.contains(&needle) {
+            continue;
+        }
+        let mut out = String::new();
+        let mut skip = false;
+        for line in text.lines() {
+            if line.trim() == "[[jobs]]" {
+                skip = false;
+            } else if line.trim() == needle.trim() {
+                skip = true;
+                continue;
+            }
+            if skip {
+                continue;
+            }
+            out.push_str(line);
+            out.push('\n');
+        }
+        std::fs::write(&entry, out).map_err(|e| e.to_string())?;
+        println!("removed job `{job}` from {}", entry.display());
+        removed = true;
+    }
+    if !removed {
+        return Err(format!("job `{job}` not found in any config file"));
+    }
+    // Reload through the local daemon (SIGHUP) when running standalone;
+    // the manager API otherwise.
+    println!("run `synora reload` (or POST /api/v1/reload) to apply");
+    Ok(())
+}
+
+/// Remove a `[proxy.<name>]` section from the main config, then reload.
+fn cmd_delete_proxy(name: String, config: Option<PathBuf>) -> Result<(), String> {
+    let path = find_config(config)?;
+    let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let marker = format!("[proxy.{name}]");
+    let Some(start) = text.find(&marker) else {
+        return Err(format!("proxy `{name}` not found in {}", path.display()));
+    };
+    let end = text[start..]
+        .find("\n[")
+        .map(|i| start + i)
+        .unwrap_or(text.len());
+    let new_text = format!("{}{}", &text[..start], &text[end..]);
+    std::fs::write(&path, new_text).map_err(|e| e.to_string())?;
+    println!(
+        "removed proxy `{name}` from {} (reload to apply)",
+        path.display()
+    );
+    Ok(())
+}
+
+/// Job names become file names (control files, log dirs) — refuse path
+/// separators and traversal segments up front.
+fn valid_job_name(job: &str) -> bool {
+    !job.is_empty()
+        && !job.starts_with('.')
+        && !job
+            .split('/')
+            .any(|c| c.is_empty() || c == ".." || c == ".")
+}
+
 /// `synora stop`: drop a control file the daemon's tick picks up.
 fn cmd_stop(job: String, config: Option<PathBuf>) -> Result<(), String> {
     let (cfg, _) = load_config(config, None)?;
+    if !valid_job_name(&job) {
+        return Err(format!("invalid job name `{job}`"));
+    }
     let control = cfg.daemon.log_dir.join("control");
     std::fs::create_dir_all(&control).map_err(|e| e.to_string())?;
     std::fs::write(control.join(format!("stop-{job}")), b"").map_err(|e| e.to_string())?;
     println!("cancel requested for `{job}` (the daemon will pick it up within a tick)");
+    Ok(())
+}
+
+/// Snapshot provider for a job's storage (spec §35).
+fn snapshot_provider_for_job(
+    cfg: &config::ResolvedConfig,
+    job_name: &str,
+) -> Result<(Box<dyn snapshot::SnapshotProvider>, synora_core::JobSpec), String> {
+    let job = cfg
+        .jobs
+        .iter()
+        .find(|j| j.name == job_name)
+        .cloned()
+        .ok_or_else(|| format!("no job `{job_name}` in config"))?;
+    let sc = cfg
+        .storages
+        .values()
+        .find(|sc| sc.mountpoint.as_deref() == Some(std::path::Path::new(&job.storage)))
+        .ok_or_else(|| format!("job `{job_name}` has no snapshot-capable storage section"))?;
+    let provider = snapshot::provider_for(&sc.kind, &job.storage).map_err(|e| e.to_string())?;
+    Ok((provider, job))
+}
+
+fn cmd_snapshot_list(job: String, config: Option<PathBuf>) -> Result<(), String> {
+    let (cfg, _) = load_config(config, None)?;
+    let (provider, _) = snapshot_provider_for_job(&cfg, &job)?;
+    let snaps = provider.list().map_err(|e| e.to_string())?;
+    println!("{:<32} CREATED", "SNAPSHOT");
+    for s in snaps {
+        println!(
+            "{:<32} {}",
+            s.name,
+            if s.created_at > 0 {
+                format_ts(s.created_at)
+            } else {
+                "-".into()
+            }
+        );
+    }
+    Ok(())
+}
+
+fn cmd_snapshot_rollback(
+    job: String,
+    snapshot: String,
+    config: Option<PathBuf>,
+) -> Result<(), String> {
+    let (cfg, _) = load_config(config, None)?;
+    let (provider, _) = snapshot_provider_for_job(&cfg, &job)?;
+    let exists = provider
+        .list()
+        .map_err(|e| e.to_string())?
+        .iter()
+        .any(|s| s.name == snapshot);
+    if !exists {
+        return Err(format!("no snapshot `{snapshot}` for job `{job}`"));
+    }
+    provider.rollback(&snapshot).map_err(|e| e.to_string())?;
+    println!("job `{job}` restored to snapshot `{snapshot}`");
     Ok(())
 }
 
@@ -424,15 +684,13 @@ fn manager_creds(
                 Some(u) => u,
                 None => format!("http://{}", cfg.api.listen),
             };
-            let token = match token {
-                Some(t) => t,
-                None => cfg
-                    .api
-                    .tokens
-                    .first()
-                    .map(|t| t.token.clone())
-                    .ok_or("no api token configured (set one in [api.tokens] or pass --token)")?,
-            };
+            let token =
+                match token {
+                    Some(t) => t,
+                    None => cfg.api.tokens.first().map(|t| t.token.clone()).ok_or(
+                        "no api token configured (set one in [api.tokens] or pass --token)",
+                    )?,
+                };
             (url, token)
         }
     };
@@ -447,7 +705,10 @@ async fn cmd_worker_list(
     let (url, token) = manager_creds(config, manager, token)?;
     let client = api::Client::new(&url, &token).map_err(|e| e.to_string())?;
     let workers = client.list_workers().await.map_err(|e| e.to_string())?;
-    println!("{:<16} {:<20} {:<10} {:<8} LABELS", "ID", "HOSTNAME", "STATUS", "RUNNING");
+    println!(
+        "{:<16} {:<20} {:<10} {:<8} LABELS",
+        "ID", "HOSTNAME", "STATUS", "RUNNING"
+    );
     for w in workers {
         println!(
             "{:<16} {:<20} {:<10} {:<8} {}",
@@ -479,14 +740,29 @@ fn cmd_reload(config: Option<PathBuf>) -> Result<(), String> {
     let (cfg, _) = load_config(config, None)?;
     let pid_path = cfg.daemon.log_dir.join("synora.pid");
     let pid: i32 = std::fs::read_to_string(&pid_path)
-        .map_err(|e| format!("cannot read {}: {e} (is the daemon running?)", pid_path.display()))?
+        .map_err(|e| {
+            format!(
+                "cannot read {}: {e} (is the daemon running?)",
+                pid_path.display()
+            )
+        })?
         .trim()
         .parse()
         .map_err(|e| format!("bad pid file {}: {e}", pid_path.display()))?;
+    #[cfg(unix)]
     unsafe {
         libc::kill(pid, libc::SIGHUP);
     }
-    println!("SIGHUP sent to pid {pid}; reload will be validated and applied");
+    #[cfg(not(unix))]
+    {
+        // Windows: no SIGHUP; reload through the API instead.
+        let (url, token) = manager_creds(None, None, None)?;
+        let client = api::Client::new(&url, &token).map_err(|e| e.to_string())?;
+        tokio::runtime::Handle::current()
+            .block_on(client.reload())
+            .map_err(|e| e.to_string())?;
+    }
+    println!("reload requested for pid {pid}; it will be validated and applied");
     Ok(())
 }
 
@@ -510,11 +786,40 @@ fn find_config(explicit: Option<PathBuf>) -> Result<PathBuf, String> {
         }
         return Err(format!("config file not found: {}", p.display()));
     }
-    for candidate in ["synora.toml", "config/synora.toml"] {
+    for candidate in [
+        "synora.toml",
+        "config/synora.toml",
+        "/etc/synora/synora.toml",
+    ] {
         let p = PathBuf::from(candidate);
         if p.exists() {
             return Ok(p);
         }
     }
     Err("no config file found (looked for synora.toml, config/synora.toml; use -c PATH)".into())
+}
+
+#[cfg(unix)]
+async fn wait_sigterm() {
+    let mut s = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("SIGTERM handler");
+    let _ = s.recv().await;
+}
+
+#[cfg(not(unix))]
+async fn wait_sigterm() {
+    // Windows: no SIGTERM; this future simply never resolves.
+    std::future::pending::<()>().await;
+}
+
+#[cfg(unix)]
+async fn wait_sighup() {
+    let mut s = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+        .expect("SIGHUP handler");
+    let _ = s.recv().await;
+}
+
+#[cfg(not(unix))]
+async fn wait_sighup() {
+    std::future::pending::<()>().await;
 }

@@ -104,6 +104,9 @@ pub struct ApiDoc {
     /// Path serving tunasync-compatible JSON (mirror-web drop-in).
     #[serde(default = "default_tunasync_json")]
     pub tunasync_json_path: String,
+    /// Which status JSON shape to expose: "synora", "tunasync", or "both".
+    #[serde(default = "default_status_format")]
+    pub status_format: String,
 }
 
 impl Default for ApiDoc {
@@ -114,6 +117,7 @@ impl Default for ApiDoc {
             tokens: Vec::new(),
             synora_json_path: default_synora_json(),
             tunasync_json_path: default_tunasync_json(),
+            status_format: default_status_format(),
         }
     }
 }
@@ -161,6 +165,11 @@ pub struct JobDoc {
     pub volumes: Vec<String>,
     #[serde(default = "no")]
     pub keep_container: bool,
+    /// docker run command argv (empty = image entrypoint).
+    #[serde(default)]
+    pub docker_command: Vec<String>,
+    // git
+    pub branch: Option<String>,
     // http (Phase 5)
     pub parser: Option<String>,
     #[serde(default = "no")]
@@ -168,6 +177,10 @@ pub struct JobDoc {
     // common
     pub upstream: Option<String>,
     pub storage: Option<String>,
+    /// tunasync `sub_dir`: append to storage (parsed then resolved away).
+    pub mirror_subdir: Option<String>,
+    /// Reference to a `[storage.<name>]` section (multi-machine layouts).
+    pub storage_name: Option<String>,
     pub proxy: Option<String>,
     pub egress: Option<String>,
     /// ipv4 | ipv6 | any — which address family the sync uses (user: mirror
@@ -183,7 +196,9 @@ pub struct JobDoc {
     pub retry_delay: String,
     #[serde(default = "default_backoff")]
     pub retry_backoff: f64,
-    #[serde(default)]
+    /// rsync exit codes counted as success; tunasync defaults to 23/24
+    /// ("partial transfer" errors are not failures for mirrors).
+    #[serde(default = "default_success_exit_codes")]
     pub success_exit_codes: Vec<i32>,
     pub fail_on_match: Option<String>,
     #[serde(default = "default_one")]
@@ -291,6 +306,10 @@ fn default_db_path() -> String {
 fn default_api_listen() -> String {
     "127.0.0.1:8100".into()
 }
+fn default_status_format() -> String {
+    "both".into()
+}
+
 fn default_synora_json() -> String {
     "/synora.json".into()
 }
@@ -309,6 +328,10 @@ fn default_retry_delay() -> String {
 fn default_backoff() -> f64 {
     2.0
 }
+fn default_success_exit_codes() -> Vec<i32> {
+    vec![23, 24]
+}
+
 fn default_one() -> u32 {
     1
 }

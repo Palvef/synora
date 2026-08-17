@@ -94,6 +94,11 @@ pub struct HeartbeatResponse {
 pub struct RunAssignment {
     pub run_id: String,
     pub job: JobSpec,
+    /// Proxy environment resolved by the MANAGER (authoritative — the
+    /// worker executes with exactly these settings, never its own local
+    /// proxy detection).
+    #[serde(default)]
+    pub proxy_env: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,6 +112,10 @@ pub struct CompleteRequest {
     pub size_after: Option<i64>,
     pub bytes_transferred: Option<i64>,
     pub message: Option<String>,
+    /// Run log text (remote workers report it so the manager can serve
+    /// job_logs without touching the worker host).
+    #[serde(default)]
+    pub log: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,9 +164,12 @@ impl Client {
 
     fn build(base: &str, token: &str, ca_pem: Option<&[u8]>) -> Result<Client, ApiError> {
         let mut builder = reqwest::Client::builder();
+        // The worker only ever talks to the manager directly — a leaked
+        // HTTP_PROXY env must not send manager traffic through a proxy.
+        builder = builder.no_proxy();
         if let Some(pem) = ca_pem {
-            let cert = reqwest::Certificate::from_pem(pem)
-                .map_err(|e| ApiError::Http(e.to_string()))?;
+            let cert =
+                reqwest::Certificate::from_pem(pem).map_err(|e| ApiError::Http(e.to_string()))?;
             builder = builder.add_root_certificate(cert);
         }
         let http = builder.build().map_err(|e| ApiError::Http(e.to_string()))?;
@@ -175,10 +187,7 @@ impl Client {
         body: Option<&B>,
     ) -> Result<reqwest::Response, ApiError> {
         let url = format!("{}{}", self.base, path);
-        let mut req = self
-            .http
-            .request(method, &url)
-            .bearer_auth(&self.token);
+        let mut req = self.http.request(method, &url).bearer_auth(&self.token);
         if let Some(b) = body {
             req = req.json(b);
         }
@@ -219,9 +228,16 @@ impl Client {
 
     // --- worker-facing -----------------------------------------------------
 
-    pub async fn register_worker(&self, req: &RegisterRequest) -> Result<RegisterResponse, ApiError> {
-        self.json(reqwest::Method::POST, &format!("{API_V1}/workers/register"), Some(req))
-            .await
+    pub async fn register_worker(
+        &self,
+        req: &RegisterRequest,
+    ) -> Result<RegisterResponse, ApiError> {
+        self.json(
+            reqwest::Method::POST,
+            &format!("{API_V1}/workers/register"),
+            Some(req),
+        )
+        .await
     }
 
     pub async fn heartbeat(
@@ -253,12 +269,12 @@ impl Client {
             .await?;
         match resp.status().as_u16() {
             200 => Ok(Some(
-                resp.json().await.map_err(|e| ApiError::Http(e.to_string()))?,
+                resp.json()
+                    .await
+                    .map_err(|e| ApiError::Http(e.to_string()))?,
             )),
             409 => Ok(None),
-            _ => Err(ApiError::Rejected(
-                resp.text().await.unwrap_or_default(),
-            )),
+            _ => Err(ApiError::Rejected(resp.text().await.unwrap_or_default())),
         }
     }
 
@@ -288,23 +304,39 @@ impl Client {
     }
 
     pub async fn trigger_run(&self, job: &str) -> Result<String, ApiError> {
-        self.json(reqwest::Method::POST, &format!("{API_V1}/jobs/{job}/run"), None::<&()>)
-            .await
+        self.json(
+            reqwest::Method::POST,
+            &format!("{API_V1}/jobs/{job}/run"),
+            None::<&()>,
+        )
+        .await
     }
 
     pub async fn stop_run(&self, job: &str) -> Result<(), ApiError> {
-        self.json(reqwest::Method::POST, &format!("{API_V1}/jobs/{job}/stop"), None::<&()>)
-            .await
+        self.json(
+            reqwest::Method::POST,
+            &format!("{API_V1}/jobs/{job}/stop"),
+            None::<&()>,
+        )
+        .await
     }
 
     pub async fn list_workers(&self) -> Result<Vec<WorkerDTO>, ApiError> {
-        self.json(reqwest::Method::GET, &format!("{API_V1}/workers"), None::<&()>)
-            .await
+        self.json(
+            reqwest::Method::GET,
+            &format!("{API_V1}/workers"),
+            None::<&()>,
+        )
+        .await
     }
 
     pub async fn drain_worker(&self, worker_id: &str) -> Result<(), ApiError> {
-        self.json(reqwest::Method::POST, &format!("{API_V1}/workers/{worker_id}/drain"), None::<&()>)
-            .await
+        self.json(
+            reqwest::Method::POST,
+            &format!("{API_V1}/workers/{worker_id}/drain"),
+            None::<&()>,
+        )
+        .await
     }
 
     pub async fn job_logs(&self, job: &str, tail: u32) -> Result<String, ApiError> {
@@ -314,18 +346,39 @@ impl Client {
 
     /// Hot-reload the manager's config (same as SIGHUP / `synora reload`).
     pub async fn reload(&self) -> Result<usize, ApiError> {
-        self.json::<ReloadResponse>(reqwest::Method::POST, &format!("{API_V1}/reload"), None::<&()>)
-            .await
-            .map(|r| r.applied)
+        self.json::<ReloadResponse>(
+            reqwest::Method::POST,
+            &format!("{API_V1}/reload"),
+            None::<&()>,
+        )
+        .await
+        .map(|r| r.applied)
     }
 
     pub async fn list_proxies(&self) -> Result<serde_json::Value, ApiError> {
-        self.json(reqwest::Method::GET, &format!("{API_V1}/proxies"), None::<&()>)
-            .await
+        self.json(
+            reqwest::Method::GET,
+            &format!("{API_V1}/proxies"),
+            None::<&()>,
+        )
+        .await
+    }
+
+    pub async fn job_spec(&self, job: &str) -> Result<JobSpec, ApiError> {
+        self.json(
+            reqwest::Method::GET,
+            &format!("{API_V1}/jobs/{job}/spec"),
+            None::<&()>,
+        )
+        .await
     }
 
     pub async fn job_history(&self, job: &str) -> Result<Vec<RunDTO>, ApiError> {
-        self.json(reqwest::Method::GET, &format!("{API_V1}/jobs/{job}/history"), None::<&()>)
-            .await
+        self.json(
+            reqwest::Method::GET,
+            &format!("{API_V1}/jobs/{job}/history"),
+            None::<&()>,
+        )
+        .await
     }
 }

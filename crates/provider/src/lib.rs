@@ -7,10 +7,12 @@
 //! enum arm becomes a `Custom(Box<dyn ...>)` or the trait gets boxed futures.
 
 pub mod docker;
+pub mod git;
 pub mod http;
 pub mod rsync;
 pub mod script;
 
+use tokio::io::AsyncReadExt;
 
 /// Spawn the child as its own process-group leader so the whole tree
 /// (shell + grandchildren) can be killed on cancel (spec §74).
@@ -23,23 +25,112 @@ pub(crate) fn spawn_group(
     cmd: &mut tokio::process::Command,
     ctx: &SyncContext,
 ) -> Result<tokio::process::Child, ProviderError> {
-    // process_group comes from CommandExt on unix; the import is needed inside
-    // the function body.
-    #[allow(unused_imports)]
-    use std::os::unix::process::CommandExt;
+    #[cfg(unix)]
     cmd.process_group(0);
-    let child = cmd.spawn().map_err(|e| ProviderError::Spawn(e.to_string()))?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NEW_PROCESS_GROUP = 0x00000200; CREATE_BREAKAWAY_FROM_JOB =
+        // 0x01000000. CREATE_BREAKAWAY_FROM_JOB alone is the safe default —
+        // a new process group without a console is fine for tree killing.
+        cmd.creation_flags(0x01000000);
+    }
+    let child = cmd
+        .spawn()
+        .map_err(|e| ProviderError::Spawn(e.to_string()))?;
     if let Some(cg) = &ctx.cgroup {
         cg.attach(child.id().unwrap_or(0));
     }
     Ok(child)
 }
 
-/// Kill the child's whole process group and reap it.
+/// Kill the child's whole process tree and reap it.
+/// Read one pipe to EOF, teeing into the run log. Memory keeps only the
+/// last `MAX_BUF` bytes (the full stream lives in the log file).
+const MAX_BUF: usize = 256 * 1024;
+
+pub(crate) async fn read_pipe_tee(
+    mut pipe: Option<tokio::process::ChildStdout>,
+    log_file: &Option<std::path::PathBuf>,
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    let Some(mut p) = pipe.take() else { return out };
+    let mut buf = [0u8; 8192];
+    loop {
+        match p.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => {
+                tee_log(log_file, &buf[..n]).await;
+                out.extend_from_slice(&buf[..n]);
+                if out.len() > MAX_BUF {
+                    let drop = out.len() - MAX_BUF;
+                    out.drain(..drop);
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    out
+}
+
+pub(crate) async fn read_pipe_tee_err(
+    mut pipe: Option<tokio::process::ChildStderr>,
+    log_file: &Option<std::path::PathBuf>,
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    let Some(mut p) = pipe.take() else { return out };
+    let mut buf = [0u8; 8192];
+    loop {
+        match p.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => {
+                tee_log(log_file, &buf[..n]).await;
+                out.extend_from_slice(&buf[..n]);
+                if out.len() > MAX_BUF {
+                    let drop = out.len() - MAX_BUF;
+                    out.drain(..drop);
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    out
+}
+
+/// Append a chunk of child output to the run log (fire-and-forget; the
+/// log is best-effort telemetry, not a sync point).
+pub(crate) async fn tee_log(path: &Option<std::path::PathBuf>, data: &[u8]) {
+    let Some(path) = path else { return };
+    if let Ok(mut f) = tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .await
+    {
+        use tokio::io::AsyncWriteExt;
+        let _ = f.write_all(data).await;
+    }
+}
+
 pub(crate) async fn kill_group(child: &mut tokio::process::Child) {
-    let pid = child.id().unwrap_or(0) as i32;
-    unsafe {
-        libc::kill(-pid, libc::SIGKILL);
+    #[cfg(unix)]
+    {
+        let pid = child.id().unwrap_or(0) as i32;
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+    #[cfg(windows)]
+    {
+        // taskkill /T kills the tree; /F forces. Failures are fine — the
+        // child may already be gone.
+        let pid = child.id().unwrap_or(0);
+        let _ = tokio::process::Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await;
     }
     let _ = child.wait().await;
 }
@@ -86,7 +177,17 @@ pub struct SyncContext {
     pub egress_address: Option<String>,
     /// Resolved address family for the connection: ipv4 | ipv6 | any.
     pub family: String,
+    /// Shared usage sample sink (docker provider fills it with
+    /// `docker stats` polls; the executor reads it into the run outcome).
+    pub usage: Option<UsageSink>,
+    /// Run log file: providers tee their child's output here as it arrives
+    /// (the tool's own output belongs in the run log, live).
+    pub log_file: Option<std::path::PathBuf>,
 }
+
+/// (peak memory bytes, accumulated cpu seconds) shared between a provider
+/// and the executor.
+pub type UsageSink = std::sync::Arc<std::sync::Mutex<(Option<u64>, Option<f64>)>>;
 
 /// Result of one provider run (spec §17: size comes from the provider when it
 /// knows it; from the script via SYNORA_SIZE=; else filesystem walk).
@@ -139,6 +240,7 @@ pub enum Provider {
     Rsync(rsync::RsyncProvider),
     Script(script::ScriptProvider),
     Docker(docker::DockerProvider),
+    Git(git::GitProvider),
     Http(http::HttpProvider),
 }
 
@@ -148,6 +250,7 @@ impl Provider {
             Provider::Rsync(_) => "rsync",
             Provider::Script(_) => "script",
             Provider::Docker(_) => "docker",
+            Provider::Git(_) => "git",
             Provider::Http(_) => "http",
         }
     }
@@ -157,6 +260,7 @@ impl Provider {
             Provider::Rsync(p) => p.sync(ctx).await,
             Provider::Script(p) => p.sync(ctx).await,
             Provider::Docker(p) => p.sync(ctx).await,
+            Provider::Git(p) => p.sync(ctx).await,
             Provider::Http(p) => p.sync(ctx).await,
         }
     }
@@ -171,21 +275,26 @@ pub fn build_provider(job: &JobSpec) -> Result<Provider, ProviderError> {
                 exclude: exclude.clone(),
             }))
         }
-        synora_core::ProviderConfig::Script { command } => Ok(Provider::Script(
-            script::ScriptProvider {
+        synora_core::ProviderConfig::Script { command } => {
+            Ok(Provider::Script(script::ScriptProvider {
                 command: command.clone(),
-            },
-        )),
+            }))
+        }
         synora_core::ProviderConfig::Docker {
             image,
             env,
             volumes,
             keep_container,
+            command,
         } => Ok(Provider::Docker(docker::DockerProvider {
             image: image.clone(),
             env: env.clone(),
             volumes: volumes.clone(),
             keep_container: *keep_container,
+            command: command.clone(),
+        })),
+        synora_core::ProviderConfig::Git { branch } => Ok(Provider::Git(git::GitProvider {
+            branch: branch.clone(),
         })),
         synora_core::ProviderConfig::Http { parser, delete } => {
             Ok(Provider::Http(http::HttpProvider {

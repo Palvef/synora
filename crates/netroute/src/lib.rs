@@ -42,6 +42,8 @@ pub enum RouteError {
     NonZeroExit(i32),
     #[error("reqwest error: {0}")]
     Reqwest(#[from] reqwest::Error),
+    #[error("{0}")]
+    Other(String),
 }
 
 /// Health + probe state of one proxy.
@@ -446,6 +448,79 @@ impl Clone for NetRoute {
 
 /// Build the proxy env for a child process: HTTP_PROXY/HTTPS_PROXY/ALL_PROXY
 /// (+ NO_PROXY passthrough) from a Selection. `Direct` yields no entries.
+/// Common local proxy ports (CF One / WARP and typical local proxies).
+pub const WARP_PORTS: &[u16] = &[40000, 40001, 1080, 10808, 7890, 7891, 2080, 8899];
+
+/// Detect a local CF One / WARP endpoint on this machine. Returns
+/// `socks5h://127.0.0.1:<port>` or None when no client is running.
+pub fn local_warp_url() -> Option<String> {
+    for port in WARP_PORTS {
+        if std::net::TcpStream::connect_timeout(
+            &std::net::SocketAddr::from(([127, 0, 0, 1], *port)),
+            std::time::Duration::from_millis(300),
+        )
+        .is_ok()
+        {
+            return Some(format!("socks5h://127.0.0.1:{port}"));
+        }
+    }
+    None
+}
+
+/// First non-loopback IPv4 of this host (for rewriting 0.0.0.0 expose
+/// addresses into something workers can actually reach).
+pub fn lan_ipv4() -> Option<String> {
+    use std::net::UdpSocket;
+    // Best effort: UDP connect trick to find the route source address.
+    let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("1.1.1.1:80").ok()?;
+    sock.local_addr().ok().map(|a| a.ip().to_string())
+}
+
+/// The environment a worker should receive for a proxy (user requirement:
+/// workers always get the MANAGER's resolved proxy settings). When the
+/// proxy has an `expose` address, the worker gets that address (with the
+/// Basic credentials) instead of the manager-local loopback URL.
+pub fn dispatch_proxy_env(
+    proxy: Option<&ProxyConfig>,
+    selection: &Selection,
+) -> Vec<(String, String)> {
+    let Selection::Forward { url, env, .. } = selection else {
+        return Vec::new();
+    };
+    let Some(p) = proxy else {
+        return env.clone();
+    };
+    let Some(expose) = &p.expose else {
+        return env.clone();
+    };
+    // Rewrite 127.0.0.1 / 0.0.0.0 / localhost to a LAN-reachable address.
+    let host = if let Some(lan) = lan_ipv4() {
+        expose
+            .replace("127.0.0.1", &lan)
+            .replace("0.0.0.0", &lan)
+            .replace("localhost", &lan)
+    } else {
+        expose.clone()
+    };
+    let auth = p.expose_auth.as_deref().unwrap_or("");
+    let prefix = if url.starts_with("socks5h://") {
+        "socks5h://"
+    } else {
+        "http://"
+    };
+    let remote = if auth.contains(':') {
+        format!("{prefix}{auth}@{host}")
+    } else {
+        format!("{prefix}{host}")
+    };
+    vec![
+        ("HTTP_PROXY".to_string(), remote.clone()),
+        ("HTTPS_PROXY".to_string(), remote.clone()),
+        ("ALL_PROXY".to_string(), remote.clone()),
+    ]
+}
+
 pub fn proxy_env(selection: &Selection) -> Vec<(String, String)> {
     let Selection::Forward { url, env, .. } = selection else {
         return Vec::new();
@@ -502,8 +577,15 @@ async fn probe_forward(
             }
         }
     };
+    // Failures still record when they were tried and how long they took —
+    // the UI must show "probed, down" instead of blank (probe @ timestamp).
     let Some(body) = body else {
-        return ProxyProbe::default();
+        return ProxyProbe {
+            latency_ms: Some(started.elapsed().as_millis() as u64),
+            healthy: false,
+            last_probe_at: now_ts(),
+            ..Default::default()
+        };
     };
     ProxyProbe {
         latency_ms: Some(started.elapsed().as_millis() as u64),
@@ -519,6 +601,9 @@ async fn reqwest_get(proxy_url: &str, probe_url: &str) -> Result<String, RouteEr
         .map_err(|e| RouteError::BadResponse(format!("invalid proxy url: {e}")))?;
     let client = reqwest::Client::builder()
         .proxy(proxy)
+        // The probe must go through the configured proxy — never through a
+        // leaked HTTP_PROXY env var on top (proxying the proxy breaks it).
+        .no_proxy()
         .build()
         .map_err(|e| RouteError::BadResponse(format!("client build: {e}")))?;
     let resp = client.get(probe_url).send().await?;
@@ -716,10 +801,19 @@ fn ip_probe_url() -> String {
 fn parse_ip_text(body: &str) -> Option<String> {
     let t = body.trim();
     if t.parse::<IpAddr>().is_ok() {
-        Some(t.to_string())
-    } else {
-        None
+        return Some(t.to_string());
     }
+    // Cloudflare trace (https://cloudflare.com/cdn-cgi/trace) answers with
+    // "ip=1.2.3.4" among other k=v lines.
+    for line in t.lines() {
+        if let Some(v) = line.strip_prefix("ip=") {
+            let v = v.trim();
+            if v.parse::<IpAddr>().is_ok() {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
 }
 
 fn now_ts() -> Option<i64> {
@@ -751,6 +845,218 @@ fn lcg() -> u64 {
     next
 }
 
+// ---------------------------------------------------------------------------
+// Authenticated expose proxy (user requirement): registering CF One / WARP
+// with an `expose` address also starts a Basic-auth HTTP CONNECT proxy on
+// this machine that forwards to the local WARP endpoint — other programs on
+// the box can use the port with the generated credentials.
+// ---------------------------------------------------------------------------
+
+/// Connect to an upstream SOCKS5 (no-auth) proxy and tunnel to target.
+async fn socks5_connect_tunnel(
+    socks_url: &str,
+    target_host: &str,
+    target_port: u16,
+) -> Result<TcpStream, RouteError> {
+    let (proxy_host, proxy_port) = url_host_port(socks_url);
+    let mut stream = TcpStream::connect((proxy_host.as_str(), proxy_port)).await?;
+    stream.set_nodelay(true).ok();
+    stream.write_all(&[0x05, 0x01, 0x00]).await?;
+    let mut method = [0u8; 2];
+    stream.read_exact(&mut method).await?;
+    if method[0] != 0x05 || method[1] != 0x00 {
+        return Err(RouteError::BadResponse(format!(
+            "SOCKS5 auth method {:#04x}",
+            method[1]
+        )));
+    }
+    let mut req = Vec::with_capacity(7 + target_host.len());
+    req.extend_from_slice(&[0x05, 0x01, 0x00, 0x03, target_host.len() as u8]);
+    req.extend_from_slice(target_host.as_bytes());
+    req.extend_from_slice(&target_port.to_be_bytes());
+    stream.write_all(&req).await?;
+    let mut head = [0u8; 10];
+    stream.read_exact(&mut head).await?;
+    if head[0] != 0x05 || head[1] != 0x00 {
+        return Err(RouteError::BadResponse(format!(
+            "SOCKS5 CONNECT failed: {:#04x}",
+            head[1]
+        )));
+    }
+    let total = match head[3] {
+        0x01 => 10,
+        0x04 => 22,
+        0x03 => {
+            let mut len = [0u8; 1];
+            stream.read_exact(&mut len).await?;
+            4 + 1 + len[0] as usize + 2
+        }
+        atyp => return Err(RouteError::BadResponse(format!("SOCKS5 reply ATYP {atyp}"))),
+    };
+    if total > 10 {
+        let mut rest = vec![0u8; total - 10];
+        stream.read_exact(&mut rest).await?;
+    }
+    Ok(stream)
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Serve a Basic-auth HTTP CONNECT proxy on `listen`, forwarding through the
+/// local WARP endpoint `upstream`. Runs forever (spawn it as a task); one
+/// connection per client, 401 on bad credentials.
+pub async fn serve_auth_proxy(
+    listen: &str,
+    upstream: &str,
+    user: &str,
+    pass: &str,
+) -> Result<(), RouteError> {
+    let listener = tokio::net::TcpListener::bind(listen)
+        .await
+        .map_err(|e| RouteError::Other(format!("auth proxy bind {listen}: {e}")))?;
+    tracing::info!("auth proxy listening on {listen} → {upstream}");
+    let expected = format!("Basic {}", base64_auth(user, pass));
+    loop {
+        let Ok((client, addr)) = listener.accept().await else {
+            continue;
+        };
+        let upstream = upstream.to_string();
+        let expected = expected.clone();
+        tokio::spawn(async move {
+            let _ = addr;
+            let _ = serve_auth_proxy_conn(client, &upstream, &expected).await;
+        });
+    }
+}
+
+fn base64_auth(user: &str, pass: &str) -> String {
+    // Minimal base64 for Basic auth (no external dep needed for this one
+    // string; standard alphabet).
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let creds = format!("{user}:{pass}");
+    let bytes = creds.as_bytes();
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ];
+        out.push(TABLE[(b[0] >> 2) as usize] as char);
+        out.push(TABLE[(((b[0] & 0x03) << 4) | (b[1] >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[(((b[1] & 0x0F) << 2) | (b[2] >> 6)) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(b[2] & 0x3F) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+async fn serve_auth_proxy_conn(
+    mut client: TcpStream,
+    upstream: &str,
+    expected_auth: &str,
+) -> Result<(), RouteError> {
+    // Read the CONNECT request head.
+    let mut head = Vec::new();
+    let mut buf = [0u8; 1];
+    while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+        client.read_exact(&mut buf).await?;
+        head.push(buf[0]);
+        if head.len() > 8192 {
+            let _ = client
+                .write_all(b"HTTP/1.1 413 Payload Too Large\r\n\r\n")
+                .await;
+            return Ok(());
+        }
+    }
+    let text = String::from_utf8_lossy(&head);
+    let mut lines = text.lines();
+    let request = lines.next().unwrap_or("");
+    // `CONNECT host:port HTTP/1.1`
+    let mut parts = request.split_whitespace();
+    let (Some("CONNECT"), Some(hostport)) = (parts.next(), parts.next()) else {
+        let _ = client
+            .write_all(b"HTTP/1.1 405 Method Not Allowed\r\n\r\n")
+            .await;
+        return Ok(());
+    };
+    let auth_ok = lines
+        .find_map(|l| l.strip_prefix("Proxy-Authorization:"))
+        .map(|v| v.trim().as_bytes())
+        .map(|v| constant_time_eq(v, expected_auth.as_bytes()))
+        .unwrap_or(false);
+    if !auth_ok {
+        let _ = client
+            .write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"synora\"\r\n\r\n")
+            .await;
+        return Ok(());
+    }
+    let (target_host, target_port) = {
+        let (h, p) = hostport
+            .rsplit_once(':')
+            .ok_or_else(|| RouteError::BadResponse(format!("bad CONNECT target {hostport}")))?;
+        (
+            h.to_string(),
+            p.parse::<u16>()
+                .map_err(|_| RouteError::BadResponse("bad port".into()))?,
+        )
+    };
+    let tunnel = match socks5_connect_tunnel(upstream, &target_host, target_port).await {
+        Ok(t) => t,
+        Err(_) => {
+            let _ = client.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await;
+            return Ok(());
+        }
+    };
+    let _ = client
+        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        .await;
+    let (mut cr, mut cw) = client.into_split();
+    let (mut tr, mut tw) = tunnel.into_split();
+    tokio::select! {
+        _ = tokio::io::copy(&mut tr, &mut cw) => {}
+        _ = tokio::io::copy(&mut cr, &mut tw) => {}
+    }
+    Ok(())
+}
+
+/// Random credential (hex) from the OS RNG — used when TUI registration
+/// generates the expose auth.
+pub fn random_credential() -> String {
+    use std::io::Read;
+    let mut buf = [0u8; 8];
+    if std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut buf))
+        .is_ok()
+    {
+        buf.iter().map(|b| format!("{b:02x}")).collect()
+    } else {
+        // Fallback: time-derived (registration is rare; still unpredictable
+        // enough for a default credential the operator can change).
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        format!("{nanos:x}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -769,6 +1075,7 @@ mod tests {
                 healthcheck: None,
                 timeout: 2,
                 expose: None,
+                expose_auth: None,
             },
         )
     }
@@ -911,7 +1218,7 @@ mod tests {
         );
         let probe = route.probe("bad").await;
         assert!(!probe.healthy);
-        assert!(probe.latency_ms.is_none());
+        assert!(probe.latency_ms.is_some());
         let sel = route.select_proxy(Some("g"));
         assert_eq!(
             sel,
@@ -1165,6 +1472,7 @@ mod tests {
                     healthcheck: Some(format!("http://127.0.0.1:{}", target.port())),
                     timeout: 5,
                     expose: None,
+                    expose_auth: None,
                 },
             )],
             vec![],
@@ -1224,6 +1532,7 @@ mod tests {
                     healthcheck: Some(format!("http://127.0.0.1:{}", target.port())),
                     timeout: 5,
                     expose: None,
+                    expose_auth: None,
                 },
             )],
             vec![],
@@ -1250,7 +1559,10 @@ mod tests {
         );
         let probe = route.probe("gone").await;
         assert!(!probe.healthy);
-        assert!(probe.latency_ms.is_none());
+        // Failed probes still record latency + timestamp (the UI shows
+        // "probed, down" instead of blank).
+        assert!(probe.latency_ms.is_some());
+        assert!(probe.last_probe_at.is_some());
         assert!(probe.egress_ip.is_none());
     }
 

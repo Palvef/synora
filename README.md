@@ -1,21 +1,38 @@
 # Synora
 
-A modern, high-performance mirror synchronization engine in Rust.
-Synora decides **when** to sync, **where** to sync, **through which network
-path**, **with which tool**, and **how to recover** — the actual data movement
-is delegated to rsync, scripts, or Docker containers (tunasync/Yuki-style).
+A mirror synchronization engine written in Rust. Synora decides when to sync,
+where to sync, through which network path, with which tool, and how to
+recover; the actual data movement is performed by rsync, scripts, or Docker
+containers.
 
 Rust · Mirror Sync · Cron · Multi Worker · Docker · Proxy · IPv4/IPv6 ·
 ZFS/Btrfs · Prometheus · TUI
+
+## Acknowledgements
+
+Synora builds on the ideas and production experience of
+[tunasync](https://github.com/tuna/tunasync) (TUNA),
+[Yuki](https://github.com/ustclug/yuki) (USTC LUG), and
+[tsumugu](https://github.com/taoky/tsumugu): tunasync's Manager + Worker
+architecture, rsync argument conventions (success exit codes 23/24,
+`--safe-links --timeout=120`), `TUNASYNC_*` script environment
+compatibility, `mirror_subdir`, tunasync.json-compatible status output and
+its optional-TLS wire mode; Yuki's SQLite storage and `reload` convention;
+tsumugu's fault-tolerant HTTP directory mirroring. Thanks are due to the
+authors and maintainers of these projects.
 
 ## Features
 
 - **No-drift scheduling**: cron / daily / weekly / fixed interval with a
   persistent anchor — next runs are computed from the wall clock, never from
   "last run end + interval" (misfire policies: skip / run-immediately / run-next).
-- **Three providers**: rsync (tunasync-aligned defaults, `success_exit_codes`
+- **Five providers**: rsync (tunasync-aligned defaults, `success_exit_codes`
   23/24), script (SYNORA_* + TUNASYNC_* env for tunasync-scripts compatibility,
-  `SYNORA_SIZE=` size reporting), docker (`docker run`, storage mounted at /data).
+  `SYNORA_SIZE=` size reporting), docker (`docker run`, storage mounted at /data,
+  optional in-container command), git (`clone --mirror` + `remote update --prune`),
+  and HTTP directory mirroring (tsumugu-style: per-file failures are skipped,
+  symlinks ignored, 30 s per-request timeout, unlimited run time unless a
+  timeout is set with 1m/1h/1d units).
 - **Single machine or distributed**: `synora start` runs standalone (SQLite);
   `synora-manager` + N × `synora-worker` form a pull-model cluster (workers
   register, heartbeat every 15 s, claim assigned runs). PostgreSQL optional.
@@ -24,20 +41,36 @@ ZFS/Btrfs · Prometheus · TUI
   forever.
 - **Hot reload**: SIGHUP / `synora reload` / `POST /api/v1/reload` — job and
   schedule changes apply live; invalid or non-reloadable changes are rejected
-  as a whole.
+  as a whole; changed jobs get a catch-up run queued automatically.
+- **Delete/size protection**: `max_delete_files` / `max_delete_ratio` /
+  `max_size_drop_ratio` measured around every run; a mirror that shrinks too
+  much fails instead of being kept (rsync also gets `--max-delete=N`).
+- **Proxies & egress**: http / socks5h / command / direct with latency and
+  egress-IP probing (default Cloudflare egress), per-job direct sync with
+  ipv4/ipv6 and bind-address selection; TUI auto-registers CF One / WARP.
+- **cgroup v2 limits** per run (memory.max / cpu.max) plus docker resource flags.
+- **tunasync.json compatibility**: the manager serves a mirror-web-compatible
+  bare-array status JSON (path configurable) alongside its native synora.json.
 - **Security**: Bearer-token API with RBAC permission keys, plain HTTP or
-  TLS/mTLS (tunasync-style `[api.tls]` + worker `ca_cert`), argv-only process
-  execution (no shell string concatenation), constant-time token comparison.
+  TLS/mTLS (tunasync-style `[api.tls]` + worker `ca_cert`), constant-time
+  token comparison. The rsync/docker/git providers execute argv arrays
+  (no shell); the script provider runs its command through a shell by design
+  (tunasync-scripts compatibility) — its command string comes from trusted
+  local config only, never from API input.
 - **Observability**: Prometheus metrics, per-run log files, events table, TUI.
 - **Config**: TOML with `include` (glob/nested/cycle-detected), `${VAR}`
   expansion, `file:line` validation via `synora check`.
 - **Migration**: `scripts/tunasync2synora.py` and `scripts/yuki2synora.py`
   convert existing tunasync / Yuki configs in one shot.
 
+[中文说明](README.zh.md) · [配置逐项解析](docs/config-reference.md) ·
+[生产配置示例](examples/production.toml) · [systemd units](deploy/systemd/)
+
 ## Quick start
 
 ```sh
 # validate a config (file:line errors)
+export SYNORA_API_TOKEN=$(openssl rand -hex 32)   # placeholder tokens are rejected
 synora check -c examples/simple.toml
 
 # run the standalone daemon (SQLite + scheduler + /metrics on 127.0.0.1:8100)
@@ -56,7 +89,7 @@ synora reload -c examples/simple.toml
 synora-manager -c config/synora.toml     # manager (API + scheduler)
 synora-worker  -c config/worker1.toml    # one worker per host
 synora worker list -c config/synora.toml
-synora-tui -c config/synora.toml         # terminal console
+synora tui -c config/synora.toml         # terminal console
 ```
 
 ## Configuration
@@ -82,7 +115,7 @@ key  = "/etc/synora/key.pem"
 
 [[api.tokens]]
 name = "admin"
-token = "change-me"
+token = "${SYNORA_API_TOKEN}"    # ${VAR} from the environment; >= 32 bytes
 role = "admin"                   # admin | operator | viewer
 ```
 
@@ -153,6 +186,13 @@ admin / operator / viewer; permission keys: `jobs.read`, `jobs.write`,
 | POST | `/reload` | jobs.write | hot-reload config |
 | GET | `/metrics` | (open) | Prometheus text format |
 
+**Unauthenticated endpoints** — `/metrics`, `/healthz`, and the two status
+JSONs (`synora_json_path` / `tunasync_json_path`, both configurable, empty =
+disabled) are public by design so scrapers and mirror-web frontends can
+reach them without a token. They expose only aggregate telemetry and
+mirror status, never job definitions or run logs — but keep the listen
+address loopback or firewall the port if that is still too much.
+
 ## Metrics
 
 `synora_job_status{job,worker}` (gauge: 0 pending, 4 running, 5 success,
@@ -184,11 +224,12 @@ cargo clippy --workspace
 synora check -c examples/simple.toml
 ```
 
-Workspace crates: `synora-core` (domain types, no-drift schedule math,
-metrics), `config`, `db` (SQLite/PostgreSQL), `provider` (rsync/script/docker),
-`engine` (scheduler/executor), `api` (DTOs + client), `manager`, `worker`,
-`cli`, `tui`, `nginx` (directory-index parser).
+Workspace crates: `core` (domain types, no-drift schedule math, metrics),
+`config` (TOML loader/validator), `db` (SQLite/PostgreSQL), `provider`
+(rsync/script/docker/git/http), `engine` (scheduler/executor), `api` (DTOs +
+client), `netroute` (proxy probing/serving), `manager`, `worker`, `cli`,
+`tui`, `nginx` (directory-index parser), `httpfetch`.
 
 ## License
 
-TBD
+[GPL-3.0](LICENSE)

@@ -8,7 +8,7 @@
   ],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 4,
+  "version": 8,
   "refresh": "30s",
   "editable": true,
   "graphTooltip": 1,
@@ -897,14 +897,14 @@
      "showHeader": true,
      "sortBy": [
       {
-       "displayName": "状态",
+       "displayName": "任务",
        "desc": false
       }
      ]
     },
     "targets": [
      {
-      "expr": "synora_job_status{exported_job=~\"$job_name\"}",
+      "expr": "max(synora_job_status{exported_job=~\"$job_name\"}) by (exported_job)",
       "legendFormat": "状态",
       "refId": "status",
       "instant": true,
@@ -918,49 +918,49 @@
       "format": "table"
      },
      {
-      "expr": "synora_job_failures_total{exported_job=~\"$job_name\"}",
+      "expr": "max(synora_job_failures_total{exported_job=~\"$job_name\"}) by (exported_job)",
       "legendFormat": "失败",
       "refId": "fail",
       "instant": true,
       "format": "table"
      },
      {
-      "expr": "synora_job_retries_total{exported_job=~\"$job_name\"}",
+      "expr": "max(synora_job_retries_total{exported_job=~\"$job_name\"}) by (exported_job)",
       "legendFormat": "重试",
       "refId": "retry",
       "instant": true,
       "format": "table"
      },
      {
-      "expr": "synora_job_duration_seconds{exported_job=~\"$job_name\"}",
+      "expr": "max(synora_job_duration_seconds{exported_job=~\"$job_name\"}) by (exported_job)",
       "legendFormat": "耗时",
       "refId": "dur",
       "instant": true,
       "format": "table"
      },
      {
-      "expr": "synora_job_bytes_transferred_total{exported_job=~\"$job_name\"}",
+      "expr": "sum(synora_job_bytes_transferred_total{exported_job=~\"$job_name\"}) by (exported_job)",
       "legendFormat": "传输量",
       "refId": "bytes",
       "instant": true,
       "format": "table"
      },
      {
-      "expr": "synora_repository_size_bytes{repository=~\"$job_name\"}",
+      "expr": "max(label_replace(synora_repository_size_bytes{repository=~\"$job_name\"}, \"exported_job\", \"$1\", \"repository\", \"(.*)\")) by (exported_job)",
       "legendFormat": "仓库大小",
       "refId": "size",
       "instant": true,
       "format": "table"
      },
      {
-      "expr": "synora_job_next_run_timestamp{exported_job=~\"$job_name\"} * 1000",
+      "expr": "max(synora_job_next_run_timestamp{exported_job=~\"$job_name\"}) by (exported_job) * 1000",
       "legendFormat": "下次运行",
       "refId": "next",
       "instant": true,
       "format": "table"
      },
      {
-      "expr": "synora_job_last_end_timestamp{exported_job=~\"$job_name\"} * 1000",
+      "expr": "max(synora_job_last_end_timestamp{exported_job=~\"$job_name\"}) by (exported_job) * 1000",
       "legendFormat": "上次同步",
       "refId": "last",
       "instant": true,
@@ -980,18 +980,18 @@
         "instance": true,
         "job": true,
         "worker": true,
-        "repository": true,
-        "Value #status": true,
-        "Value #ok": true,
-        "Value #fail": true,
-        "Value #retry": true,
-        "Value #dur": true,
-        "Value #bytes": true,
-        "Value #size": true,
-        "Value #next": true,
-        "Value #last": true
+        "repository": true
        },
        "renameByName": {
+        "Value #status": "状态",
+        "Value #ok": "成功",
+        "Value #fail": "失败",
+        "Value #retry": "重试",
+        "Value #dur": "耗时 (s)",
+        "Value #bytes": "传输量",
+        "Value #size": "仓库大小",
+        "Value #next": "下次运行",
+        "Value #last": "上次同步",
         "exported_job": "任务"
        }
       }
@@ -1329,19 +1329,19 @@
         "type": "value",
         "options": {
          "0": {
-          "text": "Offline",
+          "text": "离线 Offline",
           "color": "red"
          },
          "1": {
-          "text": "Online",
+          "text": "在线 Online",
           "color": "green"
          },
          "2": {
-          "text": "Draining",
+          "text": "下线中 Draining（停止接收新任务）",
           "color": "yellow"
          },
          "3": {
-          "text": "Maintenance",
+          "text": "维护中 Maintenance",
           "color": "blue"
          }
         }
@@ -1504,110 +1504,6 @@
     }
    },
    {
-    "id": 24,
-    "type": "timeseries",
-    "title": "任务 CPU 使用",
-    "datasource": {
-     "type": "prometheus",
-     "uid": "ae4bld7vas268d"
-    },
-    "gridPos": {
-     "h": 7,
-     "w": 12,
-     "x": 0,
-     "y": 65
-    },
-    "fieldConfig": {
-     "defaults": {
-      "color": {
-       "mode": "palette-classic"
-      },
-      "custom": {
-       "drawStyle": "line",
-       "lineInterpolation": "smooth",
-       "fillOpacity": 10,
-       "showPoints": "never",
-       "spanNulls": false
-      },
-      "unit": "percentunit"
-     },
-     "overrides": []
-    },
-    "options": {
-     "legend": {
-      "displayMode": "table",
-      "placement": "bottom",
-      "calcs": [
-       "lastNotNull",
-       "max"
-      ]
-     },
-     "tooltip": {
-      "mode": "multi",
-      "sort": "desc"
-     }
-    },
-    "targets": [
-     {
-      "expr": "rate(synora_job_cpu_usage_seconds_total{exported_job=~\"$job_name\"}[5m])",
-      "legendFormat": "{{exported_job}} @ {{worker}}",
-      "refId": "A"
-     }
-    ]
-   },
-   {
-    "id": 25,
-    "type": "timeseries",
-    "title": "任务内存使用",
-    "datasource": {
-     "type": "prometheus",
-     "uid": "ae4bld7vas268d"
-    },
-    "gridPos": {
-     "h": 7,
-     "w": 12,
-     "x": 12,
-     "y": 65
-    },
-    "fieldConfig": {
-     "defaults": {
-      "color": {
-       "mode": "palette-classic"
-      },
-      "custom": {
-       "drawStyle": "line",
-       "lineInterpolation": "smooth",
-       "fillOpacity": 10,
-       "showPoints": "never",
-       "spanNulls": false
-      },
-      "unit": "bytes"
-     },
-     "overrides": []
-    },
-    "options": {
-     "legend": {
-      "displayMode": "table",
-      "placement": "bottom",
-      "calcs": [
-       "lastNotNull",
-       "max"
-      ]
-     },
-     "tooltip": {
-      "mode": "multi",
-      "sort": "desc"
-     }
-    },
-    "targets": [
-     {
-      "expr": "synora_job_memory_bytes{exported_job=~\"$job_name\"}",
-      "legendFormat": "{{exported_job}} @ {{worker}}",
-      "refId": "A"
-     }
-    ]
-   },
-   {
     "id": 26,
     "type": "timeseries",
     "title": "仓库大小",
@@ -1704,6 +1600,220 @@
      {
       "expr": "synora_job_next_run_timestamp{exported_job=~\"$job_name\"} * 1000",
       "legendFormat": "{{exported_job}}",
+      "refId": "A"
+     }
+    ]
+   },
+   {
+    "id": 28,
+    "type": "timeseries",
+    "title": "每任务同步耗时（最近）",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "ae4bld7vas268d"
+    },
+    "gridPos": {
+     "h": 7,
+     "w": 12,
+     "x": 0,
+     "y": 69
+    },
+    "fieldConfig": {
+     "defaults": {
+      "color": {
+       "mode": "palette-classic"
+      },
+      "custom": {
+       "drawStyle": "bars",
+       "fillOpacity": 70,
+       "showPoints": "never"
+      },
+      "unit": "s"
+     },
+     "overrides": []
+    },
+    "options": {
+     "legend": {
+      "displayMode": "table",
+      "placement": "bottom",
+      "calcs": [
+       "lastNotNull"
+      ]
+     },
+     "tooltip": {
+      "mode": "multi",
+      "sort": "desc"
+     }
+    },
+    "targets": [
+     {
+      "expr": "max(synora_job_duration_seconds{exported_job=~\"$job_name\"}) by (exported_job)",
+      "legendFormat": "{{exported_job}}",
+      "refId": "A"
+     }
+    ]
+   },
+   {
+    "id": 29,
+    "type": "stat",
+    "title": "同步成功率（全部任务）",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "ae4bld7vas268d"
+    },
+    "gridPos": {
+     "h": 7,
+     "w": 12,
+     "x": 12,
+     "y": 69
+    },
+    "fieldConfig": {
+     "defaults": {
+      "color": {
+       "mode": "thresholds"
+      },
+      "thresholds": {
+       "mode": "absolute",
+       "steps": [
+        {
+         "color": "red",
+         "value": null
+        },
+        {
+         "color": "yellow",
+         "value": 90
+        },
+        {
+         "color": "green",
+         "value": 99
+        }
+       ]
+      },
+      "unit": "percent",
+      "max": 100,
+      "min": 0
+     },
+     "overrides": []
+    },
+    "options": {
+     "reduceOptions": {
+      "calcs": [
+       "lastNotNull"
+      ],
+      "fields": "",
+      "values": false
+     },
+     "colorMode": "background",
+     "graphMode": "none",
+     "textMode": "auto"
+    },
+    "targets": [
+     {
+      "expr": "100 * (count(synora_job_status == 5) / scalar(count(synora_job_status)))",
+      "legendFormat": "成功率",
+      "refId": "A",
+      "instant": true
+     }
+    ]
+   },
+   {
+    "id": 30,
+    "type": "timeseries",
+    "title": "任务 CPU 使用",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "ae4bld7vas268d"
+    },
+    "gridPos": {
+     "h": 7,
+     "w": 12,
+     "x": 0,
+     "y": 76
+    },
+    "fieldConfig": {
+     "defaults": {
+      "color": {
+       "mode": "palette-classic"
+      },
+      "custom": {
+       "drawStyle": "line",
+       "lineInterpolation": "smooth",
+       "fillOpacity": 10,
+       "showPoints": "never"
+      },
+      "unit": "percentunit"
+     },
+     "overrides": []
+    },
+    "options": {
+     "legend": {
+      "displayMode": "table",
+      "placement": "bottom",
+      "calcs": [
+       "lastNotNull",
+       "max"
+      ]
+     },
+     "tooltip": {
+      "mode": "multi",
+      "sort": "desc"
+     }
+    },
+    "targets": [
+     {
+      "expr": "rate(synora_job_cpu_usage_seconds_total{exported_job=~\"$job_name\"}[5m])",
+      "legendFormat": "{{exported_job}} @ {{worker}}",
+      "refId": "A"
+     }
+    ]
+   },
+   {
+    "id": 31,
+    "type": "timeseries",
+    "title": "任务内存使用",
+    "datasource": {
+     "type": "prometheus",
+     "uid": "ae4bld7vas268d"
+    },
+    "gridPos": {
+     "h": 7,
+     "w": 12,
+     "x": 12,
+     "y": 76
+    },
+    "fieldConfig": {
+     "defaults": {
+      "color": {
+       "mode": "palette-classic"
+      },
+      "custom": {
+       "drawStyle": "line",
+       "lineInterpolation": "smooth",
+       "fillOpacity": 10,
+       "showPoints": "never"
+      },
+      "unit": "bytes"
+     },
+     "overrides": []
+    },
+    "options": {
+     "legend": {
+      "displayMode": "table",
+      "placement": "bottom",
+      "calcs": [
+       "lastNotNull",
+       "max"
+      ]
+     },
+     "tooltip": {
+      "mode": "multi",
+      "sort": "desc"
+     }
+    },
+    "targets": [
+     {
+      "expr": "synora_job_memory_bytes{exported_job=~\"$job_name\"}",
+      "legendFormat": "{{exported_job}} @ {{worker}}",
       "refId": "A"
      }
     ]

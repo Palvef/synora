@@ -79,12 +79,10 @@ impl Metrics {
             labels: sorted,
         };
         let mut entries = self.entries.lock().unwrap();
-        let entry = entries
-            .entry(key)
-            .or_insert(Entry {
-                kind: MetricType::Counter,
-                value: 0.0,
-            });
+        let entry = entries.entry(key).or_insert(Entry {
+            kind: MetricType::Counter,
+            value: 0.0,
+        });
         entry.value += delta;
     }
 
@@ -132,13 +130,26 @@ mod tests {
     #[test]
     fn render_is_prometheus_text() {
         let m = Metrics::new();
-        m.set_gauge("synora_job_status", &[("job", "ubuntu"), ("worker", "local")], 1.0);
+        m.set_gauge(
+            "synora_job_status",
+            &[("job", "ubuntu"), ("worker", "local")],
+            1.0,
+        );
         m.inc_counter("synora_job_runs_total", &[("job", "ubuntu")], 2.0);
         let out = m.render();
         assert!(out.contains("# TYPE synora_job_status gauge"), "{out}");
-        assert!(out.contains("synora_job_status{job=\"ubuntu\",worker=\"local\"} 1"), "{out}");
-        assert!(out.contains("# TYPE synora_job_runs_total counter"), "{out}");
-        assert!(out.contains("synora_job_runs_total{job=\"ubuntu\"} 2"), "{out}");
+        assert!(
+            out.contains("synora_job_status{job=\"ubuntu\",worker=\"local\"} 1"),
+            "{out}"
+        );
+        assert!(
+            out.contains("# TYPE synora_job_runs_total counter"),
+            "{out}"
+        );
+        assert!(
+            out.contains("synora_job_runs_total{job=\"ubuntu\"} 2"),
+            "{out}"
+        );
     }
 
     #[test]

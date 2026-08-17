@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 
 [workspace.dependencies]
@@ -17,6 +17,7 @@ api = { path = "crates/api" }
 nginx = { path = "crates/nginx" }
 parser = { path = "crates/parser" }
 netroute = { path = "crates/netroute" }
+tui = { path = "crates/tui" }
 storage = { path = "crates/storage" }
 snapshot = { path = "crates/snapshot" }
 httpfetch = { path = "crates/httpfetch" }

@@ -11,7 +11,11 @@ use engine::Engine;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "synora-manager", version, about = "Synora manager (scheduler + API)")]
+#[command(
+    name = "synora-manager",
+    version,
+    about = "Synora manager (scheduler + API)"
+)]
 struct Cli {
     /// Main config file
     #[arg(short, long)]
@@ -42,6 +46,25 @@ async fn main() -> Result<(), String> {
         )
         .init();
 
+    // Serve authenticated expose proxies for the MANAGER's own proxy
+    // configs (workers receive these exposed addresses with the assignment).
+    for (name, p) in &cfg.proxies {
+        if let (Some(expose), Some(auth)) = (&p.expose, &p.expose_auth) {
+            if let Some((user, pass)) = auth.split_once(':') {
+                if let config::ProxyKind::Forward { url, .. } = &p.kind {
+                    let e2 = expose.clone();
+                    let u2 = url.clone();
+                    let user = user.to_string();
+                    let pass = pass.to_string();
+                    tokio::spawn(async move {
+                        let _ = netroute::serve_auth_proxy(&e2, &u2, &user, &pass).await;
+                    });
+                    tracing::info!("proxy `{name}`: serving authenticated expose {expose} → {url}");
+                }
+            }
+        }
+    }
+
     let engine = Engine::new(cfg, &PathBuf::from("migrations"), false).await?;
     engine.set_config_source(path.clone(), overrides);
     engine.sync_config().await?;
@@ -54,8 +77,9 @@ async fn main() -> Result<(), String> {
     // Proxy/egress probing (user: per-proxy latency + egress IP, default CF
     // egress for probe traffic). Reads the engine's NetRoute so reloads
     // (TUI-added proxies) take effect on the next probe tick.
-    let probes: std::sync::Arc<std::sync::RwLock<std::collections::HashMap<String, netroute::ProxyProbe>>> =
-        std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+    let probes: std::sync::Arc<
+        std::sync::RwLock<std::collections::HashMap<String, netroute::ProxyProbe>>,
+    > = std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
     {
         let probes = probes.clone();
         let probe_engine = engine.clone();
@@ -100,7 +124,10 @@ async fn main() -> Result<(), String> {
                             .create_lost_requeue(&run.id, &run.job_id, worker.as_deref())
                             .await
                         {
-                            tracing::info!("job `{}`: re-queued as {new_id} after worker loss", run.job_id);
+                            tracing::info!(
+                                "job `{}`: re-queued as {new_id} after worker loss",
+                                run.job_id
+                            );
                         }
                     }
                 }
@@ -123,8 +150,8 @@ async fn main() -> Result<(), String> {
                 .db()
                 .execute(
                     "UPDATE job_runs SET worker_id = NULL
-                     WHERE status = 'QUEUED' AND worker_id IN
-                           (SELECT id FROM workers WHERE status != 'ONLINE')",
+                     WHERE status = 'QUEUED' AND (worker_id IS NULL OR worker_id NOT IN
+                           (SELECT id FROM workers WHERE status = 'ONLINE'))",
                     &[],
                 )
                 .await;
@@ -132,8 +159,12 @@ async fn main() -> Result<(), String> {
             if let Ok(rows) = reaper_engine.store.list_workers().await {
                 for row in &rows {
                     let cell = |n: &str| row.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone());
-                    let id = cell("id").and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
-                    let status = cell("status").and_then(|v| v.as_str().map(String::from)).unwrap_or_default();
+                    let id = cell("id")
+                        .and_then(|v| v.as_str().map(String::from))
+                        .unwrap_or_default();
+                    let status = cell("status")
+                        .and_then(|v| v.as_str().map(String::from))
+                        .unwrap_or_default();
                     let value = match status.as_str() {
                         "ONLINE" => 1.0,
                         "DRAINING" => 2.0,
@@ -163,8 +194,10 @@ async fn main() -> Result<(), String> {
                         continue;
                     };
                     if let Some(worker) = reaper_picker.pick(&job) {
-                        if let Ok(true) =
-                            reaper_engine.store.assign_queued_run(&run.id, &worker).await
+                        if let Ok(true) = reaper_engine
+                            .store
+                            .assign_queued_run(&run.id, &worker)
+                            .await
                         {
                             tracing::info!(
                                 "run {} (job `{}`) re-dispatched to worker `{worker}`",
@@ -205,11 +238,9 @@ async fn main() -> Result<(), String> {
     // Signal: graceful stop of the HTTP server.
     let shutdown_engine = engine.clone();
     let signal_task = tokio::spawn(async move {
-        let mut sigterm =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("SIGTERM");
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {}
-            _ = sigterm.recv() => {}
+            _ = wait_sigterm() => {}
         }
         tracing::info!("shutdown requested");
         shutdown_engine.shutdown();
@@ -230,11 +261,28 @@ fn find_config(explicit: Option<PathBuf>) -> Result<PathBuf, String> {
         }
         return Err(format!("config file not found: {}", p.display()));
     }
-    for candidate in ["synora.toml", "config/synora.toml"] {
+    for candidate in [
+        "synora.toml",
+        "config/synora.toml",
+        "/etc/synora/synora.toml",
+    ] {
         let p = PathBuf::from(candidate);
         if p.exists() {
             return Ok(p);
         }
     }
     Err("no config file found (use -c PATH)".into())
+}
+
+#[cfg(unix)]
+async fn wait_sigterm() {
+    let mut s = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("SIGTERM handler");
+    let _ = s.recv().await;
+}
+
+#[cfg(not(unix))]
+async fn wait_sigterm() {
+    // Windows: no SIGTERM; this future simply never resolves.
+    std::future::pending::<()>().await;
 }

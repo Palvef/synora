@@ -9,14 +9,14 @@
 
 use crate::error::ConfigError;
 use crate::schema::{DbDoc, JobDoc, RootDoc, TomlDuration};
-use synora_core::job::{
-    Hooks, JobSpec, MisfirePolicy, OnWorkerLost, ProviderConfig, Safety, StatisticsMode,
-};
-use synora_core::schedule::{self, Schedule, ScheduleKind};
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use synora_core::job::{
+    Hooks, JobSpec, MisfirePolicy, OnWorkerLost, ProviderConfig, Safety, StatisticsMode,
+};
+use synora_core::schedule::{self, Schedule, ScheduleKind};
 use time::Duration;
 
 const MAX_INCLUDE_DEPTH: usize = 32;
@@ -53,14 +53,23 @@ pub struct ProxyConfig {
     /// Local listener to expose when "exposed" from the TUI
     /// (e.g. "127.0.0.1:4000" for a local CF One / WARP endpoint).
     pub expose: Option<String>,
+    /// "user:pass" credentials for the exposed port (Basic auth; the
+    /// worker serves an authenticated CONNECT proxy on `expose`).
+    pub expose_auth: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProxyKind {
     Direct,
     /// http:// or socks5h:// forward proxy.
-    Forward { url: String, env: Vec<(String, String)> },
-    Command { check: String, env: Vec<(String, String)> },
+    Forward {
+        url: String,
+        env: Vec<(String, String)>,
+    },
+    Command {
+        check: String,
+        env: Vec<(String, String)>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -101,7 +110,9 @@ pub enum StorageKind {
         /// Extra `zfs create -o key=value` options (user-requested).
         options: Vec<(String, String)>,
     },
-    Btrfs { subvol: String },
+    Btrfs {
+        subvol: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -147,6 +158,9 @@ pub struct ApiConfig {
     pub tokens: Vec<ApiToken>,
     pub synora_json_path: String,
     pub tunasync_json_path: String,
+
+    /// Which status JSON shape to expose: "synora", "tunasync", or "both".
+    pub status_format: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -189,10 +203,17 @@ struct LoadState {
 pub struct ConfigLoader;
 
 impl ConfigLoader {
-    pub fn load(config_path: &Path, overrides: &CliOverrides) -> Result<ResolvedConfig, ConfigError> {
-        let root = config_path
-            .canonicalize()
-            .map_err(|e| ConfigError::new(config_path.display().to_string(), 0, format!("cannot read config: {e}")))?;
+    pub fn load(
+        config_path: &Path,
+        overrides: &CliOverrides,
+    ) -> Result<ResolvedConfig, ConfigError> {
+        let root = config_path.canonicalize().map_err(|e| {
+            ConfigError::new(
+                config_path.display().to_string(),
+                0,
+                format!("cannot read config: {e}"),
+            )
+        })?;
         let mut state = LoadState {
             stack: HashSet::new(),
             jobs: Vec::new(),
@@ -226,7 +247,11 @@ fn load_file(
 ) -> Result<(), ConfigError> {
     let file = path.display().to_string();
     if depth > MAX_INCLUDE_DEPTH {
-        return Err(ConfigError::new(file, 0, "include nesting too deep (cycle?)"));
+        return Err(ConfigError::new(
+            file,
+            0,
+            "include nesting too deep (cycle?)",
+        ));
     }
     if state.stack.contains(path) {
         return Err(ConfigError::new(
@@ -244,7 +269,11 @@ fn load_file(
     // First parse: immutable doc — spans survive, giving us file:line for jobs.
     let im_parsed: Result<toml_edit::ImDocument<String>, toml_edit::TomlError> = text.parse();
     let im = im_parsed.map_err(|e| {
-        ConfigError::new(&file, line_of(&text, e.span()), format!("TOML syntax error: {e}"))
+        ConfigError::new(
+            &file,
+            line_of(&text, e.span()),
+            format!("TOML syntax error: {e}"),
+        )
     })?;
     let job_lines = job_line_numbers(&im, &text);
     let include_line = im
@@ -256,7 +285,11 @@ fn load_file(
     // Second parse: mutable doc for include/job extraction and merging.
     let doc_parsed: Result<toml_edit::DocumentMut, toml_edit::TomlError> = text.parse();
     let mut doc = doc_parsed.map_err(|e| {
-        ConfigError::new(&file, line_of(&text, e.span()), format!("TOML syntax error: {e}"))
+        ConfigError::new(
+            &file,
+            line_of(&text, e.span()),
+            format!("TOML syntax error: {e}"),
+        )
     })?;
 
     let include = extract_include(&mut doc, &file, include_line)?;
@@ -438,7 +471,11 @@ fn extract_include(
 /// from the span-preserving immutable doc — same order as `extract_jobs`.
 fn job_line_numbers(im: &toml_edit::ImDocument<String>, text: &str) -> Vec<usize> {
     let mut lines = Vec::new();
-    if let Some(arr) = im.as_table().get("jobs").and_then(|i| i.as_array_of_tables()) {
+    if let Some(arr) = im
+        .as_table()
+        .get("jobs")
+        .and_then(|i| i.as_array_of_tables())
+    {
         for t in arr.iter() {
             lines.push(line_of(text, t.span()));
         }
@@ -496,11 +533,7 @@ fn extract_jobs(
     Ok(())
 }
 
-fn parse_job_table(
-    t: &toml_edit::Table,
-    file: &str,
-    line: usize,
-) -> Result<JobDoc, ConfigError> {
+fn parse_job_table(t: &toml_edit::Table, file: &str, line: usize) -> Result<JobDoc, ConfigError> {
     // `Table::to_string()` does not render sub-tables ([jobs.hooks] would be
     // silently dropped) — round-trip through a DocumentMut instead.
     let mut doc = toml_edit::DocumentMut::new();
@@ -519,12 +552,16 @@ fn resolve_include(pattern: &str, base: &Path, file: &str) -> Result<Vec<PathBuf
     let has_magic = pattern.contains(['*', '?', '[']);
     if has_magic {
         let glob_pattern = full.to_str().ok_or_else(|| {
-            ConfigError::new(file, 0, format!("include pattern is not valid UTF-8: {pattern}"))
+            ConfigError::new(
+                file,
+                0,
+                format!("include pattern is not valid UTF-8: {pattern}"),
+            )
         })?;
         let mut out = Vec::new();
-        for entry in glob::glob(glob_pattern)
-            .map_err(|e| ConfigError::new(file, 0, format!("bad include pattern `{pattern}`: {e}")))?
-        {
+        for entry in glob::glob(glob_pattern).map_err(|e| {
+            ConfigError::new(file, 0, format!("bad include pattern `{pattern}`: {e}"))
+        })? {
             let p = entry.map_err(|e| {
                 ConfigError::new(file, 0, format!("include pattern `{pattern}`: {e}"))
             })?;
@@ -574,8 +611,14 @@ fn merge_table(dst: &mut toml_edit::Table, src: &toml_edit::Table) {
 
 /// Byte offset → 1-based line number in `text`.
 fn line_of(text: &str, span: Option<std::ops::Range<usize>>) -> usize {
-    span.map(|s| text[..s.start.min(text.len())].bytes().filter(|&b| b == b'\n').count() + 1)
-        .unwrap_or(0)
+    span.map(|s| {
+        text[..s.start.min(text.len())]
+            .bytes()
+            .filter(|&b| b == b'\n')
+            .count()
+            + 1
+    })
+    .unwrap_or(0)
 }
 
 fn resolve(root: &RootDoc, jobs: Vec<JobEntry>) -> Result<ResolvedConfig, ConfigError> {
@@ -588,11 +631,13 @@ fn resolve(root: &RootDoc, jobs: Vec<JobEntry>) -> Result<ResolvedConfig, Config
         default_proxy: root.daemon.default_proxy.clone(),
     };
     // api
-    let listen: SocketAddr = root
-        .api
-        .listen
-        .parse()
-        .map_err(|_| ConfigError::new("<config>", 0, format!("invalid api.listen `{}`", root.api.listen)))?;
+    let listen: SocketAddr = root.api.listen.parse().map_err(|_| {
+        ConfigError::new(
+            "<config>",
+            0,
+            format!("invalid api.listen `{}`", root.api.listen),
+        )
+    })?;
     let tls = TlsConfig {
         cert: root.api.tls.cert.as_ref().map(PathBuf::from),
         key: root.api.tls.key.as_ref().map(PathBuf::from),
@@ -607,6 +652,35 @@ fn resolve(root: &RootDoc, jobs: Vec<JobEntry>) -> Result<ResolvedConfig, Config
     }
     let mut tokens = Vec::new();
     for t in &root.api.tokens {
+        // A weak or duplicated token makes bearer auth meaningless. Enforce
+        // a floor here so `synora check` catches misconfig before boot.
+        if t.token.len() < 32 {
+            return Err(ConfigError::new(
+                "<config>",
+                0,
+                format!(
+                    "api token `{}`: token must be at least 32 bytes (e.g. `openssl rand -hex 32`)",
+                    t.name
+                ),
+            ));
+        }
+        if t.token.to_ascii_lowercase().contains("change-me") {
+            return Err(ConfigError::new(
+                "<config>",
+                0,
+                format!("api token `{}`: placeholder token is not allowed", t.name),
+            ));
+        }
+        if tokens.iter().any(|e: &ApiToken| e.token == t.token) {
+            return Err(ConfigError::new(
+                "<config>",
+                0,
+                format!(
+                    "api token `{}`: token value must be unique per token",
+                    t.name
+                ),
+            ));
+        }
         if !["admin", "operator", "viewer"].contains(&t.role.as_str()) {
             return Err(ConfigError::new(
                 "<config>",
@@ -627,6 +701,7 @@ fn resolve(root: &RootDoc, jobs: Vec<JobEntry>) -> Result<ResolvedConfig, Config
         tokens,
         synora_json_path: root.api.synora_json_path.clone(),
         tunasync_json_path: root.api.tunasync_json_path.clone(),
+        status_format: root.api.status_format.clone(),
     };
 
     // jobs: resolve each, reject duplicate names (spec §44)
@@ -652,8 +727,7 @@ fn resolve(root: &RootDoc, jobs: Vec<JobEntry>) -> Result<ResolvedConfig, Config
     let (egresses, egress_groups) = parse_egress(root)?;
     let storages = parse_storage(root)?;
     let cgroup = parse_cgroup(root)?;
-    let (snapshot_retention, notifications, groups, min_free_bytes) =
-        parse_misc(root)?;
+    let (snapshot_retention, notifications, groups, min_free_bytes) = parse_misc(root)?;
 
     Ok(ResolvedConfig {
         version: root.version.unwrap_or(1),
@@ -675,16 +749,36 @@ fn resolve(root: &RootDoc, jobs: Vec<JobEntry>) -> Result<ResolvedConfig, Config
 }
 
 /// Read a string-keyed section from the untyped extras.
-fn extra_table<'a>(
-    root: &'a RootDoc,
-    key: &str,
-) -> Option<&'a toml::value::Table> {
+fn extra_table<'a>(root: &'a RootDoc, key: &str) -> Option<&'a toml::value::Table> {
     root.extras.get(key).and_then(|v| v.as_table())
 }
 
 type ProxyMap = HashMap<String, ProxyConfig>;
 type ProxyGroupMap = HashMap<String, ProxyGroupConfig>;
 type EgressMap = HashMap<String, EgressGroupConfig>;
+
+/// `zfs_options` accepts either a table (`{ recordsize = "1M", ... }`)
+/// or a string of `-o key=value` pairs (e.g. "-o recordsize=1M -o
+/// xattr=off"). Both produce the same key/value list for `zfs create`.
+fn parse_zfs_options(v: Option<&toml::Value>) -> Option<Vec<(String, String)>> {
+    match v {
+        Some(toml::Value::Table(t)) => Some(
+            t.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect(),
+        ),
+        Some(toml::Value::String(s)) => {
+            let mut out = Vec::new();
+            for tok in s.split_whitespace() {
+                let rest = tok.strip_prefix("-o").unwrap_or(tok);
+                let (k, v) = rest.split_once('=')?;
+                out.push((k.to_string(), v.to_string()));
+            }
+            Some(out)
+        }
+        _ => None,
+    }
+}
 
 fn parse_proxies(root: &RootDoc) -> Result<(ProxyMap, ProxyGroupMap), ConfigError> {
     let mut proxies = HashMap::new();
@@ -728,6 +822,10 @@ fn parse_proxies(root: &RootDoc) -> Result<(ProxyMap, ProxyGroupMap), ConfigErro
                         .and_then(|v| v.as_str())
                         .map(String::from),
                     expose: t.get("expose").and_then(|v| v.as_str()).map(String::from),
+                    expose_auth: t
+                        .get("expose_auth")
+                        .and_then(|v| v.as_str())
+                        .map(String::from),
                     timeout: t
                         .get("timeout")
                         .and_then(|v| v.as_str())
@@ -742,12 +840,20 @@ fn parse_proxies(root: &RootDoc) -> Result<(ProxyMap, ProxyGroupMap), ConfigErro
     if let Some(table) = extra_table(root, "proxy_groups") {
         for (name, value) in table {
             let t = value.as_table().ok_or_else(|| {
-                ConfigError::new("<config>", 0, format!("[proxy_groups.{name}] must be a table"))
+                ConfigError::new(
+                    "<config>",
+                    0,
+                    format!("[proxy_groups.{name}] must be a table"),
+                )
             })?;
             let proxies: Vec<String> = t
                 .get("proxies")
                 .and_then(|v| v.as_array())
-                .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default();
             let strategy = t
                 .get("strategy")
@@ -785,13 +891,29 @@ fn parse_egress(root: &RootDoc) -> Result<(Vec<EgressConfig>, EgressMap), Config
             let t = item.as_table().ok_or_else(|| {
                 ConfigError::new("<config>", 0, "[[egress]] entries must be tables")
             })?;
-            let name = t.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let name = t
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let address: std::net::IpAddr = t
                 .get("address")
                 .and_then(|v| v.as_str())
-                .ok_or_else(|| ConfigError::new("<config>", 0, format!("[[egress]] `{name}`: missing address")))?
+                .ok_or_else(|| {
+                    ConfigError::new(
+                        "<config>",
+                        0,
+                        format!("[[egress]] `{name}`: missing address"),
+                    )
+                })?
                 .parse()
-                .map_err(|_| ConfigError::new("<config>", 0, format!("[[egress]] `{name}`: invalid address")))?;
+                .map_err(|_| {
+                    ConfigError::new(
+                        "<config>",
+                        0,
+                        format!("[[egress]] `{name}`: invalid address"),
+                    )
+                })?;
             egresses.push(EgressConfig {
                 name,
                 address,
@@ -809,14 +931,24 @@ fn parse_egress(root: &RootDoc) -> Result<(Vec<EgressConfig>, EgressMap), Config
                 let addresses: Vec<String> = t
                     .get("addresses")
                     .and_then(|v| v.as_array())
-                    .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
                     .unwrap_or_default();
                 let strategy = t
                     .get("strategy")
                     .and_then(|v| v.as_str())
                     .unwrap_or("failover")
                     .to_string();
-                groups.insert(name.clone(), EgressGroupConfig { addresses, strategy });
+                groups.insert(
+                    name.clone(),
+                    EgressGroupConfig {
+                        addresses,
+                        strategy,
+                    },
+                );
             }
         }
     }
@@ -833,20 +965,24 @@ fn parse_storage(root: &RootDoc) -> Result<HashMap<String, StorageConfig>, Confi
             let kind = match t.get("type").and_then(|v| v.as_str()).unwrap_or("dir") {
                 "dir" => StorageKind::Dir,
                 "zfs" => StorageKind::Zfs {
-                    pool: t.get("pool").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                    dataset: t.get("dataset").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                    options: t
-                        .get("zfs_options")
-                        .and_then(|v| v.as_table())
-                        .map(|o| {
-                            o.iter()
-                                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                                .collect()
-                        })
-                        .unwrap_or_default(),
+                    pool: t
+                        .get("pool")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    dataset: t
+                        .get("dataset")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    options: parse_zfs_options(t.get("zfs_options")).unwrap_or_default(),
                 },
                 "btrfs" => StorageKind::Btrfs {
-                    subvol: t.get("subvol").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    subvol: t
+                        .get("subvol")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
                 },
                 other => {
                     return Err(ConfigError::new(
@@ -903,10 +1039,22 @@ fn parse_misc(root: &RootDoc) -> Result<MiscSections, ConfigError> {
     let retention = extra_table(root, "snapshot")
         .and_then(|t| t.get("policy").and_then(|v| v.as_table()))
         .map(|t| synora_core::RetentionPolicy {
-            keep_last: t.get("keep_last").and_then(|v| v.as_integer()).map(|v| v as u32),
-            keep_daily: t.get("keep_daily").and_then(|v| v.as_integer()).map(|v| v as u32),
-            keep_weekly: t.get("keep_weekly").and_then(|v| v.as_integer()).map(|v| v as u32),
-            keep_monthly: t.get("keep_monthly").and_then(|v| v.as_integer()).map(|v| v as u32),
+            keep_last: t
+                .get("keep_last")
+                .and_then(|v| v.as_integer())
+                .map(|v| v as u32),
+            keep_daily: t
+                .get("keep_daily")
+                .and_then(|v| v.as_integer())
+                .map(|v| v as u32),
+            keep_weekly: t
+                .get("keep_weekly")
+                .and_then(|v| v.as_integer())
+                .map(|v| v as u32),
+            keep_monthly: t
+                .get("keep_monthly")
+                .and_then(|v| v.as_integer())
+                .map(|v| v as u32),
         })
         .unwrap_or_default();
     let notifications = extra_table(root, "notifications")
@@ -954,10 +1102,9 @@ fn resolve_db(db: &DbDoc) -> Result<DbConfig, ConfigError> {
             url: None,
         }),
         "postgres" => {
-            let url = db
-                .url
-                .clone()
-                .ok_or_else(|| ConfigError::new("<config>", 0, "db.kind = \"postgres\" requires db.url"))?;
+            let url = db.url.clone().ok_or_else(|| {
+                ConfigError::new("<config>", 0, "db.kind = \"postgres\" requires db.url")
+            })?;
             Ok(DbConfig {
                 kind: DbKind::Postgres,
                 path: String::new(),
@@ -976,17 +1123,44 @@ fn resolve_job(doc: &JobDoc, file: &str, line: usize) -> Result<JobSpec, ConfigE
     let err = |m: String| ConfigError::new(file, line, m);
 
     if doc.name.is_empty() || doc.name.contains('/') {
-        return Err(err(format!("invalid job name `{}`: must be non-empty, no `/`", doc.name)));
+        return Err(err(format!(
+            "invalid job name `{}`: must be non-empty, no `/`",
+            doc.name
+        )));
     }
     let schedule = resolve_schedule(doc, &err)?;
     let provider = resolve_provider(doc, &err)?;
 
-    let storage = doc
+    // Template variables (tunasync-style): `{{.Name}}` / `{{name}}` inside
+    // job fields expand to the job name.
+    let expand = |v: String| -> String {
+        v.replace("{{.Name}}", &doc.name)
+            .replace("{{name}}", &doc.name)
+    };
+    let storage_raw = doc
         .storage
         .as_deref()
         .ok_or_else(|| err("missing required field `storage`".into()))?;
-    let storage = PathBuf::from(storage);
-    if storage.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+    // tunasync `mirror_subdir`: the mirror lives under <storage>/<sub_dir>.
+    let storage = match &doc.mirror_subdir {
+        Some(sub) => {
+            if sub
+                .split('/')
+                .any(|c| c.is_empty() || c == ".." || c == ".")
+            {
+                return Err(err(format!(
+                    "invalid mirror_subdir `{sub}` (no .. or empty segments)"
+                )));
+            }
+            format!("{}/{}", storage_raw.trim_end_matches('/'), sub)
+        }
+        None => storage_raw.to_string(),
+    };
+    let storage = PathBuf::from(expand(storage));
+    if storage
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
         return Err(err(format!(
             "storage path `{}` must not contain `..`",
             storage.display()
@@ -1091,13 +1265,36 @@ fn resolve_job(doc: &JobDoc, file: &str, line: usize) -> Result<JobSpec, ConfigE
         }
     }
 
+    // Template variables (tunasync-style): `{{.Name}}` / `{{name}}` inside
+    // job fields expand to the job name (mirrors tunasync's `{{.Name}}`
+    // template in worker.conf, e.g. log_dir/storage composition).
+    let expand = |v: String| -> String {
+        v.replace("{{.Name}}", &doc.name)
+            .replace("{{name}}", &doc.name)
+    };
+
+    // Job names must be safe path segments (they become log dirs and
+    // control-file names).
+    if doc
+        .name
+        .split('/')
+        .any(|c| c.is_empty() || c == ".." || c == ".")
+        || doc.name.starts_with('.')
+    {
+        return Err(err(format!(
+            "invalid job name `{}` (no `..`, `.`, or leading-dot segments)",
+            doc.name
+        )));
+    }
     Ok(JobSpec {
         name: doc.name.clone(),
         enabled: doc.enabled,
         worker: doc.worker.clone(),
         provider,
-        upstream: doc.upstream.clone(),
+        upstream: doc.upstream.clone().map(expand),
         storage,
+        mirror_subdir: doc.mirror_subdir.clone(),
+        storage_name: doc.storage_name.clone(),
         proxy: doc.proxy.clone(),
         egress: doc.egress.clone(),
         timeout,
@@ -1215,7 +1412,9 @@ fn resolve_schedule(
             _ => false,
         };
         if present && !expected {
-            return Err(err(format!("field `{field}` is not valid for schedule = \"{kind_str}\"")));
+            return Err(err(format!(
+                "field `{field}` is not valid for schedule = \"{kind_str}\""
+            )));
         }
     }
     Ok(Schedule { kind })
@@ -1239,6 +1438,16 @@ fn resolve_provider(
                 exclude: doc.exclude.clone(),
             })
         }
+        "git" => {
+            if doc.upstream.is_none() {
+                return Err(err(
+                    "provider = \"git\" requires `upstream` (repository URL)".into(),
+                ));
+            }
+            Ok(ProviderConfig::Git {
+                branch: doc.branch.clone(),
+            })
+        }
         "script" => {
             let command = doc
                 .command
@@ -1258,6 +1467,7 @@ fn resolve_provider(
                 env: doc.env.clone(),
                 volumes: doc.volumes.clone(),
                 keep_container: doc.keep_container,
+                command: doc.docker_command.clone(),
             })
         }
         "http" => {
@@ -1274,7 +1484,7 @@ fn resolve_provider(
             })
         }
         other => Err(err(format!(
-            "invalid provider `{other}`: expected rsync|script|docker|http"
+            "invalid provider `{other}`: expected rsync|script|docker|git|http"
         ))),
     }
 }
@@ -1283,12 +1493,20 @@ fn resolve_provider(
 fn apply_env_overrides(cfg: &mut ResolvedConfig) -> Result<(), ConfigError> {
     if let Ok(v) = std::env::var("SYNORA_MAX_CONCURRENCY") {
         cfg.daemon.max_concurrency = v.parse::<u32>().map_err(|_| {
-            ConfigError::new("<environment>", 0, format!("SYNORA_MAX_CONCURRENCY `{v}` is not a number"))
+            ConfigError::new(
+                "<environment>",
+                0,
+                format!("SYNORA_MAX_CONCURRENCY `{v}` is not a number"),
+            )
         })?;
     }
     if let Ok(v) = std::env::var("SYNORA_API_LISTEN") {
         cfg.api.listen = v.parse().map_err(|_| {
-            ConfigError::new("<environment>", 0, format!("SYNORA_API_LISTEN `{v}` is not a valid address"))
+            ConfigError::new(
+                "<environment>",
+                0,
+                format!("SYNORA_API_LISTEN `{v}` is not a valid address"),
+            )
         })?;
     }
     if let Ok(v) = std::env::var("SYNORA_DB_URL") {
@@ -1331,8 +1549,9 @@ fn apply_cli_overrides(
         cfg.daemon.db.url = Some(url.clone());
     }
     if let Some(listen) = &overrides.api_listen {
-        cfg.api.listen = SocketAddr::from_str(listen)
-            .map_err(|_| ConfigError::new("<cli>", 0, format!("invalid --api-listen `{listen}`")))?;
+        cfg.api.listen = SocketAddr::from_str(listen).map_err(|_| {
+            ConfigError::new("<cli>", 0, format!("invalid --api-listen `{listen}`"))
+        })?;
     }
     Ok(())
 }

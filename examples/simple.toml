@@ -35,7 +35,7 @@ listen = "127.0.0.1:8100"
 # API tokens for the REST API (admin/operator/viewer roles).
 [[api.tokens]]
 name = "local-admin"
-token = "change-me"
+token = "${SYNORA_API_TOKEN}"
 role = "admin"
 
 # ${VAR} expansion: values come from the environment at load time.

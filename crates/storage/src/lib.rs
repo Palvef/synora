@@ -264,7 +264,10 @@ mod tests {
     #[tokio::test]
     async fn ensure_unknown_name_is_not_found() {
         let m = manager(vec![]);
-        assert!(matches!(m.ensure("nope").await, Err(StorageError::NotFound)));
+        assert!(matches!(
+            m.ensure("nope").await,
+            Err(StorageError::NotFound)
+        ));
     }
 
     #[tokio::test]
@@ -276,7 +279,10 @@ mod tests {
             "repo",
             cfg(StorageKind::Dir, Some(dir.to_str().unwrap()), true, true),
         )]);
-        assert!(matches!(m.ensure("repo").await, Err(StorageError::NotEmpty)));
+        assert!(matches!(
+            m.ensure("repo").await,
+            Err(StorageError::NotEmpty)
+        ));
 
         // Empty target passes.
         let empty = tmp("empty");

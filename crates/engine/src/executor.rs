@@ -13,6 +13,23 @@ use synora_core::job::{JobSpec, JobStatus};
 use synora_core::state::retry_decision;
 use tokio_util::sync::CancellationToken;
 
+/// Resolve the sync proxy environment locally — used only by the
+/// standalone engine (a distributed worker receives the manager's
+/// resolved settings with the assignment and uses them verbatim).
+fn resolve_proxy_env(
+    netroute: Option<&netroute::NetRoute>,
+    job: &JobSpec,
+) -> Vec<(String, String)> {
+    let selection = match netroute {
+        Some(nr) => nr.select_proxy(job.proxy.as_deref()),
+        None => netroute::Selection::Direct,
+    };
+    match &selection {
+        netroute::Selection::Forward { env, .. } => env.clone(),
+        netroute::Selection::Direct => Vec::new(),
+    }
+}
+
 /// What one provider execution produced.
 pub struct RunOutcome {
     pub result: Result<SyncResult, ProviderError>,
@@ -39,10 +56,7 @@ pub async fn execute_run(
         .join("current.log")
         .display()
         .to_string();
-    let _ = engine
-        .store
-        .insert_log(&run_id, &job.name, &log_path)
-        .await;
+    let _ = engine.store.insert_log(&run_id, &job.name, &log_path).await;
 
     let _ = engine
         .store
@@ -73,6 +87,7 @@ pub async fn execute_run(
         &engine.cfg.daemon.log_dir,
         engine.run_storage.as_ref(),
         netroute.as_deref(),
+        None,
     )
     .await;
 
@@ -83,6 +98,7 @@ pub async fn execute_run(
 
 /// Provider execution + hooks + local logs. No DB access — remote workers
 /// reuse this and report the outcome themselves.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_once(
     job: &JobSpec,
     run_id: &str,
@@ -91,11 +107,40 @@ pub async fn run_once(
     log_dir: &Path,
     storage_ctx: Option<&crate::engine::RunStorageCtx>,
     netroute: Option<&netroute::NetRoute>,
+    manager_proxy_env: Option<Vec<(String, String)>>,
 ) -> RunOutcome {
     let started = unix_now();
+    // Multi-machine storage layouts: a job referencing a [storage.<name>]
+    // section resolves to THIS machine's local mountpoint + the job's
+    // relative path.
+    let job = if let Some(ctx) = storage_ctx {
+        if job.storage_name.is_some() {
+            let resolved = ctx.resolve_storage_path(job);
+            if resolved != job.storage {
+                let mut j = job.clone();
+                tracing::info!(
+                    "job `{}`: storage resolved to {} (local storage section)",
+                    job.name,
+                    resolved.display()
+                );
+                j.storage = resolved;
+                j
+            } else {
+                job.clone()
+            }
+        } else {
+            job.clone()
+        }
+    } else {
+        job.clone()
+    };
+    let job = &job;
     let mut logger = RunLogger::open(log_dir, &job.name).ok();
     if let Some(l) = logger.as_mut() {
-        let _ = l.line(&format!("run {run_id} started ({} provider)", provider_name(job)));
+        let _ = l.line(&format!(
+            "run {run_id} started ({} provider)",
+            provider_name(job)
+        ));
     }
 
     // Storage backend (dir / zfs / btrfs) — spec §30–§31/§51.
@@ -134,7 +179,9 @@ pub async fn run_once(
     // Plain storage dir must exist before providers run.
     if let Err(e) = std::fs::create_dir_all(&job.storage) {
         if let Some(l) = logger.as_mut() {
-            let _ = l.line(&format!("run {run_id} failed: cannot create storage dir: {e}"));
+            let _ = l.line(&format!(
+                "run {run_id} failed: cannot create storage dir: {e}"
+            ));
         }
         return RunOutcome {
             result: Err(ProviderError::Config(format!(
@@ -176,7 +223,9 @@ pub async fn run_once(
 
     // cgroup scope for resource limits (user-requested; tunasync parity).
     let cgroup_scope = crate::cgroup::CgroupScope::create(
-        std::path::Path::new("/sys/fs/cgroup/synora"),
+        &storage_ctx
+            .map(|c| c.cgroup_base.clone())
+            .unwrap_or_else(|| std::path::PathBuf::from("/sys/fs/cgroup/synora")),
         &job.name,
         run_id,
         job.memory_limit,
@@ -203,12 +252,13 @@ pub async fn run_once(
         job: job.clone(),
         cancel: cancel.clone(),
         cgroup: cgroup_ref,
-        proxy_env: netroute
-            .map(|nr| match nr.select_proxy(job.proxy.as_deref()) {
-                netroute::Selection::Forward { env, .. } => env,
-                netroute::Selection::Direct => Vec::new(),
-            })
-            .unwrap_or_default(),
+        proxy_env: match manager_proxy_env {
+            // The manager's resolved settings are authoritative (user
+            // requirement): the worker never substitutes its own proxy.
+            Some(env) => env,
+            // Standalone engine: resolve locally (no manager involved).
+            None => resolve_proxy_env(netroute, job),
+        },
         egress_address: netroute
             .and_then(|nr| nr.select_egress(job.egress.as_deref()))
             .map(|a| a.to_string()),
@@ -223,6 +273,8 @@ pub async fn run_once(
                 .to_string()
             })
             .unwrap_or_else(|| job.family.clone()),
+        usage: Some(std::sync::Arc::new(std::sync::Mutex::new((None, None)))),
+        log_file: Some(log_dir.join(&job.name).join("current.log")),
     };
 
     let provider = match build_provider(job) {
@@ -241,6 +293,11 @@ pub async fn run_once(
     };
 
     run_hooks(&job.hooks.before_sync, &ctx, logger.as_mut()).await;
+
+    // Delete/size protection baseline (spec §52-53): measured around the
+    // provider run, enforced after — a mirror that shrinks too much is
+    // failed instead of kept.
+    let before = crate::logs::walk(&job.storage);
 
     // Timeout wraps the provider; cancel kills the child process group.
     // Unlimited unless the job sets a real timeout (user requirement).
@@ -266,8 +323,42 @@ pub async fn run_once(
 
     run_hooks(&job.hooks.after_sync, &ctx, logger.as_mut()).await;
 
+    // Enforce delete/size protection (spec §52-53). Runs only on a provider
+    // success: a failed sync already fails the run.
+    let safety_violation = outcome.as_ref().ok().and_then(|_| {
+        let after = crate::logs::walk(&job.storage);
+        let deleted = before.0.saturating_sub(after.0);
+        let msg = |what: String| Some(ProviderError::Other(what));
+        if let Some(max) = job.safety.max_delete_files {
+            if deleted > max {
+                return msg(format!(
+                    "safety: deleted {deleted} files, over max_delete_files={max}"
+                ));
+            }
+        }
+        if let Some(ratio) = job.safety.max_delete_ratio {
+            if before.0 > 0 && (deleted as f64) / (before.0 as f64) > ratio {
+                return msg(format!(
+                    "safety: deleted {deleted}/{n0} files ({:.1}%), over max_delete_ratio={ratio}",
+                    (deleted as f64) / (before.0 as f64) * 100.0,
+                    n0 = before.0
+                ));
+            }
+        }
+        if let Some(ratio) = job.safety.max_size_drop_ratio {
+            if before.1 > 0 && (after.1 as f64) < (before.1 as f64) * (1.0 - ratio) {
+                return msg(format!(
+                    "safety: size dropped from {} to {} bytes, over max_size_drop_ratio={ratio}",
+                    before.1, after.1
+                ));
+            }
+        }
+        None
+    });
+
     let result = match outcome {
         Err(e) => Err(e),
+        Ok(_result) if safety_violation.is_some() => Err(safety_violation.unwrap()),
         Ok(result) => {
             if let Some(l) = logger.as_mut() {
                 let _ = l.raw(&result.stdout);
@@ -324,9 +415,7 @@ pub async fn run_once(
                         let _ = l.line(&format!("run {run_id}: snapshot {name} created"));
                     }
                     // Retention prune (spec §33).
-                    if let (Some(ctx), Ok(list)) =
-                        (storage_ctx, p.list())
-                    {
+                    if let (Some(ctx), Ok(list)) = (storage_ctx, p.list()) {
                         for to_delete in snapshot::prune_plan(
                             &list,
                             &ctx.retention,
@@ -334,10 +423,13 @@ pub async fn run_once(
                         ) {
                             if let Err(e) = p.delete(&to_delete) {
                                 if let Some(l) = logger.as_mut() {
-                                    let _ = l.line(&format!("run {run_id}: snapshot prune {to_delete} failed: {e}"));
+                                    let _ = l.line(&format!(
+                                        "run {run_id}: snapshot prune {to_delete} failed: {e}"
+                                    ));
                                 }
                             } else if let Some(l) = logger.as_mut() {
-                                let _ = l.line(&format!("run {run_id}: pruned snapshot {to_delete}"));
+                                let _ =
+                                    l.line(&format!("run {run_id}: pruned snapshot {to_delete}"));
                             }
                         }
                     }
@@ -365,19 +457,27 @@ pub async fn run_once(
             }
         }
     }
-    // Sample cgroup usage before cleanup (peak-ish, end-of-run).
-    let (mem_peak, cpu_seconds) = match cgroup_scope.as_ref().and_then(|cg| cg.usage()) {
-        Some((mem, cpu)) => {
-            if let Some(l) = logger.as_mut() {
-                let _ = l.line(&format!(
-                    "run {run_id} resources: {} memory, {cpu:.2}s cpu",
-                    synora_core::human_size(mem)
-                ));
-            }
-            (Some(mem), Some(cpu))
-        }
+    // Sample resource usage before cleanup: provider-reported (docker
+    // stats polling) wins, the cgroup scope is the fallback.
+    let provider_usage = match &ctx.usage {
+        Some(a) => *a.lock().unwrap(),
         None => (None, None),
     };
+    let (mem_peak, cpu_seconds) = match provider_usage {
+        (Some(mem), cpu) => (Some(mem), cpu),
+        (None, cpu) => match cgroup_scope.as_ref().and_then(|cg| cg.usage()) {
+            Some((mem, c)) => (Some(mem), Some(c)),
+            None => (None, cpu),
+        },
+    };
+    if let (Some(mem), Some(cpu)) = (mem_peak, cpu_seconds) {
+        if let Some(l) = logger.as_mut() {
+            let _ = l.line(&format!(
+                "run {run_id} resources: {} memory, {cpu:.2}s cpu",
+                synora_core::human_size(mem)
+            ));
+        }
+    }
     if let Some(cg) = cgroup_scope.as_ref() {
         cg.cleanup();
     }
@@ -400,6 +500,7 @@ impl provider::CgroupScopeRef for CgroupHandle {
 fn provider_name(job: &JobSpec) -> &'static str {
     match &job.provider {
         synora_core::ProviderConfig::Rsync { .. } => "rsync",
+        synora_core::ProviderConfig::Git { .. } => "git",
         synora_core::ProviderConfig::Script { .. } => "script",
         synora_core::ProviderConfig::Docker { .. } => "docker",
         synora_core::ProviderConfig::Http { .. } => "http",
@@ -460,7 +561,15 @@ async fn finish_run(engine: &Arc<Engine>, run_id: &str, job: &JobSpec, outcome: 
             .insert_event(Some(&job.name), Some(run_id), "WARN", "run cancelled")
             .await;
         run_hooks(&job.hooks.on_failure, &hook_ctx(job, run_id), None).await;
-        metrics_tail(engine, job, JobStatus::Cancelled, started, ended, duration, false);
+        metrics_tail(
+            engine,
+            job,
+            JobStatus::Cancelled,
+            started,
+            ended,
+            duration,
+            false,
+        );
         return;
     }
 
@@ -553,17 +662,16 @@ async fn finish_run(engine: &Arc<Engine>, run_id: &str, job: &JobSpec, outcome: 
         match decision {
             synora_core::RetryDecision::Retry { delay_secs } => {
                 let next = ended + delay_secs as i64;
-                let _ = engine
-                    .store
-                    .set_retry(run_id, next, retry_count + 1)
-                    .await;
+                let _ = engine.store.set_retry(run_id, next, retry_count + 1).await;
                 let _ = engine
                     .store
                     .set_run_status(run_id, JobStatus::Retrying)
                     .await;
-                engine
-                    .metrics
-                    .inc_counter("synora_job_retries_total", &[("job", job.name.as_str())], 1.0);
+                engine.metrics.inc_counter(
+                    "synora_job_retries_total",
+                    &[("job", job.name.as_str())],
+                    1.0,
+                );
                 let _ = engine
                     .store
                     .insert_event(
@@ -589,9 +697,11 @@ async fn finish_run(engine: &Arc<Engine>, run_id: &str, job: &JobSpec, outcome: 
                         duration,
                     )
                     .await;
-                engine
-                    .metrics
-                    .inc_counter("synora_job_failures_total", &[("job", job.name.as_str())], 1.0);
+                engine.metrics.inc_counter(
+                    "synora_job_failures_total",
+                    &[("job", job.name.as_str())],
+                    1.0,
+                );
                 let _ = engine
                     .store
                     .insert_event(
@@ -700,6 +810,8 @@ fn hook_ctx(job: &JobSpec, run_id: &str) -> SyncContext {
         proxy_env: Vec::new(),
         egress_address: None,
         family: job.family.clone(),
+        usage: None,
+        log_file: None,
     }
 }
 
@@ -729,9 +841,10 @@ fn run_verify(job: &JobSpec, result: &SyncResult) -> Result<(), String> {
                 }
             }
             "size" => {
-                let size = result
-                    .size_hint
-                    .or_else(|| (job.statistics == synora_core::StatisticsMode::Filesystem).then(|| walk_size(&job.storage)));
+                let size = result.size_hint.or_else(|| {
+                    (job.statistics == synora_core::StatisticsMode::Filesystem)
+                        .then(|| walk_size(&job.storage))
+                });
                 if size.unwrap_or(0) == 0 {
                     return Err("repository size is zero".to_string());
                 }

@@ -4,12 +4,46 @@
 
 use crate::sqlite::{DbError, DbResult, DbValue, Param};
 
+/// Host of a DSN: between the last `@` (userinfo) and the first `/`
+/// (dbname), minus the optional :port. Empty = unix socket form.
+fn dsn_host(rest: &str) -> &str {
+    let after = rest.rsplit_once('@').map(|(_, h)| h).unwrap_or(rest);
+    after
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+}
+
 pub struct PgDb {
     client: tokio_postgres::Client,
 }
 
 impl PgDb {
     pub async fn connect(url: &str) -> DbResult<PgDb> {
+        // Local deployments talk to a loopback PG; a remote DSN over NoTls
+        // would send credentials in the clear — refuse and tell the operator.
+        if let Some(rest) = url
+            .strip_prefix("postgres://")
+            .or_else(|| url.strip_prefix("postgresql://"))
+        {
+            // host = between the last `@` (userinfo) and the first `/` (dbname),
+            // minus the optional :port.
+            let host = dsn_host(rest);
+            if !host.is_empty()
+                && host != "localhost"
+                && host != "127.0.0.1"
+                && host != "::1"
+                && !url.contains("sslmode=require")
+                && !url.contains("sslmode=verify")
+            {
+                return Err(DbError::Sql(format!(
+                "refusing plaintext PostgreSQL to remote host `{host}` (add sslmode=require to the DSN)"
+            )));
+            }
+        }
         let (client, connection) = tokio_postgres::connect(url, tokio_postgres::NoTls)
             .await
             .map_err(|e| DbError::Sql(e.to_string()))?;
@@ -23,8 +57,10 @@ impl PgDb {
     pub async fn execute(&self, sql: &str, params: &[Param]) -> DbResult<usize> {
         let (sql, _) = rewrite_placeholders(sql);
         let pg: Vec<PgParam> = params.iter().map(PgParam::from).collect();
-        let refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
-            pg.iter().map(|p| p as &(dyn tokio_postgres::types::ToSql + Sync)).collect();
+        let refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = pg
+            .iter()
+            .map(|p| p as &(dyn tokio_postgres::types::ToSql + Sync))
+            .collect();
         self.client
             .execute(&sql, &refs)
             .await
@@ -39,8 +75,10 @@ impl PgDb {
     ) -> DbResult<Vec<Vec<(String, DbValue)>>> {
         let (sql, _) = rewrite_placeholders(sql);
         let pg: Vec<PgParam> = params.iter().map(PgParam::from).collect();
-        let refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
-            pg.iter().map(|p| p as &(dyn tokio_postgres::types::ToSql + Sync)).collect();
+        let refs: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = pg
+            .iter()
+            .map(|p| p as &(dyn tokio_postgres::types::ToSql + Sync))
+            .collect();
         let rows = self
             .client
             .query(&sql, &refs)
@@ -58,12 +96,12 @@ impl PgDb {
                         .ok()
                         .map(DbValue::Int)
                         .unwrap_or(DbValue::Null),
-                    &tokio_postgres::types::Type::FLOAT4
-                    | &tokio_postgres::types::Type::FLOAT8 => row
-                        .try_get::<_, f64>(i)
-                        .ok()
-                        .map(|f| DbValue::Text(f.to_string()))
-                        .unwrap_or(DbValue::Null),
+                    &tokio_postgres::types::Type::FLOAT4 | &tokio_postgres::types::Type::FLOAT8 => {
+                        row.try_get::<_, f64>(i)
+                            .ok()
+                            .map(|f| DbValue::Text(f.to_string()))
+                            .unwrap_or(DbValue::Null)
+                    }
                     _ => row
                         .try_get::<_, String>(i)
                         .ok()
@@ -154,5 +192,24 @@ impl tokio_postgres::types::ToSql for PgParam {
             PgParam::Text(s) => s.to_sql_checked(ty, out),
             PgParam::Null => Ok(tokio_postgres::types::IsNull::Yes),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dsn_host;
+
+    #[test]
+    fn dsn_host_forms() {
+        // credentialed loopback
+        assert_eq!(dsn_host("user:pass@127.0.0.1:5432/db"), "127.0.0.1");
+        // credentialed remote
+        assert_eq!(dsn_host("user:pass@remote.com/db"), "remote.com");
+        // no userinfo remote
+        assert_eq!(dsn_host("db.example.com/synora"), "db.example.com");
+        // no userinfo remote with port
+        assert_eq!(dsn_host("db.example.com:5432/synora"), "db.example.com");
+        // unix socket form → empty, allowed
+        assert_eq!(dsn_host("/db"), "");
     }
 }

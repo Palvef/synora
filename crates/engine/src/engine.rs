@@ -1,8 +1,8 @@
 //! Engine: owns config, DB, metrics, and the run loop.
 
 use config::{CliOverrides, ConfigLoader, DbKind, ResolvedConfig};
-use db::store::Store;
 use db::migrator::Migrator;
+use db::store::Store;
 use db::SqliteDb;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -18,6 +18,9 @@ pub struct RunStorageCtx {
     pub storages: std::collections::HashMap<String, config::StorageConfig>,
     pub retention: synora_core::RetentionPolicy,
     pub min_free_bytes: Option<u64>,
+    /// cgroup v2 base path from `[cgroup] base_path` (default
+    /// /sys/fs/cgroup/synora).
+    pub cgroup_base: std::path::PathBuf,
 }
 
 impl RunStorageCtx {
@@ -25,28 +28,72 @@ impl RunStorageCtx {
         if cfg.storages.is_empty()
             && cfg.snapshot_retention == synora_core::RetentionPolicy::default()
             && cfg.min_free_bytes.is_none()
+            && cfg.cgroup.is_none()
         {
             return None;
         }
         Some(RunStorageCtx {
-            manager: Some(std::sync::Arc::new(storage::StorageManager::new(&cfg.storages))),
+            manager: Some(std::sync::Arc::new(storage::StorageManager::new(
+                &cfg.storages,
+            ))),
             storages: cfg.storages.clone(),
             retention: cfg.snapshot_retention.clone(),
             min_free_bytes: cfg.min_free_bytes,
+            cgroup_base: cfg
+                .cgroup
+                .as_ref()
+                .map(|c| c.base_path.clone())
+                .unwrap_or_else(|| std::path::PathBuf::from("/sys/fs/cgroup/synora")),
         })
     }
 
     /// The storage entry whose mountpoint matches the job's storage path.
     pub fn storage_for(&self, job: &JobSpec) -> Option<(&String, &config::StorageConfig)> {
+        if let Some(name) = &job.storage_name {
+            if let Some((n, c)) = self.storages.get_key_value(name) {
+                return Some((n, c));
+            }
+        }
         let path = job.storage.to_string_lossy();
-        self.storages
-            .iter()
-            .find(|(_, c)| {
-                c.mountpoint
-                    .as_ref()
-                    .map(|m| m.to_string_lossy() == path)
-                    .unwrap_or(false)
-            })
+        self.storages.iter().find(|(_, c)| {
+            c.mountpoint
+                .as_ref()
+                .map(|m| m.to_string_lossy() == path)
+                .unwrap_or(false)
+        })
+    }
+
+    /// Resolve the job's actual storage path on THIS machine: a job that
+    /// references a `[storage.<name>]` section uses the local section's
+    /// mountpoint plus the job's relative storage (workers on different
+    /// machines define the same name with different pools/mounts).
+    pub fn resolve_storage_path(&self, job: &JobSpec) -> std::path::PathBuf {
+        match self.storage_for(job) {
+            Some((_, c)) if job.storage_name.is_some() => {
+                let base = c
+                    .mountpoint
+                    .clone()
+                    .unwrap_or_else(|| std::path::PathBuf::from("/srv/mirror"));
+                if job.storage.as_os_str().is_empty() {
+                    base.join(&job.name)
+                } else if job.storage.is_absolute() {
+                    let rel: std::path::PathBuf = job
+                        .storage
+                        .components()
+                        .filter(|c| {
+                            !matches!(
+                                c,
+                                std::path::Component::RootDir | std::path::Component::Prefix(_)
+                            )
+                        })
+                        .collect();
+                    base.join(rel)
+                } else {
+                    base.join(&job.storage)
+                }
+            }
+            _ => job.storage.clone(),
+        }
     }
 }
 
@@ -93,11 +140,10 @@ impl Engine {
         register_local: bool,
     ) -> Result<Arc<Self>, String> {
         let db = match cfg.daemon.db.kind {
-            DbKind::Sqlite => {
-                db::Db::Sqlite(std::sync::Arc::new(
-                    SqliteDb::open(&PathBuf::from(&cfg.daemon.db.path)).map_err(|e| e.to_string())?,
-                ))
-            }
+            DbKind::Sqlite => db::Db::Sqlite(std::sync::Arc::new(
+                SqliteDb::open(&PathBuf::from(&cfg.daemon.db.path))
+                    .map_err(|e| format!("open {}: {e}", cfg.daemon.db.path))?,
+            )),
             DbKind::Postgres => {
                 let url = cfg
                     .daemon
@@ -110,7 +156,10 @@ impl Engine {
                 ))
             }
         };
-        let applied = Migrator::new(migrations_dir).run(&db).await.map_err(|e| e.to_string())?;
+        let applied = Migrator::new(migrations_dir)
+            .run(&db)
+            .await
+            .map_err(|e| e.to_string())?;
         for m in applied {
             tracing::info!("migration applied: {m}");
         }
@@ -126,21 +175,20 @@ impl Engine {
                     "local",
                     env!("CARGO_PKG_VERSION"),
                     &[],
+                    "local",
                 )
                 .await
                 .map_err(|e| e.to_string())?;
         }
 
         let run_storage = RunStorageCtx::from_config(&cfg);
-        let netroute = std::sync::RwLock::new(
-            netroute::NetRoute::build_optional(
-                &cfg.proxies,
-                &cfg.proxy_groups,
-                &cfg.egresses,
-                &cfg.egress_groups,
-                cfg.daemon.default_proxy.as_deref(),
-            ),
-        );
+        let netroute = std::sync::RwLock::new(netroute::NetRoute::build_optional(
+            &cfg.proxies,
+            &cfg.proxy_groups,
+            &cfg.egresses,
+            &cfg.egress_groups,
+            cfg.daemon.default_proxy.as_deref(),
+        ));
         let mut job_locks = HashMap::new();
         let mut live_jobs = HashMap::new();
         for j in &cfg.jobs {
@@ -185,7 +233,20 @@ impl Engine {
                 let _ = self
                     .store
                     .db()
-                    .execute("UPDATE jobs SET enabled = 0 WHERE name = ?", &[name.into()])
+                    .execute(
+                        "UPDATE jobs SET enabled = 0 WHERE name = ?",
+                        &[name.clone().into()],
+                    )
+                    .await;
+                // Stop its schedule too — a disabled job must not keep
+                // dispatching expired next_runs.
+                let _ = self
+                    .store
+                    .db()
+                    .execute(
+                        "UPDATE schedules SET next_run = NULL WHERE job_name = ?",
+                        &[name.clone().into()],
+                    )
                     .await;
             }
         }
@@ -210,9 +271,7 @@ impl Engine {
             .map_err(|e| e.to_string())?;
         let is_first_sync = existing.is_none();
         let (next_run, anchor) = match &job.schedule.kind {
-            synora_core::ScheduleKind::Manual | synora_core::ScheduleKind::Startup => {
-                (None, None)
-            }
+            synora_core::ScheduleKind::Manual | synora_core::ScheduleKind::Startup => (None, None),
             synora_core::ScheduleKind::Interval { .. } => {
                 let anchor = existing
                     .as_ref()
@@ -269,7 +328,9 @@ impl Engine {
     /// Dispatch one job: create a QUEUED run row. Serialized per job.
     /// Dependencies (spec §93): a dep whose latest run is not Success marks
     /// this run SKIPPED (a terminal status — it never executes).
-    pub async fn dispatch(&self, job_name: &str) -> Result<String, String> {
+    /// Queue a run. `forced` (operator-triggered) runs get priority 1 and
+    /// jump ahead of the scheduled backlog.
+    pub async fn dispatch(&self, job_name: &str, forced: bool) -> Result<String, String> {
         let job = self
             .job(job_name)
             .ok_or_else(|| format!("unknown job `{job_name}`"))?;
@@ -281,13 +342,17 @@ impl Engine {
                 .store
                 .run_history(dep, 1)
                 .await
-                .map(|runs| runs.first().map(|r| r.status == JobStatus::Success).unwrap_or(false))
+                .map(|runs| {
+                    runs.first()
+                        .map(|r| r.status == JobStatus::Success)
+                        .unwrap_or(false)
+                })
                 .unwrap_or(false);
             if !dep_ok {
                 let run_id = synora_core::RunId::new().to_string();
                 let _ = self
                     .store
-                    .create_run(&run_id, job_name, None, JobStatus::Skipped)
+                    .create_run(&run_id, job_name, None, JobStatus::Skipped, 0)
                     .await;
                 let _ = self
                     .store
@@ -333,7 +398,13 @@ impl Engine {
         };
         let run_id = synora_core::RunId::new().to_string();
         self.store
-            .create_run(&run_id, job_name, worker.as_deref(), JobStatus::Queued)
+            .create_run(
+                &run_id,
+                job_name,
+                worker.as_deref(),
+                JobStatus::Queued,
+                if forced { 1 } else { 0 },
+            )
             .await
             .map_err(|e| e.to_string())?;
         let _ = self
@@ -350,7 +421,7 @@ impl Engine {
         // Startup jobs: dispatch once per daemon boot (alignment decision).
         for job in self.jobs() {
             if matches!(job.schedule.kind, synora_core::ScheduleKind::Startup) && job.enabled {
-                if let Err(e) = self.dispatch(&job.name).await {
+                if let Err(e) = self.dispatch(&job.name, false).await {
                     tracing::warn!("startup dispatch of `{}` failed: {e}", job.name);
                 }
             }
@@ -386,12 +457,18 @@ impl Engine {
                     let n = streaks.entry(dedup_key.to_string()).or_insert(0);
                     *n += 1;
                     // dedup: only alert once, at the threshold (spec §91)
-                    (*n == self.cfg.notifications.alert_after_failures.max(1), event)
+                    (
+                        *n == self.cfg.notifications.alert_after_failures.max(1),
+                        event,
+                    )
                 }
                 "sync_success" => {
                     let was_alerted = streaks.remove(dedup_key).unwrap_or(0)
                         >= self.cfg.notifications.alert_after_failures.max(1);
-                    (was_alerted, if was_alerted { "sync_recovered" } else { event })
+                    (
+                        was_alerted,
+                        if was_alerted { "sync_recovered" } else { event },
+                    )
                 }
                 _ => (true, event),
             }
@@ -405,7 +482,10 @@ impl Engine {
             "message": message,
             "ts": unix_now(),
         });
-        let client = match reqwest::Client::builder().timeout(std::time::Duration::from_secs(5)).build() {
+        let client = match reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+        {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!("webhook client failed: {e}");
@@ -414,7 +494,15 @@ impl Engine {
         };
         match client.post(&url).json(&payload).send().await {
             Ok(_) => {}
-            Err(e) => tracing::warn!("webhook to {url} failed: {e}"),
+            Err(e) => tracing::warn!(
+                "webhook to {} failed: {e}",
+                url.split_once("://")
+                    .map(|(scheme, rest)| format!(
+                        "{scheme}://{}",
+                        rest.rsplit_once('@').map(|(_, h)| h).unwrap_or(rest)
+                    ))
+                    .unwrap_or_else(|| url.clone())
+            ),
         }
     }
 
@@ -461,13 +549,19 @@ impl Engine {
         // Non-reloadable fields (spec §85).
         let old = &self.cfg;
         let reject = |field: &str, a: &dyn std::fmt::Debug, b: &dyn std::fmt::Debug| {
-            Err(format!("reload rejected: `{field}` is not hot-reloadable (old {a:?}, new {b:?})"))
+            Err(format!(
+                "reload rejected: `{field}` is not hot-reloadable (old {a:?}, new {b:?})"
+            ))
         };
         if old.daemon.db != new_cfg.daemon.db {
             return reject("daemon.db", &old.daemon.db, &new_cfg.daemon.db);
         }
         if old.daemon.log_dir != new_cfg.daemon.log_dir {
-            return reject("daemon.log_dir", &old.daemon.log_dir, &new_cfg.daemon.log_dir);
+            return reject(
+                "daemon.log_dir",
+                &old.daemon.log_dir,
+                &new_cfg.daemon.log_dir,
+            );
         }
         if old.api.listen != new_cfg.api.listen {
             return reject("api.listen", &old.api.listen, &new_cfg.api.listen);
@@ -495,7 +589,10 @@ impl Engine {
             let _ = self
                 .store
                 .db()
-                .execute("UPDATE jobs SET enabled = 0 WHERE name = ?", &[name.clone().into()])
+                .execute(
+                    "UPDATE jobs SET enabled = 0 WHERE name = ?",
+                    &[name.clone().into()],
+                )
                 .await;
         }
         let audit: Vec<(String, Option<String>, Option<String>)> = {
@@ -506,12 +603,12 @@ impl Engine {
                     .get(&job.name)
                     .map(|old| serde_json::to_string(old).unwrap_or_default());
                 jobs.insert(job.name.clone(), job.clone());
-                if before.is_some() {
-                    rows.push((
-                        job.name.clone(),
-                        Some(before.unwrap_or_default()),
-                        serde_json::to_string(job).ok(),
-                    ));
+                // Only actually-changed jobs are audited (and re-run).
+                if let Some(before_json) = before {
+                    let after_json = serde_json::to_string(job).ok();
+                    if Some(&before_json) != after_json.as_ref() {
+                        rows.push((job.name.clone(), Some(before_json), after_json));
+                    }
                 }
             }
             for name in &removed {
@@ -519,6 +616,30 @@ impl Engine {
             }
             rows
         };
+        // Changed jobs re-sync once after reload (user requirement: reload
+        // must make the affected mirrors catch up immediately).
+        for (name, _, _) in &audit {
+            let job = self.job(name).ok_or("job vanished during reload")?;
+            if job.enabled {
+                // Queue one catch-up run; dispatch goes through the same
+                // planner/concurrency gates as a scheduled run.
+                match self.dispatch(name, false).await {
+                    Ok(run_id) => {
+                        let _ = self
+                            .store
+                            .insert_event(
+                                None,
+                                Some(name),
+                                "INFO",
+                                &format!("reload: queued catch-up run {run_id}"),
+                            )
+                            .await;
+                    }
+                    Err(e) => tracing::warn!("reload: cannot queue `{name}`: {e}"),
+                }
+                let _ = job;
+            }
+        }
         for (name, before, after) in audit {
             let _ = self
                 .store
@@ -548,7 +669,12 @@ impl Engine {
         let changed = new_cfg.jobs.len() + removed.len();
         let _ = self
             .store
-            .insert_event(None, None, "INFO", &format!("config reloaded ({changed} job(s) applied)"))
+            .insert_event(
+                None,
+                None,
+                "INFO",
+                &format!("config reloaded ({changed} job(s) applied)"),
+            )
             .await;
         Ok(changed)
     }
@@ -641,7 +767,7 @@ impl Engine {
     /// to reach a terminal state.
     pub async fn run_once(self: Arc<Self>, job_name: &str) -> Result<JobStatus, String> {
         self.sync_config().await?;
-        let run_id = self.dispatch(job_name).await?;
+        let run_id = self.dispatch(job_name, true).await?;
         // Spin until the run row reaches a terminal state (bounded).
         for _ in 0..600 {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;

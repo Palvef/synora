@@ -1,0 +1,24 @@
+[Unit]
+Description=Synora mirror sync worker (executes runs)
+After=network-online.target synora-manager.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# cgroup v2 scope base used by job resource limits (mirrors tunasync's
+# cgcreate ExecStartPre).
+PermissionsStartOnly=true
+ExecStartPre=/bin/mkdir -p /sys/fs/cgroup/synora
+ExecStartPre=/bin/chmod 777 /sys/fs/cgroup/synora
+ExecStart=/usr/local/bin/synora-worker -c /etc/synora/worker.toml
+ExecReload=/bin/kill -SIGHUP $MAINPID
+ExecStopPost=/bin/sh -c 'rmdir /sys/fs/cgroup/synora 2>/dev/null || true'
+Restart=always
+RestartSec=10
+# Runs as root like tunasync's worker (mirror storage on ZFS pools is
+# root-owned); adjust User= for restricted deployments.
+User=root
+Group=root
+LimitNOFILE=65536
+[Install]
+WantedBy=multi-user.target

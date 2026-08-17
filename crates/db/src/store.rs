@@ -63,12 +63,13 @@ impl Store {
             synora_core::ProviderConfig::Rsync { .. } => "rsync",
             synora_core::ProviderConfig::Script { .. } => "script",
             synora_core::ProviderConfig::Docker { .. } => "docker",
+            synora_core::ProviderConfig::Git { .. } => "git",
             synora_core::ProviderConfig::Http { .. } => "http",
         };
         let provider_config =
             serde_json::to_string(&job.provider).map_err(|e| DbError::Sql(e.to_string()))?;
-        let success_codes =
-            serde_json::to_string(&job.success_exit_codes).map_err(|e| DbError::Sql(e.to_string()))?;
+        let success_codes = serde_json::to_string(&job.success_exit_codes)
+            .map_err(|e| DbError::Sql(e.to_string()))?;
         let resources =
             serde_json::to_string(&job.resources).map_err(|e| DbError::Sql(e.to_string()))?;
         let timeout_secs = job.timeout.whole_seconds().max(1);
@@ -170,8 +171,14 @@ impl Store {
             )
             .await?;
         Ok(rows.first().map(|r| ScheduleRow {
-            schedule_json: cell(r, "schedule_json").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-            timezone: cell(r, "timezone").and_then(|v| v.as_str()).unwrap_or("UTC").to_string(),
+            schedule_json: cell(r, "schedule_json")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            timezone: cell(r, "timezone")
+                .and_then(|v| v.as_str())
+                .unwrap_or("UTC")
+                .to_string(),
             misfire_policy: cell(r, "misfire_policy")
                 .and_then(|v| v.as_str())
                 .unwrap_or("skip")
@@ -194,7 +201,10 @@ impl Store {
             .iter()
             .map(|r| {
                 (
-                    cell(r, "job_name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    cell(r, "job_name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
                     ScheduleRow {
                         schedule_json: cell(r, "schedule_json")
                             .and_then(|v| v.as_str())
@@ -253,17 +263,20 @@ impl Store {
         address: &str,
         version: &str,
         labels: &[String],
+        token_name: &str,
     ) -> DbResult<()> {
         let labels_json = serde_json::to_string(labels).map_err(|e| DbError::Sql(e.to_string()))?;
         self.db
             .execute(
                 "INSERT INTO workers (id, hostname, address, version, labels, status,
-                                      last_heartbeat, registered_at)
-                 VALUES (?,?,?,?,?, 'ONLINE', ?, ?)
+                                      last_heartbeat, registered_at, token_name)
+                 VALUES (?,?,?,?,?, 'ONLINE', ?, ?, ?)
                  ON CONFLICT(id) DO UPDATE SET
                    hostname=excluded.hostname, address=excluded.address,
                    version=excluded.version, labels=excluded.labels,
                    last_heartbeat=excluded.last_heartbeat,
+                   token_name = CASE WHEN workers.token_name = '' OR workers.token_name IS NULL
+                                      THEN excluded.token_name ELSE workers.token_name END,
                    status = CASE WHEN workers.status IN ('DRAINING','MAINTENANCE')
                                  THEN workers.status ELSE 'ONLINE' END",
                 &[
@@ -274,6 +287,7 @@ impl Store {
                     labels_json.into(),
                     unix_now().into(),
                     unix_now().into(),
+                    token_name.into(),
                 ],
             )
             .await?;
@@ -308,11 +322,14 @@ impl Store {
 
     pub async fn touch_heartbeat(&self, id: &str, jobs_running: u32, status: &str) -> DbResult<()> {
         let _ = status; // heartbeat "idle/running" is informational; worker
-        // lifecycle status (ONLINE/OFFLINE/DRAINING/MAINTENANCE) is managed
-        // by register/reaper/drain only.
+                        // lifecycle status (ONLINE/OFFLINE/DRAINING/MAINTENANCE) is managed
+                        // by register/reaper/drain only.
         self.db
             .execute(
-                "UPDATE workers SET last_heartbeat = ?, jobs_running = ? WHERE id = ?",
+                "UPDATE workers SET last_heartbeat = ?, jobs_running = ?,
+                        status = CASE WHEN status = 'OFFLINE' THEN 'ONLINE'
+                                      ELSE status END
+                 WHERE id = ?",
                 &[unix_now().into(), (jobs_running as i64).into(), id.into()],
             )
             .await?;
@@ -362,7 +379,10 @@ impl Store {
                     .and_then(|s| serde_json::from_str(s).ok())
                     .unwrap_or_default();
                 (
-                    cell(r, "id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    cell(r, "id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
                     labels,
                 )
             })
@@ -377,6 +397,18 @@ impl Store {
 
     /// QUEUED runs with no worker assigned (queued while no worker was
     /// online, or unassigned by the reaper) — candidates for re-dispatch.
+    /// The token name that registered this worker (identity binding).
+    pub async fn worker_token(&self, id: &str) -> DbResult<Option<String>> {
+        let rows = self
+            .db
+            .query("SELECT token_name FROM workers WHERE id = ?", &[id.into()])
+            .await?;
+        Ok(rows
+            .first()
+            .and_then(|r| cell(r, "token_name").and_then(|v| v.as_str()))
+            .map(String::from))
+    }
+
     pub async fn unassigned_runs(&self) -> DbResult<Vec<RunRow>> {
         self.runs_where("status = 'QUEUED' AND worker_id IS NULL", &[])
             .await
@@ -396,6 +428,16 @@ impl Store {
         Ok(n > 0)
     }
 
+    /// Active runs of a job (STARTING/RUNNING) — the per-job concurrency
+    /// gate for claim.
+    pub async fn active_runs_of_job(&self, job: &str) -> DbResult<Vec<RunRow>> {
+        self.runs_where(
+            "job_id = ? AND status IN ('STARTING','RUNNING')",
+            &[job.into()],
+        )
+        .await
+    }
+
     /// Active (claimed) runs of a worker.
     pub async fn active_runs_of(&self, worker: &str) -> DbResult<Vec<RunRow>> {
         self.runs_where(
@@ -407,11 +449,8 @@ impl Store {
 
     /// Runs this worker holds that are marked CANCELLING (stop requests).
     pub async fn cancelling_runs_of(&self, worker: &str) -> DbResult<Vec<RunRow>> {
-        self.runs_where(
-            "worker_id = ? AND status = 'CANCELLING'",
-            &[worker.into()],
-        )
-        .await
+        self.runs_where("worker_id = ? AND status = 'CANCELLING'", &[worker.into()])
+            .await
     }
 
     /// Runs whose lease expired (worker vanished) — the reaper marks LOST.
@@ -435,7 +474,12 @@ impl Store {
     }
 
     /// New run row on worker loss (LOST does not burn the retry budget, §29).
-    pub async fn create_lost_requeue(&self, id: &str, job_name: &str, worker: Option<&str>) -> DbResult<Option<String>> {
+    pub async fn create_lost_requeue(
+        &self,
+        id: &str,
+        job_name: &str,
+        worker: Option<&str>,
+    ) -> DbResult<Option<String>> {
         let new_id = synora_core::RunId::new().to_string();
         self.db
             .execute(
@@ -465,17 +509,19 @@ impl Store {
         job_name: &str,
         worker: Option<&str>,
         status: JobStatus,
+        priority: i64,
     ) -> DbResult<()> {
         self.db
             .execute(
-                "INSERT INTO job_runs (id, job_id, worker_id, status, created_at)
-                 VALUES (?,?,?,?,?)",
+                "INSERT INTO job_runs (id, job_id, worker_id, status, created_at, priority)
+                 VALUES (?,?,?,?,?,?)",
                 &[
                     id.into(),
                     job_name.into(),
                     worker.map(|w| w.to_string()).into(),
                     status.to_db().into(),
                     unix_now().into(),
+                    priority.into(),
                 ],
             )
             .await?;
@@ -506,7 +552,9 @@ impl Store {
                 .db
                 .query("SELECT job_id FROM job_runs WHERE id = ?", &[id.into()])
                 .await?;
-            if let Some(name) = job.first().and_then(|r| cell(r, "job_id").and_then(|v| v.as_str()))
+            if let Some(name) = job
+                .first()
+                .and_then(|r| cell(r, "job_id").and_then(|v| v.as_str()))
             {
                 self.set_job_status(name, JobStatus::Starting).await?;
             }
@@ -525,7 +573,10 @@ impl Store {
             .db
             .query("SELECT job_id FROM job_runs WHERE id = ?", &[id.into()])
             .await?;
-        if let Some(name) = job.first().and_then(|r| cell(r, "job_id").and_then(|v| v.as_str())) {
+        if let Some(name) = job
+            .first()
+            .and_then(|r| cell(r, "job_id").and_then(|v| v.as_str()))
+        {
             self.set_job_status(name, status).await?;
         }
         Ok(())
@@ -570,7 +621,10 @@ impl Store {
             .db
             .query("SELECT job_id FROM job_runs WHERE id = ?", &[id.into()])
             .await?;
-        if let Some(name) = job.first().and_then(|r| cell(r, "job_id").and_then(|v| v.as_str())) {
+        if let Some(name) = job
+            .first()
+            .and_then(|r| cell(r, "job_id").and_then(|v| v.as_str()))
+        {
             self.set_job_status(name, status).await?;
         }
         Ok(())
@@ -610,17 +664,27 @@ impl Store {
         let sql = format!(
             "SELECT id, job_id, worker_id, status, retry_count, next_retry_at, created_at,
                     started_at, finished_at, duration_secs, exit_code, message
-             FROM job_runs WHERE {cond} ORDER BY created_at"
+             FROM job_runs WHERE {cond} ORDER BY priority DESC, created_at"
         );
         let rows = self.db.query(&sql, params).await?;
         Ok(rows
             .iter()
             .map(|r| RunRow {
-                id: cell(r, "id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                job_id: cell(r, "job_id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                worker_id: cell(r, "worker_id").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                id: cell(r, "id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                job_id: cell(r, "job_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                worker_id: cell(r, "worker_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
                 status: JobStatus::from_db(
-                    cell(r, "status").and_then(|v| v.as_str()).unwrap_or("PENDING"),
+                    cell(r, "status")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("PENDING"),
                 ),
                 retry_count: cell(r, "retry_count").and_then(|v| v.as_i64()).unwrap_or(0) as u32,
                 next_retry_at: cell(r, "next_retry_at").and_then(|v| v.as_i64()),
@@ -628,8 +692,12 @@ impl Store {
                 started_at: cell(r, "started_at").and_then(|v| v.as_i64()),
                 finished_at: cell(r, "finished_at").and_then(|v| v.as_i64()),
                 duration_secs: cell(r, "duration_secs").and_then(|v| v.as_i64()),
-                exit_code: cell(r, "exit_code").and_then(|v| v.as_i64()).map(|v| v as i32),
-                message: cell(r, "message").and_then(|v| v.as_str()).map(String::from),
+                exit_code: cell(r, "exit_code")
+                    .and_then(|v| v.as_i64())
+                    .map(|v| v as i32),
+                message: cell(r, "message")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
             })
             .collect())
     }
@@ -681,7 +749,9 @@ impl Store {
                 &[path.into()],
             )
             .await?;
-        Ok(rows.first().and_then(|r| cell(r, "size_bytes").and_then(|v| v.as_i64())))
+        Ok(rows
+            .first()
+            .and_then(|r| cell(r, "size_bytes").and_then(|v| v.as_i64())))
     }
 
     pub async fn insert_event(
@@ -708,13 +778,48 @@ impl Store {
     }
 
     pub async fn insert_log(&self, run_id: &str, job_name: &str, log_path: &str) -> DbResult<()> {
+        self.insert_log_with(run_id, job_name, log_path, "").await
+    }
+
+    /// Insert a log row with content (remote workers report their log text).
+    pub async fn insert_log_with(
+        &self,
+        run_id: &str,
+        job_name: &str,
+        log_path: &str,
+        content: &str,
+    ) -> DbResult<()> {
         self.db
             .execute(
-                "INSERT INTO job_logs (run_id, job_id, log_path, created_at) VALUES (?,?,?,?)",
-                &[run_id.into(), job_name.into(), log_path.into(), unix_now().into()],
+                "INSERT INTO job_logs (run_id, job_id, log_path, created_at, content)
+                 VALUES (?,?,?,?,?)
+                 ON CONFLICT(run_id) DO UPDATE SET content = excluded.content",
+                &[
+                    run_id.into(),
+                    job_name.into(),
+                    log_path.into(),
+                    unix_now().into(),
+                    content.into(),
+                ],
             )
             .await?;
         Ok(())
+    }
+
+    /// Latest stored log content for a job (remote-worker runs).
+    pub async fn latest_log_content(&self, job_name: &str) -> DbResult<Option<String>> {
+        let rows = self
+            .db
+            .query(
+                "SELECT content FROM job_logs WHERE job_id = ?
+                 ORDER BY created_at DESC LIMIT 1",
+                &[job_name.into()],
+            )
+            .await?;
+        Ok(rows
+            .first()
+            .and_then(|r| cell(r, "content").and_then(|v| v.as_str()))
+            .map(String::from))
     }
 
     /// Jobs with their denormalized status, for CLI/TUI listing.
@@ -727,9 +832,14 @@ impl Store {
             .iter()
             .map(|r| {
                 (
-                    cell(r, "name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    cell(r, "name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
                     JobStatus::from_db(
-                        cell(r, "status").and_then(|v| v.as_str()).unwrap_or("PENDING"),
+                        cell(r, "status")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("PENDING"),
                     ),
                 )
             })

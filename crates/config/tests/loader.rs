@@ -100,7 +100,10 @@ fn valid_config_all_schedule_kinds() {
     assert_eq!(ubuntu.retry, 3);
     // docker job
     let c = cfg.jobs.iter().find(|j| j.name == "cronjob").unwrap();
-    assert!(matches!(c.provider, synora_core::ProviderConfig::Docker { .. }));
+    assert!(matches!(
+        c.provider,
+        synora_core::ProviderConfig::Docker { .. }
+    ));
 }
 
 #[test]
@@ -135,7 +138,10 @@ fn include_missing_file_and_empty_glob() {
 
     let dir2 = temp_dir("emptyglob");
     write(&dir2, "synora.toml", "include = [\"jobs/*.toml\"]\n");
-    assert!(load(&dir2).unwrap_err().to_string().contains("matched no files"));
+    assert!(load(&dir2)
+        .unwrap_err()
+        .to_string()
+        .contains("matched no files"));
 }
 
 #[test]
@@ -151,7 +157,11 @@ fn env_expansion_and_escape() {
     assert_eq!(cfg.daemon.db.path, "data/custom.db");
 
     let dir2 = temp_dir("env-unset");
-    write(&dir2, "synora.toml", "include = [\"x.toml\"]\n# padding\n\n");
+    write(
+        &dir2,
+        "synora.toml",
+        "include = [\"x.toml\"]\n# padding\n\n",
+    );
     write(
         &dir2,
         "x.toml",
@@ -206,11 +216,7 @@ fn duplicate_job_name_rejected() {
 #[test]
 fn validation_errors_carry_file_line() {
     let dir = temp_dir("badcron");
-    write(
-        &dir,
-        "synora.toml",
-        "include = [\"jobs/*.toml\"]\n",
-    );
+    write(&dir, "synora.toml", "include = [\"jobs/*.toml\"]\n");
     write(
         &dir,
         "jobs/ubuntu.toml",
@@ -289,7 +295,11 @@ fn bad_values_rejected() {
     write(
         &dir,
         "jobs/nocmd.toml",
-        &job("nocmd", "schedule = \"manual\"", "provider = \"script\"\nstorage = \"/srv/x\""),
+        &job(
+            "nocmd",
+            "schedule = \"manual\"",
+            "provider = \"script\"\nstorage = \"/srv/x\"",
+        ),
     );
     assert!(load(&dir).unwrap_err().to_string().contains("command"));
 
@@ -297,7 +307,11 @@ fn bad_values_rejected() {
     write(
         &dir,
         "jobs/noupstream.toml",
-        &job("noupstream", "schedule = \"manual\"", "provider = \"rsync\"\nstorage = \"/srv/x\""),
+        &job(
+            "noupstream",
+            "schedule = \"manual\"",
+            "provider = \"rsync\"\nstorage = \"/srv/x\"",
+        ),
     );
     assert!(load(&dir).unwrap_err().to_string().contains("upstream"));
 

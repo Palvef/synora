@@ -7,7 +7,6 @@
 
 use crate::{ProviderError, SyncContext, SyncResult};
 use std::process::Stdio;
-use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 use crate::{cancelled_after_wait, kill_group, spawn_group};
@@ -46,7 +45,10 @@ fn parse_output(stdout: &[u8]) -> ParsedOutput {
 
 impl ScriptProvider {
     pub async fn sync(&self, ctx: &SyncContext) -> Result<SyncResult, ProviderError> {
-        // Command as argv list, never through a shell (spec §102).
+        // Scripts run through a shell by design (tunasync compatibility:
+        // tunasync-scripts are shell scripts). The command string comes from
+        // trusted local config only — never from API input. Other providers
+        // execute argv arrays without a shell.
         let mut cmd = Command::new("/bin/sh");
         cmd.arg("-c").arg(&self.command);
         cmd.current_dir(&ctx.storage);
@@ -89,15 +91,15 @@ impl ScriptProvider {
         // before the select would swallow cancels until the child exits.
         let stdout_pipe = child.stdout.take();
         let stderr_pipe = child.stderr.take();
+        // Both pipes are drained CONCURRENTLY: reading stdout to EOF before
+        // touching stderr deadlocks when the child fills the stderr buffer.
+        // Memory keeps only the tail (the full stream is in the run log).
+        let log_file = ctx.log_file.clone();
         let read_fut = async {
-            let mut out = Vec::new();
-            let mut err = Vec::new();
-            if let Some(mut s) = stdout_pipe {
-                let _ = s.read_to_end(&mut out).await;
-            }
-            if let Some(mut s) = stderr_pipe {
-                let _ = s.read_to_end(&mut err).await;
-            }
+            let (out, err) = tokio::join!(
+                crate::read_pipe_tee(stdout_pipe, &log_file),
+                crate::read_pipe_tee_err(stderr_pipe, &log_file),
+            );
             (out, err)
         };
         tokio::pin!(read_fut);
@@ -134,11 +136,31 @@ impl ScriptProvider {
 
         // Exit 0 = SUCCESS, non-zero = FAILED (spec §16) — but SYNORA_STATUS=
         // can override both directions.
+        // Failures carry the script's output so it lands in the run log.
+        let fail = |code: i32| -> ProviderError {
+            let out = String::from_utf8_lossy(&result.stdout);
+            let err = String::from_utf8_lossy(&result.stderr);
+            let mut detail = err.trim().to_string();
+            if detail.is_empty() {
+                detail = out.trim().to_string();
+            } else if !out.trim().is_empty() {
+                detail.push_str(" | stdout: ");
+                detail.push_str(out.trim());
+            }
+            ProviderError::Other(format!(
+                "script exited with {code}{}",
+                if detail.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", detail.chars().take(8000).collect::<String>())
+                }
+            ))
+        };
         match (&result.status, status.code()) {
             (Some(s), _) if s == "success" => Ok(result),
-            (Some(_), _) => Err(ProviderError::Exit(status.code().unwrap_or(1))),
+            (Some(_), _) => Err(fail(status.code().unwrap_or(1))),
             (None, Some(0)) | (None, None) => Ok(result),
-            (None, Some(code)) => Err(ProviderError::Exit(code)),
+            (None, Some(code)) => Err(fail(code)),
         }
     }
 }

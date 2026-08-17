@@ -5,13 +5,29 @@ use crate::sqlite::{DbError, DbResult, Param};
 use crate::Db;
 use std::path::Path;
 
+/// Migrations shipped inside the binary (spec §96). The on-disk
+/// `migrations/` dir is an override for development; when it is missing —
+/// e.g. systemd services with CWD=/ — the embedded set runs instead.
+const EMBEDDED: &[(u64, &str)] = &[
+    (1, include_str!("../../../migrations/0001_init.sql")),
+    (
+        2,
+        include_str!("../../../migrations/0002_config_history.sql"),
+    ),
+    (3, include_str!("../../../migrations/0003_worker_token.sql")),
+    (4, include_str!("../../../migrations/0004_log_content.sql")),
+    (5, include_str!("../../../migrations/0005_run_priority.sql")),
+];
+
 pub struct Migrator {
     dir: std::path::PathBuf,
 }
 
 impl Migrator {
     pub fn new(dir: &Path) -> Self {
-        Migrator { dir: dir.to_path_buf() }
+        Migrator {
+            dir: dir.to_path_buf(),
+        }
     }
 
     pub async fn run(&self, db: &Db) -> DbResult<Vec<String>> {
@@ -22,38 +38,46 @@ impl Migrator {
         )
         .await?;
 
-        let mut files: Vec<(u64, std::path::PathBuf)> = Vec::new();
-        let entries = std::fs::read_dir(&self.dir).map_err(|e| DbError::Sql(e.to_string()))?;
-        for entry in entries {
-            let path = entry.map_err(|e| DbError::Sql(e.to_string()))?.path();
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("")
-                .to_string();
-            if let Some(num) = name.split('_').next().and_then(|s| s.parse::<u64>().ok()) {
-                if name.ends_with(".sql") {
-                    files.push((num, path));
+        // (version, sql): embedded by default, overridden by on-disk files
+        // when the migrations dir exists.
+        let mut pending: Vec<(u64, String)> = EMBEDDED
+            .iter()
+            .map(|(n, sql)| (*n, sql.to_string()))
+            .collect();
+        if let Ok(entries) = std::fs::read_dir(&self.dir) {
+            pending.clear();
+            for entry in entries {
+                let path = entry.map_err(|e| DbError::Sql(e.to_string()))?.path();
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_string();
+                if let Some(num) = name.split('_').next().and_then(|s| s.parse::<u64>().ok()) {
+                    if name.ends_with(".sql") {
+                        let sql = std::fs::read_to_string(&path)
+                            .map_err(|e| DbError::Sql(e.to_string()))?;
+                        pending.push((num, sql));
+                    }
                 }
             }
         }
-        files.sort_by_key(|(num, _)| *num);
+        pending.sort_by_key(|(num, _)| *num);
 
         let now = unix_now();
         let mut applied = Vec::new();
-        for (version, path) in files {
+        for (version, sql) in &pending {
             let rows = db
                 .query(
                     "SELECT version FROM schema_migrations WHERE version = ?",
-                    &[Param::Int(version as i64)],
+                    &[Param::Int(*version as i64)],
                 )
                 .await?;
             if !rows.is_empty() {
                 continue;
             }
-            let sql = std::fs::read_to_string(&path).map_err(|e| DbError::Sql(e.to_string()))?;
-            let path_display = path.display().to_string();
-            for stmt in split_statements(&sql) {
+            let path_display = format!("migration v{version}");
+            for stmt in split_statements(sql) {
                 match db {
                     Db::Sqlite(d) => {
                         let pd = path_display.clone();
@@ -73,10 +97,10 @@ impl Migrator {
             }
             db.execute(
                 "INSERT INTO schema_migrations (version, applied_at) VALUES (?,?)",
-                &[Param::Int(version as i64), Param::Int(now)],
+                &[Param::Int(*version as i64), Param::Int(now)],
             )
             .await?;
-            applied.push(format!("{} (v{version})", path.display()));
+            applied.push(format!("migration v{version}"));
         }
         Ok(applied)
     }
