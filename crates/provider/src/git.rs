@@ -62,7 +62,7 @@ impl GitProvider {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let mut child =
+        let (mut child, _guard) =
             spawn_group(&mut cmd, ctx).map_err(|e| ProviderError::Spawn(format!("git: {e}")))?;
         let stdout_pipe = child.stdout.take();
         let stderr_pipe = child.stderr.take();
@@ -118,7 +118,7 @@ impl GitProvider {
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
-            let mut child = spawn_group(&mut reset, ctx)?;
+            let (mut child, _guard) = spawn_group(&mut reset, ctx)?;
             let status = tokio::select! {
                 _ = ctx.cancel.cancelled() => {
                     kill_group(&mut child).await;

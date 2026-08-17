@@ -21,10 +21,36 @@ pub trait CgroupScopeRef: Send + Sync {
     fn attach(&self, pid: u32);
 }
 
+/// Kills the child's process group if the owning future is dropped
+/// (run timeout, task abort) — the explicit cancel paths kill and reap;
+/// this guard covers every OTHER way a provider future can end, so no
+/// sync process survives its run.
+pub(crate) struct KillOnDrop(i32);
+
+impl KillOnDrop {
+    pub fn arm(child: &tokio::process::Child) -> Self {
+        KillOnDrop(child.id().unwrap_or(0) as i32)
+    }
+    pub fn disarm(self) {
+        std::mem::forget(self);
+    }
+}
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if self.0 > 0 {
+            unsafe {
+                libc::kill(-self.0, libc::SIGKILL);
+            }
+        }
+    }
+}
+
 pub(crate) fn spawn_group(
     cmd: &mut tokio::process::Command,
     ctx: &SyncContext,
-) -> Result<tokio::process::Child, ProviderError> {
+) -> Result<(tokio::process::Child, KillOnDrop), ProviderError> {
     #[cfg(unix)]
     cmd.process_group(0);
     #[cfg(windows)]
@@ -41,7 +67,8 @@ pub(crate) fn spawn_group(
     if let Some(cg) = &ctx.cgroup {
         cg.attach(child.id().unwrap_or(0));
     }
-    Ok(child)
+    let guard = KillOnDrop::arm(&child);
+    Ok((child, guard))
 }
 
 /// Kill the child's whole process tree and reap it.

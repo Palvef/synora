@@ -340,8 +340,16 @@ impl Client {
     }
 
     pub async fn job_logs(&self, job: &str, tail: u32) -> Result<String, ApiError> {
+        // The logs endpoint returns plain text, not JSON — json() would
+        // fail parsing every response.
         let path = format!("{API_V1}/jobs/{job}/logs?tail={tail}");
-        self.json(reqwest::Method::GET, &path, None::<&()>).await
+        let resp = self.send(reqwest::Method::GET, &path, None::<&()>).await?;
+        if resp.status().is_success() {
+            resp.text().await.map_err(|e| ApiError::Http(e.to_string()))
+        } else {
+            let text = resp.text().await.unwrap_or_default();
+            Err(ApiError::Rejected(text))
+        }
     }
 
     /// Hot-reload the manager's config (same as SIGHUP / `synora reload`).

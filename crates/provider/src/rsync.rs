@@ -196,7 +196,7 @@ async fn run_rsync(
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child =
+    let (mut child, guard) =
         spawn_group(cmd, ctx).map_err(|e| ProviderError::Spawn(format!("rsync: {e}")))?;
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
@@ -230,6 +230,7 @@ async fn run_rsync(
         r = child.wait() => r.map_err(|e| ProviderError::Other(e.to_string()))?,
     };
     cancelled_after_wait(ctx, &mut child).await?;
+    guard.disarm();
     Ok((status.code().unwrap_or(-1), stdout, stderr))
 }
 
@@ -303,15 +304,17 @@ impl TwoStageRsyncProvider {
             + "/";
 
         // Shared tail: connection timeout (daemon upstreams), excludes,
-        // proxy env, egress, family, stats, source and dest.
-        let tail = |cmd: &mut Command, with_excludes: bool| {
+        // proxy env, egress, family, stats, source and dest. Excludes apply
+        // to BOTH stages (excluded data must never enter the mirror); the
+        // delete cap stays stage-2-only because stage 1 has no --delete.
+        let tail = |cmd: &mut Command, with_delete_cap: bool| {
             if upstream.starts_with("rsync://") {
                 cmd.arg("--contimeout=120");
             }
-            if with_excludes {
-                for pat in &self.exclude {
-                    cmd.arg(format!("--exclude={pat}"));
-                }
+            for pat in &self.exclude {
+                cmd.arg(format!("--exclude={pat}"));
+            }
+            if with_delete_cap {
                 if let Some(max) = ctx.job.safety.max_delete_files {
                     cmd.arg(format!("--max-delete={max}"));
                 }
@@ -337,8 +340,11 @@ impl TwoStageRsyncProvider {
 
         // Stage 1: the publishable subset (tunasync stage1Options + profile).
         let mut cmd = Command::new("rsync");
+        // -vh = per-file transfer lines, same detail as the single provider.
         cmd.args([
             "-aH",
+            "-v",
+            "-h",
             "--no-o",
             "--no-g",
             "--filter",
@@ -369,6 +375,8 @@ impl TwoStageRsyncProvider {
         let mut cmd = Command::new("rsync");
         cmd.args([
             "-aH",
+            "-v",
+            "-h",
             "--no-o",
             "--no-g",
             "--filter",
@@ -381,10 +389,12 @@ impl TwoStageRsyncProvider {
             "--safe-links",
             "--timeout=120",
         ]);
+        tail(&mut cmd, true);
+        // Options come after excludes: a user --include can still pull a
+        // path back in (same order as the single rsync provider).
         for opt in &self.options {
             cmd.arg(opt);
         }
-        tail(&mut cmd, true);
         let (code, stdout, stderr) = run_rsync(ctx, &mut cmd).await?;
         let (transferred, total_size) = RsyncProvider::parse_stats(&stdout);
         let result = SyncResult {

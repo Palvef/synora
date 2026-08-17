@@ -128,6 +128,16 @@ def render_job(m, log_dir, storage_dir, global_docker_volumes, global_interval):
         lines.append(f"upstream = {toml_str(m.get('upstream', ''))}")
         sp = m.get("stage1_profile") or "debian"
         lines.append(f"stage1_profile = {toml_str(sp)}")
+        # Same extra rsync fields as the plain rsync branch.
+        opts = parse_list(m.get("rsync_options")) or parse_list(m.get("options"))
+        if opts:
+            lines.append(f"options = {toml_list(opts)}")
+        excl = parse_list(m.get("exclude"))
+        if excl:
+            lines.append(f"exclude = {toml_list(excl)}")
+        codes = m.get("success_exit_codes")
+        if codes:
+            lines.append(f"success_exit_codes = {toml_str(codes)}")
     elif provider in ("docker",):
         image = m.get("docker_image", "ustcmirror/rsync:latest")
         lines.append('provider = "docker"')

@@ -683,10 +683,17 @@ impl Store {
         Ok(rows.iter().map(|r| run_row(r)).collect())
     }
 
-    /// Run history for one job, newest first.
+    /// Run history for one job, newest first (by creation time only —
+    /// priority must not reorder history).
     pub async fn run_history(&self, job_name: &str, limit: u32) -> DbResult<Vec<RunRow>> {
-        let mut v = self.runs_where("job_id = ?", &[job_name.into()]).await?;
-        v.reverse(); // created_at ascending → newest first
+        let sql = "SELECT id, job_id, worker_id, status, retry_count, next_retry_at, created_at,
+                          started_at, finished_at, duration_secs, exit_code, message
+                   FROM job_runs WHERE job_id = ? ORDER BY created_at DESC LIMIT ?";
+        let rows = self
+            .db
+            .query(sql, &[job_name.into(), (limit as i64).into()])
+            .await?;
+        let mut v: Vec<RunRow> = rows.iter().map(|r| run_row(r)).collect();
         v.truncate(limit as usize);
         Ok(v)
     }

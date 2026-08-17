@@ -118,7 +118,7 @@ impl DockerProvider {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let mut child = spawn_group(&mut cmd, ctx)
+        let (mut child, _guard) = spawn_group(&mut cmd, ctx)
             .map_err(|e| ProviderError::Spawn(format!("docker run: {e}")))?;
         // Read pipes and wait for exit concurrently with cancellation: a
         // long-running child keeps its pipes open, so a plain read_to_end

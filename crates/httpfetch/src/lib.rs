@@ -159,6 +159,7 @@ impl Fetcher {
             remote: &mut remote,
             seen: 0,
             dirs: 0,
+            last_report: tokio::time::Instant::now(),
             log_file,
         };
         planner.dir(base_url, "", depth.min(MAX_DEPTH)).await?;
@@ -324,13 +325,17 @@ struct Planner<'a> {
     remote: &'a mut HashSet<String>,
     seen: usize,
     dirs: usize,
+    last_report: tokio::time::Instant,
     log_file: Option<&'a Path>,
 }
 
 impl Planner<'_> {
     async fn dir(&mut self, url: &str, dir_rel: &str, depth: u32) -> Result<(), FetchError> {
         self.dirs += 1;
-        if self.dirs.is_multiple_of(20) {
+        // Progress at most every few seconds — deep trees would otherwise
+        // flood the run log with a line per directory.
+        if self.dirs.is_multiple_of(20) && self.last_report.elapsed() >= PROGRESS_INTERVAL {
+            self.last_report = tokio::time::Instant::now();
             append_log(
                 self.log_file,
                 &format!("planning: listed {} entries so far (at {url})", self.seen),

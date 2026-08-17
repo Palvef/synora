@@ -41,6 +41,8 @@ struct Snapshot {
     workers: Vec<api::WorkerDTO>,
     log_lines: Vec<String>,
     log_job: Option<String>,
+    /// Job whose spec is currently loaded (spec re-fetch gate).
+    spec_job: Option<String>,
     history: Vec<api::RunDTO>,
     /// Full job spec (structured editor) + its editable field view.
     spec_json: Option<serde_json::Value>,
@@ -1085,11 +1087,18 @@ pub fn run(
                         if let Ok(h) = client.job_history(&name).await {
                             s.history = h;
                         }
-                        if let Ok(spec) = client.job_spec(&name).await {
-                            let json =
-                                serde_json::to_value(&spec).unwrap_or(serde_json::Value::Null);
-                            s.spec_fields = flatten_spec(&json);
-                            s.spec_json = Some(json);
+                        // Spec: fetch when the selection changed or there is
+                        // none yet. Never re-fetch every tick — that would
+                        // clobber edits made in the spec editor with the
+                        // stale clone from before the fetch.
+                        if s.spec_job.as_deref() != Some(name.as_str()) || s.spec_json.is_none() {
+                            if let Ok(spec) = client.job_spec(&name).await {
+                                let json =
+                                    serde_json::to_value(&spec).unwrap_or(serde_json::Value::Null);
+                                s.spec_fields = flatten_spec(&json);
+                                s.spec_json = Some(json);
+                                s.spec_job = Some(name.clone());
+                            }
                         }
                     }
                 }
