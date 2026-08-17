@@ -122,7 +122,13 @@ def render_job(m, log_dir, storage_dir, global_docker_volumes, global_interval):
             lines.append(f"upstream = {toml_str(m.get('upstream', ''))}")
             if m.get("fail_on_match"):
                 lines.append(f"fail_on_match = {toml_str(m['fail_on_match'])}")
-    elif provider in ("docker", "two-stage-rsync"):
+    elif provider == "two-stage-rsync":
+        # Native two-stage rsync (stage 1 subset profile, stage 2 full sync).
+        lines.append('provider = "two-stage-rsync"')
+        lines.append(f"upstream = {toml_str(m.get('upstream', ''))}")
+        sp = m.get("stage1_profile") or "debian"
+        lines.append(f"stage1_profile = {toml_str(sp)}")
+    elif provider in ("docker",):
         image = m.get("docker_image", "ustcmirror/rsync:latest")
         lines.append('provider = "docker"')
         lines.append(f"image = {toml_str(image)}")

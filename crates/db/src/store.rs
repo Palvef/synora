@@ -61,6 +61,7 @@ impl Store {
     pub async fn sync_job(&self, job: &JobSpec) -> DbResult<()> {
         let provider = match &job.provider {
             synora_core::ProviderConfig::Rsync { .. } => "rsync",
+            synora_core::ProviderConfig::TwoStageRsync { .. } => "two-stage-rsync",
             synora_core::ProviderConfig::Script { .. } => "script",
             synora_core::ProviderConfig::Docker { .. } => "docker",
             synora_core::ProviderConfig::Git { .. } => "git",
@@ -391,8 +392,20 @@ impl Store {
 
     /// QUEUED runs a specific worker should be offered (assigned to it).
     pub async fn assigned_runs(&self, worker: &str) -> DbResult<Vec<RunRow>> {
-        self.runs_where("status = 'QUEUED' AND worker_id = ?", &[worker.into()])
-            .await
+        // Offer runs one job at a time: skip jobs that already have an
+        // active run, or a queued run behind an active one would be offered
+        // forever and block everything after it.
+        let sql = "SELECT id, job_id, worker_id, status, retry_count, next_retry_at, created_at,
+                          started_at, finished_at, duration_secs, exit_code, message
+                   FROM job_runs
+                   WHERE status = 'QUEUED' AND worker_id = ?
+                     AND job_id NOT IN (
+                         SELECT job_id FROM job_runs
+                         WHERE status IN ('STARTING','RUNNING')
+                     )
+                   ORDER BY priority DESC, created_at";
+        let rows = self.db.query(sql, &[worker.into()]).await?;
+        Ok(rows.iter().map(|r| run_row(r)).collect())
     }
 
     /// QUEUED runs with no worker assigned (queued while no worker was
@@ -667,39 +680,7 @@ impl Store {
              FROM job_runs WHERE {cond} ORDER BY priority DESC, created_at"
         );
         let rows = self.db.query(&sql, params).await?;
-        Ok(rows
-            .iter()
-            .map(|r| RunRow {
-                id: cell(r, "id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                job_id: cell(r, "job_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                worker_id: cell(r, "worker_id")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                status: JobStatus::from_db(
-                    cell(r, "status")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("PENDING"),
-                ),
-                retry_count: cell(r, "retry_count").and_then(|v| v.as_i64()).unwrap_or(0) as u32,
-                next_retry_at: cell(r, "next_retry_at").and_then(|v| v.as_i64()),
-                created_at: cell(r, "created_at").and_then(|v| v.as_i64()).unwrap_or(0),
-                started_at: cell(r, "started_at").and_then(|v| v.as_i64()),
-                finished_at: cell(r, "finished_at").and_then(|v| v.as_i64()),
-                duration_secs: cell(r, "duration_secs").and_then(|v| v.as_i64()),
-                exit_code: cell(r, "exit_code")
-                    .and_then(|v| v.as_i64())
-                    .map(|v| v as i32),
-                message: cell(r, "message")
-                    .and_then(|v| v.as_str())
-                    .map(String::from),
-            })
-            .collect())
+        Ok(rows.iter().map(|r| run_row(r)).collect())
     }
 
     /// Run history for one job, newest first.
@@ -887,5 +868,39 @@ impl JobStatusDb for JobStatus {
             "SKIPPED" => JobStatus::Skipped,
             _ => JobStatus::Pending,
         }
+    }
+}
+
+/// Row → RunRow mapping shared by the run queries.
+fn run_row(r: &[(String, DbValue)]) -> RunRow {
+    RunRow {
+        id: cell(r, "id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        job_id: cell(r, "job_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        worker_id: cell(r, "worker_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        status: JobStatus::from_db(
+            cell(r, "status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("PENDING"),
+        ),
+        retry_count: cell(r, "retry_count").and_then(|v| v.as_i64()).unwrap_or(0) as u32,
+        next_retry_at: cell(r, "next_retry_at").and_then(|v| v.as_i64()),
+        created_at: cell(r, "created_at").and_then(|v| v.as_i64()).unwrap_or(0),
+        started_at: cell(r, "started_at").and_then(|v| v.as_i64()),
+        finished_at: cell(r, "finished_at").and_then(|v| v.as_i64()),
+        duration_secs: cell(r, "duration_secs").and_then(|v| v.as_i64()),
+        exit_code: cell(r, "exit_code")
+            .and_then(|v| v.as_i64())
+            .map(|v| v as i32),
+        message: cell(r, "message")
+            .and_then(|v| v.as_str())
+            .map(String::from),
     }
 }

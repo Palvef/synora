@@ -26,8 +26,9 @@ authors and maintainers of these projects.
 - **No-drift scheduling**: cron / daily / weekly / fixed interval with a
   persistent anchor — next runs are computed from the wall clock, never from
   "last run end + interval" (misfire policies: skip / run-immediately / run-next).
-- **Five providers**: rsync (tunasync-aligned defaults, `success_exit_codes`
-  23/24), script (SYNORA_* + TUNASYNC_* env for tunasync-scripts compatibility,
+- **Six providers**: rsync (tunasync-aligned defaults, `success_exit_codes`
+  23/24), two-stage-rsync (tunasync two-pass: a fast stage-1 subset by
+  profile, then the full sync), script (SYNORA_* + TUNASYNC_* env for tunasync-scripts compatibility,
   `SYNORA_SIZE=` size reporting), docker (`docker run`, storage mounted at /data,
   optional in-container command), git (`clone --mirror` + `remote update --prune`),
   and HTTP directory mirroring (tsumugu-style: per-file failures are skipped,

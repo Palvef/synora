@@ -40,6 +40,7 @@ impl HttpProvider {
                 self.delete,
                 16,
                 &ctx.cancel,
+                ctx.log_file.as_deref(),
             )
             .await
             .map_err(|e| match e {

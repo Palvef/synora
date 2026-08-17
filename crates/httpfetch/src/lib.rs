@@ -26,6 +26,33 @@ const MAX_CONCURRENT: usize = 8;
 /// skipped like any other single-file failure.
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Live progress lines are appended at most this often (per-run log noise cap).
+const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn synora_size(bytes: u64) -> String {
+    const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
+    let mut v = bytes as f64;
+    let mut u = 0;
+    while v >= 1024.0 && u < UNITS.len() - 1 {
+        v /= 1024.0;
+        u += 1;
+    }
+    format!("{v:.1} {}", UNITS[u])
+}
+
+/// Append a progress line to the run log (fire-and-forget; best-effort).
+fn append_log(log_file: Option<&std::path::Path>, line: &str) {
+    let Some(path) = log_file else { return };
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum FetchError {
     #[error("http error: {0}")]
@@ -118,6 +145,7 @@ impl Fetcher {
         storage: &Path,
         delete: bool,
         depth: u32,
+        log_file: Option<&Path>,
     ) -> Result<Plan, FetchError> {
         let parser: Box<dyn parser::IndexParser> = parser::parser_for(parser_name)
             .ok_or_else(|| FetchError::Http(format!("unknown index parser `{parser_name}`")))?;
@@ -130,6 +158,8 @@ impl Fetcher {
             plan: &mut plan,
             remote: &mut remote,
             seen: 0,
+            dirs: 0,
+            log_file,
         };
         planner.dir(base_url, "", depth.min(MAX_DEPTH)).await?;
         if delete {
@@ -152,6 +182,7 @@ impl Fetcher {
         &self,
         plan: &Plan,
         cancel: &CancellationToken,
+        log_file: Option<&std::path::Path>,
     ) -> Result<FetchStats, FetchError> {
         if cancel.is_cancelled() {
             return Err(FetchError::Cancelled);
@@ -160,6 +191,27 @@ impl Fetcher {
             total_size_hint: plan.total_size_hint,
             ..FetchStats::default()
         };
+        let mut last_report = tokio::time::Instant::now();
+        let report = |log_file: Option<&std::path::Path>, s: &FetchStats| {
+            append_log(
+                log_file,
+                &format!(
+                    "progress: downloaded {} files ({}) skipped {} deleted {}",
+                    s.files_downloaded,
+                    synora_size(s.downloaded_bytes),
+                    s.files_skipped,
+                    s.files_deleted
+                ),
+            );
+        };
+        append_log(
+            log_file,
+            &format!(
+                "planning done: {} downloads, {} deletes",
+                plan.downloads.len(),
+                plan.deletes.len()
+            ),
+        );
         let sem = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT));
         let mut tasks = Vec::with_capacity(plan.downloads.len());
         for (url, dest) in &plan.downloads {
@@ -202,7 +254,12 @@ impl Fetcher {
                     stats.files_skipped += 1;
                 }
             }
+            if last_report.elapsed() >= PROGRESS_INTERVAL {
+                report(log_file, &stats);
+                last_report = tokio::time::Instant::now();
+            }
         }
+        report(log_file, &stats);
         if cancelled {
             return Err(FetchError::Cancelled);
         }
@@ -231,6 +288,8 @@ impl Fetcher {
     }
 
     /// Convenience: [`Fetcher::plan`] then [`Fetcher::execute`].
+    /// `log_file`, when given, receives live progress lines (best-effort).
+    #[allow(clippy::too_many_arguments)]
     pub async fn sync(
         &self,
         base_url: &str,
@@ -239,11 +298,12 @@ impl Fetcher {
         delete: bool,
         depth: u32,
         cancel: &CancellationToken,
+        log_file: Option<&Path>,
     ) -> Result<FetchStats, FetchError> {
         let plan = self
-            .plan(base_url, parser_name, storage, delete, depth)
+            .plan(base_url, parser_name, storage, delete, depth, log_file)
             .await?;
-        self.execute(&plan, cancel).await
+        self.execute(&plan, cancel, log_file).await
     }
 }
 
@@ -263,10 +323,19 @@ struct Planner<'a> {
     plan: &'a mut Plan,
     remote: &'a mut HashSet<String>,
     seen: usize,
+    dirs: usize,
+    log_file: Option<&'a Path>,
 }
 
 impl Planner<'_> {
     async fn dir(&mut self, url: &str, dir_rel: &str, depth: u32) -> Result<(), FetchError> {
+        self.dirs += 1;
+        if self.dirs.is_multiple_of(20) {
+            append_log(
+                self.log_file,
+                &format!("planning: listed {} entries so far (at {url})", self.seen),
+            );
+        }
         let body = self
             .fetcher
             .client
@@ -687,7 +756,7 @@ mod tests {
         let fetcher = Fetcher::new().unwrap();
         let cancel = CancellationToken::new();
         let stats = fetcher
-            .sync(&base, "nginx", &storage, false, 3, &cancel)
+            .sync(&base, "nginx", &storage, false, 3, &cancel, None)
             .await
             .unwrap();
         assert_eq!(stats.files_downloaded, 3);
@@ -728,7 +797,7 @@ mod tests {
         let fetcher = Fetcher::new().unwrap();
         let cancel = CancellationToken::new();
         let stats = fetcher
-            .sync(&base, "nginx", &storage, false, 3, &cancel)
+            .sync(&base, "nginx", &storage, false, 3, &cancel, None)
             .await
             .unwrap();
         assert_eq!(stats.files_downloaded, 1);
@@ -764,14 +833,14 @@ mod tests {
         let cancel = CancellationToken::new();
         // delete=false: extras stay.
         let stats = fetcher
-            .sync(&base, "nginx", &storage, false, 2, &cancel)
+            .sync(&base, "nginx", &storage, false, 2, &cancel, None)
             .await
             .unwrap();
         assert_eq!(stats.files_deleted, 0);
         assert!(storage.join("stale.txt").exists());
         // delete=true: stale.txt is gone, hello.txt (still upstream) stays.
         let stats = fetcher
-            .sync(&base, "nginx", &storage, true, 2, &cancel)
+            .sync(&base, "nginx", &storage, true, 2, &cancel, None)
             .await
             .unwrap();
         assert_eq!(stats.files_deleted, 1);
@@ -795,7 +864,7 @@ mod tests {
         let fetcher = Fetcher::new().unwrap();
         let cancel = CancellationToken::new();
         let stats = fetcher
-            .sync(&base, "nginx", &storage, false, 2, &cancel)
+            .sync(&base, "nginx", &storage, false, 2, &cancel, None)
             .await
             .unwrap();
         assert_eq!(stats.files_downloaded, 1);
@@ -827,7 +896,7 @@ mod tests {
         let fetcher = Fetcher::new().unwrap();
         let cancel = CancellationToken::new();
         let stats = fetcher
-            .sync(&base, "nginx", &storage, true, 2, &cancel)
+            .sync(&base, "nginx", &storage, true, 2, &cancel, None)
             .await
             .unwrap();
         assert_eq!(stats.files_downloaded, 1);
@@ -863,7 +932,7 @@ mod tests {
         let storage = unique_dir();
         let fetcher = Fetcher::new().unwrap();
         let plan = fetcher
-            .plan(&base, "nginx", &storage, false, 2)
+            .plan(&base, "nginx", &storage, false, 2, None)
             .await
             .unwrap();
         assert_eq!(plan.downloads.len(), 1);
@@ -884,7 +953,7 @@ mod tests {
         let storage = unique_dir();
         let fetcher = Fetcher::new().unwrap();
         let plan = fetcher
-            .plan(&base, "nginx", &storage, false, 2)
+            .plan(&base, "nginx", &storage, false, 2, None)
             .await
             .unwrap();
         assert_eq!(plan.downloads.len(), 1);
@@ -898,7 +967,7 @@ mod tests {
         let storage = unique_dir();
         let fetcher = Fetcher::new().unwrap();
         let plan = fetcher
-            .plan(&base, "nginx", &storage, false, 0)
+            .plan(&base, "nginx", &storage, false, 0, None)
             .await
             .unwrap();
         assert_eq!(plan.downloads.len(), 1);
@@ -914,13 +983,15 @@ mod tests {
         let fetcher = Fetcher::new().unwrap();
         let cancel = CancellationToken::new();
         let plan = fetcher
-            .plan(&base, "nginx", &storage, false, 2)
+            .plan(&base, "nginx", &storage, false, 2, None)
             .await
             .unwrap();
         assert_eq!(plan.downloads.len(), 1);
         let cancel2 = cancel.clone();
         let handle =
-            tokio::spawn(async move { Fetcher::new().unwrap().execute(&plan, &cancel2).await });
+            tokio::spawn(
+                async move { Fetcher::new().unwrap().execute(&plan, &cancel2, None).await },
+            );
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         cancel.cancel();
         let result = handle.await.unwrap();
@@ -942,6 +1013,7 @@ mod tests {
                 false,
                 1,
                 &cancel,
+                None,
             )
             .await
             .unwrap_err();

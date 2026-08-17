@@ -59,8 +59,9 @@ jobs:
           VER: ${{ steps.version.outputs.value }}
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf ../../../synora-$VER-${{ matrix.target }}.tar.gz \
-            synora synora-manager synora-worker
+          for b in synora synora-manager synora-worker; do
+            tar czf ../../../$b-$VER-${{ matrix.target }}.tar.gz $b
+          done
           cd ../../..
 
       - uses: actions/upload-artifact@v4
@@ -68,7 +69,8 @@ jobs:
           name: synora-${{ matrix.target }}
           path: |
             synora-*.tar.gz
-            synora-*.zip
+            synora-manager-*.tar.gz
+            synora-worker-*.tar.gz
           if-no-files-found: error
 
   publish:
@@ -94,4 +96,6 @@ jobs:
           name: v${{ steps.version.outputs.value }}
           files: |
             artifacts/synora-*.tar.gz
+            artifacts/synora-manager-*.tar.gz
+            artifacts/synora-worker-*.tar.gz
           generate_release_notes: true

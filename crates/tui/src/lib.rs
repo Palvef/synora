@@ -529,7 +529,7 @@ fn render_input(f: &mut Frame, app: &App) {
         Input::JobName => (" New job ", "job name: ", ""),
         Input::WorkerSelect { .. } => (" Assign worker ", "number of the worker above (Enter confirms): ", ""),
         Input::SpecValue { field, .. } => (" Edit field ", field.as_str(), ""),
-        Input::JobProvider { .. } => (" New job ", "provider (1=rsync 2=http 3=git 4=docker 5=script, or type it): ", ""),
+        Input::JobProvider { .. } => (" New job ", "provider (1=rsync 2=two-stage-rsync 3=http 4=git 5=docker 6=script, or type it): ", ""),
         Input::JobUpstream { .. } => (" New job ", "upstream (rsync://… / http://… / git url / path): ", ""),
         Input::JobStorage { .. } => (" New job ", "storage path: ", ""),
         Input::JobSchedule { .. } => (" New job ", "schedule (1=manual 2=interval 6h 3=daily 03:00 4=interval 1d, or type cron/interval/daily): ", "Enter = create"),
@@ -644,7 +644,11 @@ fn upsert_proxy_section(
     }
     let new_text = if let Some(start) = text.find(&format!("[proxy.{name}]")) {
         // Replace the existing section: from its header to the next
-        // `[section]` header (keep that newline) or EOF.
+        // `[section]` header (keep that newline) or EOF. The leading
+        // newline of `section` is only the ADD-branch separator —
+        // `text[..start]` already ends with the newline before the
+        // header, so both ends must be trimmed or every replace
+        // inserts one more blank line (idempotency: run N+1 == run N).
         let end = text[start..]
             .find("\n[")
             .map(|i| start + i)
@@ -652,11 +656,21 @@ fn upsert_proxy_section(
         format!(
             "{}{}{}",
             &text[..start],
-            section.trim_end_matches('\n'),
-            &text[end..]
+            section.trim_matches('\n'),
+            // Mid-file the next `[` header keeps one newline; at EOF keep
+            // exactly one trailing newline (else add-then-replace would
+            // differ by one byte and never stabilize).
+            if end == text.len() {
+                "\n"
+            } else {
+                &text[end..]
+            }
         )
     } else {
-        format!("{text}{section}")
+        // Append with exactly one blank-line separator, even when the
+        // file does not end with a newline.
+        let sep = if text.ends_with('\n') { "" } else { "\n" };
+        format!("{text}{sep}{section}")
     };
     std::fs::write(path, new_text).map_err(|e| format!("write {}: {e}", path.display()))
 }
@@ -975,10 +989,11 @@ fn json_scalar(v: &serde_json::Value) -> String {
 fn pick_provider(input: &str) -> String {
     match input {
         "1" => "rsync".into(),
-        "2" => "http".into(),
-        "3" => "git".into(),
-        "4" => "docker".into(),
-        "5" => "script".into(),
+        "2" => "two-stage-rsync".into(),
+        "3" => "http".into(),
+        "4" => "git".into(),
+        "5" => "docker".into(),
+        "6" => "script".into(),
         other => other.to_string(),
     }
 }
@@ -1049,7 +1064,11 @@ pub fn run(
             let mut tick = tokio::time::interval(Duration::from_secs(2));
             loop {
                 tick.tick().await;
-                let mut s = snap.lock().await;
+                // Fetch into a local snapshot; the mutex is only held for
+                // the brief clone and the final swap. Holding it across
+                // the awaits below froze the render loop (which blocks on
+                // the same mutex) for every HTTP round-trip.
+                let mut s = snap.lock().await.clone();
                 fetch(&client, &mut s).await;
                 let idx = selected_shared.load(Ordering::Relaxed);
                 let name = s.jobs.get(idx).map(|j| j.name.clone());
@@ -1074,6 +1093,7 @@ pub fn run(
                         }
                     }
                 }
+                *snap.lock().await = s;
             }
         });
     }
@@ -1632,6 +1652,45 @@ mod tests {
         assert_eq!(text.matches("[proxy.cf-warp]").count(), 1);
         // Other sections survive.
         assert!(text.contains("[daemon]"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn proxy_section_upsert_is_idempotent() {
+        let dir = std::env::temp_dir().join(format!("synora-tui-idem-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("synora.toml");
+        let seed = "[proxy.a]\ntype = \"socks5h\"\nurl = \"u1\"\n\n[proxy.b]\ntype = \"http\"\nurl = \"u2\"\n";
+        std::fs::write(&path, seed).unwrap();
+
+        // Existing section: two consecutive upserts must leave the file
+        // unchanged (each TUI open re-registers cf-warp).
+        upsert_proxy_section(&path, "a", "socks5h", "u1", None).unwrap();
+        let once = std::fs::read_to_string(&path).unwrap();
+        upsert_proxy_section(&path, "a", "socks5h", "u1", None).unwrap();
+        let twice = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            once, twice,
+            "replace must be idempotent:\n{once}\nvs\n{twice}"
+        );
+
+        // New section: one call adds it with exactly one blank-line
+        // separator; a second call (which takes the replace path) must
+        // leave the file unchanged.
+        upsert_proxy_section(&path, "c", "http", "u3", None).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("\n\n[proxy.c]\n"),
+            "new section needs one blank line separator: {text}"
+        );
+        assert_eq!(text.matches("[proxy.c]").count(), 1);
+        upsert_proxy_section(&path, "c", "http", "u3", None).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            text,
+            "add-then-replace must be idempotent"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

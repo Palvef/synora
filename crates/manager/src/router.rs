@@ -767,6 +767,7 @@ async fn list_jobs(
                 .as_ref()
                 .map(|j| match &j.provider {
                     synora_core::ProviderConfig::Rsync { .. } => "rsync",
+                    synora_core::ProviderConfig::TwoStageRsync { .. } => "two-stage-rsync",
                     synora_core::ProviderConfig::Script { .. } => "script",
                     synora_core::ProviderConfig::Docker { .. } => "docker",
                     synora_core::ProviderConfig::Git { .. } => "git",

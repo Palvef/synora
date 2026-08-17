@@ -155,6 +155,8 @@ pub struct JobDoc {
     pub options: Vec<String>,
     #[serde(default)]
     pub exclude: Vec<String>,
+    // two-stage-rsync (tunasync stage1_profile)
+    pub stage1_profile: Option<String>,
     // script
     pub command: Option<String>,
     // docker

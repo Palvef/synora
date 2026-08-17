@@ -100,6 +100,18 @@ pub enum ProviderConfig {
         #[serde(default)]
         branch: Option<String>,
     },
+    TwoStageRsync {
+        /// Extra rsync arguments appended to the stage-2 defaults.
+        #[serde(default)]
+        options: Vec<String>,
+        /// `--exclude=PATTERN` entries (applied to both stages).
+        #[serde(default)]
+        exclude: Vec<String>,
+        /// Stage-1 subset profile (tunasync `stage1_profile`): debian |
+        /// debian-oldstyle.
+        #[serde(default)]
+        stage1_profile: String,
+    },
     Http {
         /// Directory-listing parser name (spec §14): nginx|apache|caddy|s3|
         /// directory-listing|fallback.

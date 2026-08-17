@@ -58,7 +58,7 @@
 | `name` | `string` | 必填 | 任务名（唯一） |
 | `enabled` | `bool` | `true` | 是否启用 |
 | `worker` | `string` | — | 指定 worker id 或 worker 组标签（不填 = 按 `resources` 标签自动选） |
-| `provider` | `"rsync"`/`"script"`/`"docker"`/`"git"`/`"http"` | 必填 | 同步方式 |
+| `provider` | `"rsync"`/`"two-stage-rsync"`/`"script"`/`"docker"`/`"git"`/`"http"` | 必填 | 同步方式 |
 | `upstream` | `string` | 按 provider | 上游地址（rsync://…、http(s)://…、git 地址、本地路径） |
 | `storage` | `string` | 必填 | 仓库存储路径 |
 | `mirror_subdir` | `string` | — | tunasync 同名字段：实际存储 = `<storage>/<mirror_subdir>` |
@@ -91,6 +91,17 @@
 
 默认 argv：`rsync -aH --delete --delete-delay --delay-updates --safe-links --timeout=120 --stats`；
 上游为 `rsync://` 时追加 `--contimeout=120`。
+
+### two-stage-rsync（与 tunasync 的 two-stage-rsync provider 一致）
+
+两遍同步：**阶段 1** 用 profile 过滤器先同步一小部分可发布子集（`-aH --no-o --no-g
+--safe-links --stats` + profile 过滤规则，必须退出码 0，失败即任务失败）；**阶段 2**
+完整同步（追加 `--delete --delete-after --delay-updates` + job 的 `options`，
+`success_exit_codes` 判定适用）。profile 规则取自 tunasync（ftpsync 参考实现）。
+
+| 字段 | 类型 | 默认 | 说明 |
+|---|---|---|---|
+| `stage1_profile` | `"debian"`/`"debian-oldstyle"` | `"debian"` | 阶段 1 的子集过滤 profile |
 
 | 配置项 | 类型 | 说明 |
 |---|---|---|

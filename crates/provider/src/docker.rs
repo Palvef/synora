@@ -88,6 +88,13 @@ impl DockerProvider {
             .arg(format!("TUNASYNC_MIRROR_NAME={}", ctx.job_name));
         if let Some(up) = &ctx.upstream {
             cmd.arg("-e").arg(format!("TUNASYNC_UPSTREAM_URL={up}"));
+            // ustcmirror/rsync-style sync.sh scripts read RSYNC_HOST /
+            // RSYNC_PATH instead of the tunasync variables.
+            if let Some(rest) = up.strip_prefix("rsync://") {
+                let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+                cmd.arg("-e").arg(format!("RSYNC_HOST={host}"));
+                cmd.arg("-e").arg(format!("RSYNC_PATH=/{path}"));
+            }
         }
         cmd.arg("-e")
             .arg(format!("TUNASYNC_WORKING_DIR={tunasync_workdir}"));

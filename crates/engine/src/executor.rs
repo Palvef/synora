@@ -500,6 +500,7 @@ impl provider::CgroupScopeRef for CgroupHandle {
 fn provider_name(job: &JobSpec) -> &'static str {
     match &job.provider {
         synora_core::ProviderConfig::Rsync { .. } => "rsync",
+        synora_core::ProviderConfig::TwoStageRsync { .. } => "two-stage-rsync",
         synora_core::ProviderConfig::Git { .. } => "git",
         synora_core::ProviderConfig::Script { .. } => "script",
         synora_core::ProviderConfig::Docker { .. } => "docker",

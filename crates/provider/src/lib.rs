@@ -238,6 +238,7 @@ impl ProviderError {
 /// One of the concrete providers.
 pub enum Provider {
     Rsync(rsync::RsyncProvider),
+    TwoStageRsync(rsync::TwoStageRsyncProvider),
     Script(script::ScriptProvider),
     Docker(docker::DockerProvider),
     Git(git::GitProvider),
@@ -248,6 +249,7 @@ impl Provider {
     pub fn name(&self) -> &'static str {
         match self {
             Provider::Rsync(_) => "rsync",
+            Provider::TwoStageRsync(_) => "two-stage-rsync",
             Provider::Script(_) => "script",
             Provider::Docker(_) => "docker",
             Provider::Git(_) => "git",
@@ -258,6 +260,7 @@ impl Provider {
     pub async fn sync(&self, ctx: &SyncContext) -> Result<SyncResult, ProviderError> {
         match self {
             Provider::Rsync(p) => p.sync(ctx).await,
+            Provider::TwoStageRsync(p) => p.sync(ctx).await,
             Provider::Script(p) => p.sync(ctx).await,
             Provider::Docker(p) => p.sync(ctx).await,
             Provider::Git(p) => p.sync(ctx).await,
@@ -295,6 +298,15 @@ pub fn build_provider(job: &JobSpec) -> Result<Provider, ProviderError> {
         })),
         synora_core::ProviderConfig::Git { branch } => Ok(Provider::Git(git::GitProvider {
             branch: branch.clone(),
+        })),
+        synora_core::ProviderConfig::TwoStageRsync {
+            options,
+            exclude,
+            stage1_profile,
+        } => Ok(Provider::TwoStageRsync(rsync::TwoStageRsyncProvider {
+            options: options.clone(),
+            exclude: exclude.clone(),
+            stage1_profile: stage1_profile.clone(),
         })),
         synora_core::ProviderConfig::Http { parser, delete } => {
             Ok(Provider::Http(http::HttpProvider {

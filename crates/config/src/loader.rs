@@ -1438,6 +1438,27 @@ fn resolve_provider(
                 exclude: doc.exclude.clone(),
             })
         }
+        "two-stage-rsync" => {
+            if doc.upstream.is_none() {
+                return Err(err(
+                    "provider = \"two-stage-rsync\" requires `upstream`".into()
+                ));
+            }
+            let stage1_profile = doc
+                .stage1_profile
+                .clone()
+                .unwrap_or_else(|| "debian".to_string());
+            if !["debian", "debian-oldstyle"].contains(&stage1_profile.as_str()) {
+                return Err(err(format!(
+                    "invalid stage1_profile `{stage1_profile}`: expected debian|debian-oldstyle"
+                )));
+            }
+            Ok(ProviderConfig::TwoStageRsync {
+                options: doc.options.clone(),
+                exclude: doc.exclude.clone(),
+                stage1_profile,
+            })
+        }
         "git" => {
             if doc.upstream.is_none() {
                 return Err(err(

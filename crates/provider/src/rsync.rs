@@ -94,8 +94,15 @@ impl RsyncProvider {
         // `-aH --delete --delete-delay --delay-updates --safe-links
         //  --timeout=120 --contimeout=120`), then exclude, then job options,
         // then --stats.
+        // -vh --no-o --no-g = tunasync's rsync verbosity: per-file transfer
+        // lines (-v, human sizes -h) without owner/group noise. The run log
+        // carries the same detail tunasync operators are used to.
         cmd.args([
             "-aH",
+            "-v",
+            "-h",
+            "--no-o",
+            "--no-g",
             "--delete",
             "--delete-delay",
             "--delay-updates",
@@ -136,49 +143,7 @@ impl RsyncProvider {
         }
         cmd.arg("--stats");
         cmd.arg(&source).arg(&dest);
-        cmd.stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        let mut child =
-            spawn_group(&mut cmd, ctx).map_err(|e| ProviderError::Spawn(format!("rsync: {e}")))?;
-        // Read pipes and wait for exit concurrently with cancellation: a
-        // long-running child keeps its pipes open, so a plain read_to_end
-        // before the select would swallow cancels until the child exits.
-        let stdout_pipe = child.stdout.take();
-        let stderr_pipe = child.stderr.take();
-        // Both pipes are drained CONCURRENTLY: reading stdout to EOF before
-        // touching stderr deadlocks when the child fills the stderr buffer.
-        // Memory keeps only the tail (the full stream is in the run log).
-        let log_file = ctx.log_file.clone();
-        let read_fut = async {
-            let (out, err) = tokio::join!(
-                crate::read_pipe_tee(stdout_pipe, &log_file),
-                crate::read_pipe_tee_err(stderr_pipe, &log_file),
-            );
-            (out, err)
-        };
-        tokio::pin!(read_fut);
-        let stdout: Vec<u8>;
-        let stderr: Vec<u8>;
-        tokio::select! {
-            _ = ctx.cancel.cancelled() => {
-                kill_group(&mut child).await;
-                return Err(ProviderError::Cancelled);
-            }
-            r = &mut read_fut => {
-                (stdout, stderr) = r;
-            }
-        }
-        let status = tokio::select! {
-            _ = ctx.cancel.cancelled() => {
-                kill_group(&mut child).await;
-                return Err(ProviderError::Cancelled);
-            }
-            r = child.wait() => r.map_err(|e| ProviderError::Other(e.to_string()))?,
-        };
-        cancelled_after_wait(ctx, &mut child).await?;
-        let code = status.code().unwrap_or(-1);
+        let (code, stdout, stderr) = run_rsync(ctx, &mut cmd).await?;
         let (transferred, total_size) = Self::parse_stats(&stdout);
         let result = SyncResult {
             exit_code: Some(code),
@@ -201,6 +166,244 @@ impl RsyncProvider {
             Ok(result)
         } else {
             // The tool's own output belongs in the run log — attach it.
+            let out = String::from_utf8_lossy(&result.stdout);
+            let err = String::from_utf8_lossy(&result.stderr);
+            let mut detail = err.trim().to_string();
+            if detail.is_empty() {
+                detail = out.trim().to_string();
+            } else if !out.trim().is_empty() {
+                detail.push_str(" | stdout: ");
+                detail.push_str(out.trim());
+            }
+            Err(ProviderError::Other(format!(
+                "rsync exited with {code}{}",
+                if detail.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", detail.chars().take(8000).collect::<String>())
+                }
+            )))
+        }
+    }
+}
+
+/// Shared tail: spawn rsync, drain pipes concurrently, wait, return
+/// (exit code, stdout, stderr). Cancellation kills the whole group.
+async fn run_rsync(
+    ctx: &SyncContext,
+    cmd: &mut Command,
+) -> Result<(i32, Vec<u8>, Vec<u8>), ProviderError> {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child =
+        spawn_group(cmd, ctx).map_err(|e| ProviderError::Spawn(format!("rsync: {e}")))?;
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    // Both pipes are drained CONCURRENTLY (sequential reads deadlock on a
+    // full pipe buffer); memory keeps only the tail, the run log has it all.
+    let log_file = ctx.log_file.clone();
+    let read_fut = async {
+        let (out, err) = tokio::join!(
+            crate::read_pipe_tee(stdout_pipe, &log_file),
+            crate::read_pipe_tee_err(stderr_pipe, &log_file),
+        );
+        (out, err)
+    };
+    tokio::pin!(read_fut);
+    let stdout: Vec<u8>;
+    let stderr: Vec<u8>;
+    tokio::select! {
+        _ = ctx.cancel.cancelled() => {
+            kill_group(&mut child).await;
+            return Err(ProviderError::Cancelled);
+        }
+        r = &mut read_fut => {
+            (stdout, stderr) = r;
+        }
+    }
+    let status = tokio::select! {
+        _ = ctx.cancel.cancelled() => {
+            kill_group(&mut child).await;
+            return Err(ProviderError::Cancelled);
+        }
+        r = child.wait() => r.map_err(|e| ProviderError::Other(e.to_string()))?,
+    };
+    cancelled_after_wait(ctx, &mut child).await?;
+    Ok((status.code().unwrap_or(-1), stdout, stderr))
+}
+
+/// tunasync two-stage-rsync stage-1 profiles (subset published fast before
+/// the full pass). Ref: tuna/tunasync worker/two_stage_rsync_provider.go.
+const STAGE1_PROFILES: &[(&str, &[&str])] = &[
+    (
+        "debian",
+        &[
+            "--include=*.diff/",
+            "--include=by-hash/",
+            "--exclude=*.diff/Index",
+            "--exclude=Contents*",
+            "--exclude=Packages*",
+            "--exclude=Sources*",
+            "--exclude=Release*",
+            "--exclude=InRelease",
+            "--exclude=i18n/*",
+            "--exclude=dep11/*",
+            "--exclude=installer-*/current",
+            "--exclude=ls-lR*",
+        ],
+    ),
+    (
+        "debian-oldstyle",
+        &[
+            "--exclude=Packages*",
+            "--exclude=Sources*",
+            "--exclude=Release*",
+            "--exclude=InRelease",
+            "--exclude=i18n/*",
+            "--exclude=ls-lR*",
+            "--exclude=dep11/*",
+        ],
+    ),
+];
+
+/// Two-stage rsync (tunasync convention): stage 1 syncs a small publishable
+/// subset using the profile filters (must exit 0), stage 2 syncs the full
+/// mirror (success_exit_codes apply). A stage-1 failure aborts the run.
+pub struct TwoStageRsyncProvider {
+    pub options: Vec<String>,
+    pub exclude: Vec<String>,
+    pub stage1_profile: String,
+}
+
+impl TwoStageRsyncProvider {
+    pub async fn sync(&self, ctx: &SyncContext) -> Result<SyncResult, ProviderError> {
+        let upstream = ctx.upstream.as_deref().ok_or_else(|| {
+            ProviderError::Config("two-stage-rsync requires `upstream`".to_string())
+        })?;
+        let profile: &[&str] = STAGE1_PROFILES
+            .iter()
+            .find(|(name, _)| *name == self.stage1_profile)
+            .map(|(_, f)| *f)
+            .ok_or_else(|| {
+                ProviderError::Config(format!(
+                    "unknown stage1_profile `{}`: expected debian|debian-oldstyle",
+                    self.stage1_profile
+                ))
+            })?;
+        let mut source = upstream.to_string();
+        if !source.ends_with('/') {
+            source.push('/');
+        }
+        let dest = ctx
+            .storage
+            .to_str()
+            .ok_or_else(|| ProviderError::Config("storage path is not UTF-8".to_string()))?
+            .to_string()
+            + "/";
+
+        // Shared tail: connection timeout (daemon upstreams), excludes,
+        // proxy env, egress, family, stats, source and dest.
+        let tail = |cmd: &mut Command, with_excludes: bool| {
+            if upstream.starts_with("rsync://") {
+                cmd.arg("--contimeout=120");
+            }
+            if with_excludes {
+                for pat in &self.exclude {
+                    cmd.arg(format!("--exclude={pat}"));
+                }
+                if let Some(max) = ctx.job.safety.max_delete_files {
+                    cmd.arg(format!("--max-delete={max}"));
+                }
+            }
+            for (k, v) in &ctx.proxy_env {
+                cmd.env(k, v);
+            }
+            if let Some(addr) = &ctx.egress_address {
+                cmd.arg("--address").arg(addr);
+            }
+            match ctx.family.as_str() {
+                "ipv4" => {
+                    cmd.arg("--ipv4");
+                }
+                "ipv6" => {
+                    cmd.arg("--ipv6");
+                }
+                _ => {}
+            }
+            cmd.arg("--stats");
+            cmd.arg(&source).arg(&dest);
+        };
+
+        // Stage 1: the publishable subset (tunasync stage1Options + profile).
+        let mut cmd = Command::new("rsync");
+        cmd.args([
+            "-aH",
+            "--no-o",
+            "--no-g",
+            "--filter",
+            "risk .~tmp~/",
+            "--exclude",
+            ".~tmp~/",
+            "--safe-links",
+            "--timeout=120",
+        ]);
+        for f in profile {
+            cmd.arg(f);
+        }
+        tail(&mut cmd, false);
+        let (code, _out, err) = run_rsync(ctx, &mut cmd).await?;
+        if code != 0 {
+            let detail = String::from_utf8_lossy(&err).trim().to_string();
+            return Err(ProviderError::Other(format!(
+                "stage 1 rsync exited with {code}{}",
+                if detail.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", detail.chars().take(8000).collect::<String>())
+                }
+            )));
+        }
+
+        // Stage 2: the full mirror (tunasync stage2Options + job options).
+        let mut cmd = Command::new("rsync");
+        cmd.args([
+            "-aH",
+            "--no-o",
+            "--no-g",
+            "--filter",
+            "risk .~tmp~/",
+            "--exclude",
+            ".~tmp~/",
+            "--delete",
+            "--delete-after",
+            "--delay-updates",
+            "--safe-links",
+            "--timeout=120",
+        ]);
+        for opt in &self.options {
+            cmd.arg(opt);
+        }
+        tail(&mut cmd, true);
+        let (code, stdout, stderr) = run_rsync(ctx, &mut cmd).await?;
+        let (transferred, total_size) = RsyncProvider::parse_stats(&stdout);
+        let result = SyncResult {
+            exit_code: Some(code),
+            bytes_transferred: transferred,
+            size_hint: total_size,
+            stdout,
+            stderr,
+            ..Default::default()
+        };
+        if RsyncProvider::is_success_exit(code, &ctx.job.success_exit_codes) {
+            let mut result = result;
+            if code != 0 {
+                result.message = Some(format!(
+                    "partial transfer (rsync exit {code}, counted as success per success_exit_codes)"
+                ));
+            }
+            Ok(result)
+        } else {
             let out = String::from_utf8_lossy(&result.stdout);
             let err = String::from_utf8_lossy(&result.stderr);
             let mut detail = err.trim().to_string();
