@@ -1,18 +1,39 @@
 # Synora 0.1.2
 
-## 新增功能
+## New features
 
-- **two-stage rsync 同步方式**：两遍同步——先按 profile 快速同步可发布子集（失败即中止），再完整同步全量内容
-- **手动触发任务实时开始**：手动 run 的任务带高优先级直接插队，worker 空闲时快速心跳领取，不必等积压队列
-- **http 同步增强**：未变化的文件不重复下载（按大小/时间比对）；下载并发线程数可配（`threads` 字段，默认 8）；目录列表中的软链接会被镜像到本地（幂等、不覆盖已有路径）；规划与下载阶段实时进度日志
-- **全部同步方式的实时日志**：rsync / two-stage / script / docker / git / http 的输出与进度实时写入 run log
-- **rsync 日志逐文件详细输出**（与单 rsync 一致的人类可读格式）
+- **Two-stage rsync sync**: two passes — a fast stage that publishes a
+  subset of the mirror first (per-profile filters, aborts the run on
+  failure), then a full pass that syncs everything
+- **Operator-triggered runs start immediately**: manually started runs
+  get priority over the scheduled backlog, and idle workers poll faster,
+  so a forced run no longer waits behind the queue
+- **HTTP sync improvements**: unchanged files are never re-downloaded
+  (size/mtime comparison); the download concurrency is configurable
+  (`threads` field, default 8); symlinks shown by fancyindex listings are
+  mirrored locally (idempotent, existing paths are never overwritten);
+  live progress lines during both planning and downloading
+- **Live logs for every sync method**: rsync / two-stage / script /
+  docker / git / http output and progress are written to the run log in
+  real time
+- **Verbose per-file rsync output** in the run log (human-readable
+  sizes, matching the plain rsync provider)
 
-## 修复
+## Fixes
 
-- TUI：每次打开不再给配置的网络段累积空行（写入幂等）；首屏不再卡顿（后台刷新不再跨网络请求持锁）；F5 日志页正常显示（客户端纯文本解析修复）
-- 派发队列：有活跃 run 的 job 不再被重复派发，避免阻塞其后的任务；run 历史按创建时间排序
-- 同步子进程防孤儿：超时/取消/重启后子进程必定被收割
-- 迁移脚本：git 类镜像存储路径携带各自名称（对应独立 dataset）；two-stage 任务正确映射
-- API token 强度校验（≥32 字节、拒绝占位符与重复值）；迁移 SQL 内嵌二进制，systemd 服务不依赖工作目录
-- CI 工作流最小权限（GITHUB_TOKEN 只读）
+- TUI: opening the console no longer accumulates blank lines in the
+  network sections of the config (idempotent writes); the first load no
+  longer freezes (the background refresh no longer holds the snapshot
+  lock across network calls); the F5 logs page renders again (the client
+  parsed the plain-text logs endpoint as JSON and always failed)
+- Dispatch queue: a job with an active run is no longer offered again
+  (a queued sibling could block everything behind it); run history is
+  ordered by creation time
+- Provider child processes are reaped even when a run future ends
+  abnormally (timeout, restart) — no more orphaned sync processes
+- Migration script: git-class mirrors keep their own name in the storage
+  path (matching their datasets); two-stage jobs map correctly
+- API tokens are validated at config load (at least 32 bytes, no
+  placeholders, no duplicates); migrations are embedded in the binary so
+  systemd services no longer depend on the working directory
+- CI workflow runs with a read-only GITHUB_TOKEN
