@@ -353,6 +353,68 @@ fn bad_values_rejected() {
 }
 
 #[test]
+fn http_threads_none_zero_and_some() {
+    // threads = missing/0/5: missing -> None (provider defaults to 8),
+    // 0 and 5 flow through verbatim.
+    let dir = temp_dir("httpthreads");
+    write(&dir, "synora.toml", "include = [\"jobs/*.toml\"]\n");
+    write(
+        &dir,
+        "jobs/none.toml",
+        &job(
+            "none",
+            "schedule = \"manual\"",
+            "provider = \"http\"\nparser = \"nginx\"\nupstream = \"https://x/pub/\"\nstorage = \"/srv/none\"",
+        ),
+    );
+    write(
+        &dir,
+        "jobs/zero.toml",
+        &job(
+            "zero",
+            "schedule = \"manual\"",
+            "provider = \"http\"\nparser = \"nginx\"\nthreads = 0\nupstream = \"https://x/pub/\"\nstorage = \"/srv/zero\"",
+        ),
+    );
+    write(
+        &dir,
+        "jobs/five.toml",
+        &job(
+            "five",
+            "schedule = \"manual\"",
+            "provider = \"http\"\nparser = \"nginx\"\nthreads = 5\nupstream = \"https://x/pub/\"\nstorage = \"/srv/five\"",
+        ),
+    );
+    let cfg = load(&dir).unwrap();
+    let threads = |name: &str| {
+        cfg.jobs
+            .iter()
+            .find(|j| j.name == name)
+            .unwrap()
+            .provider
+            .clone()
+    };
+    assert!(matches!(
+        threads("none"),
+        synora_core::ProviderConfig::Http { threads: None, .. }
+    ));
+    assert!(matches!(
+        threads("zero"),
+        synora_core::ProviderConfig::Http {
+            threads: Some(0),
+            ..
+        }
+    ));
+    assert!(matches!(
+        threads("five"),
+        synora_core::ProviderConfig::Http {
+            threads: Some(5),
+            ..
+        }
+    ));
+}
+
+#[test]
 fn timeout_accepts_seconds_and_human() {
     let dir = temp_dir("timeout");
     write(

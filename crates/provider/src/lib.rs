@@ -335,11 +335,14 @@ pub fn build_provider(job: &JobSpec) -> Result<Provider, ProviderError> {
             exclude: exclude.clone(),
             stage1_profile: stage1_profile.clone(),
         })),
-        synora_core::ProviderConfig::Http { parser, delete } => {
-            Ok(Provider::Http(http::HttpProvider {
-                parser: parser.clone(),
-                delete: *delete,
-            }))
-        }
+        synora_core::ProviderConfig::Http {
+            parser,
+            delete,
+            threads,
+        } => Ok(Provider::Http(http::HttpProvider {
+            parser: parser.clone(),
+            delete: *delete,
+            threads: *threads,
+        })),
     }
 }

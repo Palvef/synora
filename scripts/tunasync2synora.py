@@ -62,9 +62,29 @@ def parse_list(value):
     return [v.strip().strip('"\'') for v in value.split(",") if v.strip()]
 
 
+def strip_tsumugu_threads(env_list):
+    """TUNASYNC_TSUMUGU_THREADS=N is tsumugu's download-concurrency knob; it
+    leaves the env list and becomes the http provider's `threads` field
+    instead. Returns (threads_value_or_None, env_without_it)."""
+    threads = None
+    kept = []
+    for e in env_list:
+        k, _, v = e.partition("=")
+        if k.strip().upper() == "TUNASYNC_TSUMUGU_THREADS":
+            threads = v.strip()
+        else:
+            kept.append(e)
+    return threads, kept
+
+
 def render_job(m, log_dir, storage_dir, global_docker_volumes, global_interval):
     lines = ["[[jobs]]", f"name = {toml_str(m['name'])}", "enabled = true", ""]
     provider = m.get("provider", "rsync")
+    # tsumugu's concurrency knob must not linger in the docker env: it
+    # becomes the job-level `threads` field (http provider).
+    threads, stripped_env = strip_tsumugu_threads(
+        parse_list(m.get("env")) + m.get("env_table", [])
+    )
 
     # --- schedule: tunasync interval (minutes) → Synora no-drift interval ---
     # A mirror without its own interval inherits the worker-level global
@@ -105,7 +125,7 @@ def render_job(m, log_dir, storage_dir, global_docker_volumes, global_interval):
             lines.append(f"image = {toml_str(m['docker_image'])}")
             lines.append(f"docker_command = [{toml_str(m.get('command', ''))}]")
             lines.append(f"upstream = {toml_str(m.get('upstream', ''))}")
-            env = parse_list(m.get("env")) + m.get("env_table", [])
+            env = list(stripped_env)
             # Fixed proxy envs migrate to the cf-warp exit (manager-shipped).
             proxy_env = [e for e in env if any(k in e.upper() for k in ("PROXY",))]
             if proxy_env:
@@ -143,7 +163,7 @@ def render_job(m, log_dir, storage_dir, global_docker_volumes, global_interval):
         lines.append('provider = "docker"')
         lines.append(f"image = {toml_str(image)}")
         lines.append(f"upstream = {toml_str(m.get('upstream', ''))}")
-        env = parse_list(m.get("env")) + m.get("env_table", [])
+        env = list(stripped_env)
         # Fixed proxy envs migrate to the cf-warp exit (manager-shipped).
         proxy_env = [e for e in env if any(k in e.upper() for k in ("PROXY",))]
         if proxy_env:
@@ -157,6 +177,11 @@ def render_job(m, log_dir, storage_dir, global_docker_volumes, global_interval):
             lines.append(f"volumes = {toml_list(volumes[1:])}")
     else:
         raise SystemExit(f"unsupported provider {provider!r} for mirror {m['name']}")
+
+    # tsumugu download concurrency -> http provider `threads` (job-level;
+    # ignored by non-http providers).
+    if threads is not None:
+        lines.append(f"threads = {threads}")
 
     # --- storage: relative path + storage section reference ---------------
     # tunasync semantics: the mirror lives under the worker's storage_dir

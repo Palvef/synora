@@ -176,6 +176,9 @@ pub struct JobDoc {
     pub parser: Option<String>,
     #[serde(default = "no")]
     pub delete: bool,
+    /// http provider: max concurrent downloads (tunasync
+    /// `TUNASYNC_TSUMUGU_THREADS`; None = 8, 0 clamped to 1).
+    pub threads: Option<u32>,
     // common
     pub upstream: Option<String>,
     pub storage: Option<String>,

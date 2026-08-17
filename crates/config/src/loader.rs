@@ -1502,6 +1502,7 @@ fn resolve_provider(
             Ok(ProviderConfig::Http {
                 parser: parser.to_string(),
                 delete: doc.delete,
+                threads: doc.threads,
             })
         }
         other => Err(err(format!(

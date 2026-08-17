@@ -13,13 +13,18 @@ pub struct Entry {
     pub size: Option<u64>,
     pub modified: Option<PrimitiveDateTime>,
     pub kind: EntryKind,
+    /// Link target when the listing format carries one; `None` = unknown
+    /// (tsumugu semantics: mirror the link under its own name).
+    pub symlink_target: Option<String>,
 }
 
-/// Whether the entry is a file or a subdirectory (dirs recurse).
+/// Whether the entry is a file, a subdirectory (dirs recurse), or a
+/// symlink (mirrored as a local symlink, never downloaded/recurse).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EntryKind {
     File,
     Dir,
+    Symlink,
 }
 
 /// A directory-listing parser (spec §14/§15).
@@ -49,9 +54,11 @@ impl From<nginx::RemoteEntry> for Entry {
             path: e.path,
             size: e.size,
             modified: e.modified,
+            symlink_target: e.symlink_target,
             kind: match e.kind {
                 nginx::EntryKind::File => EntryKind::File,
                 nginx::EntryKind::Dir => EntryKind::Dir,
+                nginx::EntryKind::Symlink => EntryKind::Symlink,
             },
         }
     }
@@ -102,6 +109,7 @@ impl IndexParser for CaddyParser {
                 path: i.name,
                 size: i.size,
                 modified: i.mod_time.as_deref().and_then(parse_mod_time),
+                symlink_target: None,
                 kind: if i.is_dir {
                     EntryKind::Dir
                 } else {
@@ -142,6 +150,7 @@ impl IndexParser for S3Parser {
                     EntryKind::File
                 },
                 path: key,
+                symlink_target: None,
             });
         }
 
@@ -156,6 +165,7 @@ impl IndexParser for S3Parser {
                     size: None,
                     modified: None,
                     kind: EntryKind::Dir,
+                    symlink_target: None,
                 });
             }
         }
@@ -298,6 +308,24 @@ mod tests {
     }
 
     #[test]
+    fn fancyindex_symlink_entries() {
+        // fancyindex marks symlinks with a trailing `@` in the displayed
+        // name (`@/` = link to a directory); the target is not in the page.
+        let html = r#"<html><body><table class="fancy">
+<tr><td class="n"><a href="../">Parent Directory</a>/</td><td></td></tr>
+<tr><td class="n"><a href="latest">latest@/</a></td><td class="m">2026-08-13 12:53</td><td class="s">-</td></tr>
+<tr><td class="n"><a href="current.tar.gz">current.tar.gz@</a></td><td class="m">2026-08-13 12:53</td><td class="s">123</td></tr>
+</table></body></html>"#;
+        let entries = NginxParser.parse(html.as_bytes());
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].path, "latest");
+        assert_eq!(entries[0].kind, EntryKind::Symlink);
+        assert_eq!(entries[0].symlink_target, None);
+        assert_eq!(entries[1].path, "current.tar.gz");
+        assert_eq!(entries[1].kind, EntryKind::Symlink);
+    }
+
+    #[test]
     fn apache_same_shape_as_nginx() {
         // mod_autoindex output has the same HTML shape; parse must agree.
         assert_eq!(
@@ -417,7 +445,7 @@ mod tests {
             let p = parser_for(name).unwrap_or_else(|| panic!("parser_for({name})"));
             assert_eq!(p.name(), name);
         }
-        assert!(parser_for("fancyindex").is_none());
+        assert!(parser_for("fancyindex").is_none()); // fancyindex HTML is nginx-parsed
         assert!(parser_for("").is_none());
     }
 }

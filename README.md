@@ -32,8 +32,9 @@ authors and maintainers of these projects.
   `SYNORA_SIZE=` size reporting), docker (`docker run`, storage mounted at /data,
   optional in-container command), git (`clone --mirror` + `remote update --prune`),
   and HTTP directory mirroring (tsumugu-style: per-file failures are skipped,
-  symlinks ignored, 30 s per-request timeout, unlimited run time unless a
-  timeout is set with 1m/1h/1d units).
+  local symlinks left alone, listing-marked symlinks mirrored as local links,
+  configurable download concurrency, 30 s per-request timeout, unlimited run
+  time unless a timeout is set with 1m/1h/1d units).
 - **Single machine or distributed**: `synora start` runs standalone (SQLite);
   `synora-manager` + N × `synora-worker` form a pull-model cluster (workers
   register, heartbeat every 15 s, claim assigned runs). PostgreSQL optional.

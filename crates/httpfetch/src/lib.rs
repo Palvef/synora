@@ -20,8 +20,10 @@ use tokio_util::sync::CancellationToken;
 const MAX_ENTRIES: usize = 200_000;
 /// Hard cap on recursion depth even when the caller asks for more.
 const MAX_DEPTH: u32 = 16;
-/// Max concurrent downloads during [`Fetcher::execute`].
-const MAX_CONCURRENT: usize = 8;
+/// Default max concurrent downloads during [`Fetcher::execute`]; override
+/// per fetcher via [`Fetcher::with_threads`] (tunasync
+/// `TUNASYNC_TSUMUGU_THREADS`).
+pub const DEFAULT_THREADS: usize = 8;
 /// Per-request timeout (listings and downloads alike); a timed-out file is
 /// skipped like any other single-file failure.
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -80,6 +82,9 @@ pub struct FetchStats {
     pub downloaded_bytes: u64,
     pub files_downloaded: u32,
     pub files_deleted: u32,
+    /// Local symlinks created (or left in place because they already
+    /// pointed at the right target).
+    pub files_symlinked: u32,
     /// Files skipped after a per-file failure (download error, timeout,
     /// failed delete) — a single bad file never aborts a sync.
     pub files_skipped: u32,
@@ -90,11 +95,13 @@ pub struct FetchStats {
     pub log_lines: Vec<String>,
 }
 
-/// A planned sync: what to download (url → destination) and what to delete.
+/// A planned sync: what to download (url → destination), what to delete,
+/// and which local symlinks to (re)create (destination → link target).
 #[derive(Debug, Default)]
 pub struct Plan {
     pub downloads: Vec<(String, PathBuf)>,
     pub deletes: Vec<PathBuf>,
+    pub symlinks: Vec<(PathBuf, String)>,
     // Planning internals feeding `total_size_hint`; not part of the public
     // shape so users can't fake a hint.
     size_sum: u64,
@@ -103,9 +110,11 @@ pub struct Plan {
 }
 
 /// HTTP fetcher: a reqwest client with rustls, redirects followed (max 10),
-/// no proxy by default, 30 s per-request timeout.
+/// no proxy by default, 30 s per-request timeout, up to `threads`
+/// concurrent downloads.
 pub struct Fetcher {
     client: reqwest::Client,
+    threads: usize,
 }
 
 impl Fetcher {
@@ -126,7 +135,15 @@ impl Fetcher {
         };
         Ok(Self {
             client: builder.build()?,
+            threads: DEFAULT_THREADS,
         })
+    }
+
+    /// Override max concurrent downloads (tunasync `TUNASYNC_TSUMUGU_THREADS`).
+    /// `0` is clamped to 1 — a zero-permit semaphore would deadlock.
+    pub fn with_threads(mut self, threads: usize) -> Self {
+        self.threads = threads.max(1);
+        self
     }
 
     /// Recursively fetch the index from `base_url` with the given parser and
@@ -174,11 +191,12 @@ impl Fetcher {
         Ok(plan)
     }
 
-    /// Execute a plan concurrently (max [`MAX_CONCURRENT`] in-flight, via a
+    /// Execute a plan concurrently (up to `self.threads` in-flight, via a
     /// tokio semaphore) with a cancel token. Each file downloads to
     /// `dest.partial` then renames into place; a failed file is warned about
-    /// and skipped, never fatal — only cancellation aborts the run. Summed
-    /// stats are returned.
+    /// and skipped, never fatal — only cancellation aborts the run. Planned
+    /// symlinks are (re)created after downloads and deletes. Summed stats
+    /// are returned.
     pub async fn execute(
         &self,
         plan: &Plan,
@@ -208,12 +226,13 @@ impl Fetcher {
         append_log(
             log_file,
             &format!(
-                "planning done: {} downloads, {} deletes",
+                "planning done: {} downloads, {} deletes, {} symlinks",
                 plan.downloads.len(),
-                plan.deletes.len()
+                plan.deletes.len(),
+                plan.symlinks.len()
             ),
         );
-        let sem = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT));
+        let sem = Arc::new(tokio::sync::Semaphore::new(self.threads));
         let mut tasks = Vec::with_capacity(plan.downloads.len());
         for (url, dest) in &plan.downloads {
             let client = self.client.clone();
@@ -284,6 +303,41 @@ impl Fetcher {
             }
             stats.files_deleted += 1;
             stats.log_lines.push(format!("deleted {}", path.display()));
+        }
+        // Symlink entries are mirrored after downloads and deletes so a
+        // stale regular file at the same path is gone before the link goes
+        // in. Idempotent: a local link already pointing at the target is
+        // left untouched.
+        #[cfg(unix)]
+        for (dest, target) in &plan.symlinks {
+            if cancel.is_cancelled() {
+                return Err(FetchError::Cancelled);
+            }
+            match ensure_symlink(dest, target).await {
+                Ok(true) => {
+                    stats.files_symlinked += 1;
+                    stats
+                        .log_lines
+                        .push(format!("symlinked {} -> {target}", dest.display()));
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!("skipping symlink {}: {}", dest.display(), error_chain(&e));
+                    stats.files_skipped += 1;
+                    stats.log_lines.push(format!(
+                        "skipped symlink {}: {}",
+                        dest.display(),
+                        error_chain(&e)
+                    ));
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        if !plan.symlinks.is_empty() {
+            tracing::warn!(
+                "skipping {} symlink entries (symlinks unsupported on this platform)",
+                plan.symlinks.len()
+            );
         }
         Ok(stats)
     }
@@ -365,7 +419,8 @@ impl Planner<'_> {
             } else {
                 format!("{dir_rel}/{}", entry.path)
             };
-            self.remote.insert(rel.trim_end_matches('/').to_string());
+            let rel_key = rel.trim_end_matches('/').to_string();
+            self.remote.insert(rel_key.clone());
             match entry.kind {
                 parser::EntryKind::Dir => {
                     if depth == 0 {
@@ -390,6 +445,21 @@ impl Planner<'_> {
                     }
                     self.plan.downloads.push((join(url, &entry.path), dest));
                 }
+                parser::EntryKind::Symlink => {
+                    // Mirrored as a local symlink, never downloaded; the
+                    // entry stays in the remote set so a matching local
+                    // link is neither re-created nor deleted. The target is
+                    // the listing's target when it has one, else the entry
+                    // name itself (tsumugu's "ignore symlinks" semantics
+                    // with no target info in the listing).
+                    let target = match entry.symlink_target.as_deref() {
+                        Some(t) if is_safe_rel(t) => t.to_string(),
+                        _ => entry.path.trim_end_matches('/').to_string(),
+                    };
+                    self.plan
+                        .symlinks
+                        .push((self.storage.join(&rel_key), target));
+                }
             }
         }
         Ok(())
@@ -398,16 +468,17 @@ impl Planner<'_> {
 
 /// Compare a remote file against local state: same size → unchanged (the
 /// documented lazy default); otherwise, when the parser provided `modified`
-/// and the local mtime matches it, treat as unchanged too. Symlinks are
-/// never followed (spec §103 / tsumugu): a symlink is not a matching copy,
-/// so it gets replaced by a regular file on the next sync.
+/// and the local mtime matches it, treat as unchanged too. A local symlink
+/// counts as "in place" (spec §103 / tsumugu: symlinks are ignored during
+/// syncing) — never downloaded into, never replaced.
 async fn local_matches(dest: &Path, entry: &parser::Entry) -> bool {
     let Ok(meta) = tokio::fs::symlink_metadata(dest).await else {
         return false;
     };
     if !meta.file_type().is_file() {
-        // Symlink (or other non-regular file): never treated as a copy.
-        return false;
+        // Symlink (or other non-regular file): left alone, treated as a
+        // match so the planner never plans a download for it.
+        return true;
     }
     if entry.size == Some(meta.len()) {
         return true;
@@ -423,8 +494,10 @@ async fn local_matches(dest: &Path, entry: &parser::Entry) -> bool {
 }
 
 /// Walk the local mirror; anything not present in the remote index is
-/// planned for deletion. Symlinks and leftover dirs are ignored, not
-/// deleted (tsumugu-style).
+/// planned for deletion — regular files and symlinks alike (a stale
+/// symlink is unlinked, its target untouched). Leftover dirs are ignored,
+/// not deleted. DirEntry::file_type does not follow symlinks, so the walk
+/// never recurses through one.
 async fn local_extras(
     storage: &Path,
     remote: &HashSet<String>,
@@ -434,14 +507,10 @@ async fn local_extras(
     while let Some(dir) = stack.pop() {
         let mut rd = tokio::fs::read_dir(&dir).await?;
         while let Some(entry) = rd.next_entry().await? {
-            // DirEntry::file_type does not follow symlinks.
             let ft = entry.file_type().await?;
-            if ft.is_symlink() {
-                continue;
-            }
             if ft.is_dir() {
                 stack.push(entry.path());
-            } else if ft.is_file() {
+            } else if ft.is_file() || ft.is_symlink() {
                 let path = entry.path();
                 let rel = path
                     .strip_prefix(storage)
@@ -543,6 +612,35 @@ async fn fetch_to_partial(
 /// the rename is atomic on the same filesystem.
 fn partial_path(dest: &Path) -> PathBuf {
     PathBuf::from(format!("{}.partial", dest.display()))
+}
+
+/// Create a symlink at `dest` pointing to `target` (unix). Idempotent:
+/// when `dest` is already a symlink with the same target, it is left as-is
+/// (returns false). Anything else already at `dest` is left alone — never
+/// clobber existing data (tsumugu's "skip symlink creation when the path
+/// exists" behavior).
+#[cfg(unix)]
+async fn ensure_symlink(dest: &Path, target: &str) -> Result<bool, FetchError> {
+    if let Ok(meta) = tokio::fs::symlink_metadata(dest).await {
+        if meta.file_type().is_symlink()
+            && tokio::fs::read_link(dest)
+                .await
+                .map(|cur| cur == Path::new(target))
+                .unwrap_or(false)
+        {
+            return Ok(false);
+        }
+        tracing::warn!(
+            "skipping symlink creation at {}: path exists and is not the expected symlink -> {target}",
+            dest.display()
+        );
+        return Ok(false);
+    }
+    if let Some(parent) = dest.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    std::os::unix::fs::symlink(target, dest)?;
+    Ok(true)
 }
 
 /// True when any component of `dest`'s parent chain is a symlink. Writing
@@ -886,17 +984,18 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn symlinks_are_ignored_and_replaced_by_regular_files() {
+    async fn local_symlinks_are_left_alone_and_strays_deleted() {
         let mirror = TestMirror::new(&[("lnk.txt", "remote-content")]);
         let base = spawn_server(mirror);
         let storage = unique_dir();
         let outside = unique_dir();
         let target = outside.join("target.txt");
         std::fs::write(&target, "TARGET-CONTENT").unwrap();
-        // lnk.txt is a symlink pointing outside the mirror: it must be
-        // replaced by a regular file, not written through.
+        // lnk.txt is a symlink pointing outside the mirror: it must NOT be
+        // downloaded into or replaced (tsumugu: symlinks are ignored).
         std::os::unix::fs::symlink(&target, storage.join("lnk.txt")).unwrap();
-        // stray.lnk is a symlink absent from the index: never deleted.
+        // stray.lnk is a symlink absent from the index: with delete=true it
+        // is unlinked (its target is never touched).
         std::os::unix::fs::symlink(&target, storage.join("stray.lnk")).unwrap();
         let fetcher = Fetcher::new().unwrap();
         let cancel = CancellationToken::new();
@@ -904,23 +1003,143 @@ mod tests {
             .sync(&base, "nginx", &storage, true, 2, &cancel, None)
             .await
             .unwrap();
-        assert_eq!(stats.files_downloaded, 1);
-        assert_eq!(stats.files_deleted, 0);
-        // lnk.txt is now a regular file with remote content.
-        let meta = std::fs::symlink_metadata(storage.join("lnk.txt")).unwrap();
-        assert!(meta.file_type().is_file(), "symlink must be replaced");
+        assert_eq!(stats.files_downloaded, 0);
+        assert_eq!(stats.files_deleted, 1);
+        // lnk.txt is still the symlink (same target, untouched).
+        assert_eq!(std::fs::read_link(storage.join("lnk.txt")).unwrap(), target);
+        // The symlink target was never touched; the stray symlink is gone.
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "TARGET-CONTENT");
+        assert!(std::fs::symlink_metadata(storage.join("stray.lnk")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlink_entries_are_planned_and_created() {
+        // fancyindex listing: `latest@/` is a symlink (dir target unknown).
+        let mut mirror = TestMirror::new(&[("v18.6/readme.txt", "18.6")]);
+        mirror.raw.insert(
+            String::new(),
+            "<table class=\"fancy\">\n\
+             <tr><td class=\"n\"><a href=\"v18.6/\">v18.6/</a></td><td class=\"m\">2026-08-11 18:42</td><td class=\"s\">-</td></tr>\n\
+             <tr><td class=\"n\"><a href=\"latest\">latest@/</a></td><td class=\"m\">2026-08-13 12:53</td><td class=\"s\">-</td></tr>\n\
+             <tr><td class=\"n\"><a href=\"README\">README</a></td><td class=\"m\">2026-08-13 12:53</td><td class=\"s\">1731</td></tr>\n\
+             </table>"
+                .to_string(),
+        );
+        let base = spawn_server(mirror);
+        let storage = unique_dir();
+        let fetcher = Fetcher::new().unwrap();
+        let cancel = CancellationToken::new();
+        // Symlink entry goes into plan.symlinks, never into downloads.
+        let plan = fetcher
+            .plan(&base, "nginx", &storage, false, 2, None)
+            .await
+            .unwrap();
         assert_eq!(
-            tokio::fs::read_to_string(storage.join("lnk.txt"))
+            plan.symlinks,
+            vec![(storage.join("latest"), "latest".to_string())]
+        );
+        assert!(plan
+            .downloads
+            .iter()
+            .all(|(url, _)| !url.contains("latest")));
+        let stats = fetcher.execute(&plan, &cancel, None).await.unwrap();
+        assert_eq!(stats.files_symlinked, 1);
+        assert_eq!(
+            std::fs::read_link(storage.join("latest")).unwrap(),
+            PathBuf::from("latest")
+        );
+        // Second run: same-target link is left in place (idempotent).
+        let plan = fetcher
+            .plan(&base, "nginx", &storage, false, 2, None)
+            .await
+            .unwrap();
+        let stats = fetcher.execute(&plan, &cancel, None).await.unwrap();
+        assert_eq!(stats.files_symlinked, 0);
+        assert_eq!(
+            std::fs::read_link(storage.join("latest")).unwrap(),
+            PathBuf::from("latest")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlink_entry_never_clobbers_existing_path() {
+        let mut mirror = TestMirror::new(&[("v18.6/readme.txt", "18.6")]);
+        mirror.raw.insert(
+            String::new(),
+            "<table class=\"fancy\">\n\
+             <tr><td class=\"n\"><a href=\"latest\">latest@/</a></td><td class=\"m\">2026-08-13 12:53</td><td class=\"s\">-</td></tr>\n\
+             </table>"
+                .to_string(),
+        );
+        let base = spawn_server(mirror);
+        let storage = unique_dir();
+        // A regular file squatting on the symlink's path is kept (warned
+        // about), never replaced — data safety over mirror fidelity.
+        std::fs::write(storage.join("latest"), "keep me").unwrap();
+        let fetcher = Fetcher::new().unwrap();
+        let cancel = CancellationToken::new();
+        let stats = fetcher
+            .sync(&base, "nginx", &storage, false, 2, &cancel, None)
+            .await
+            .unwrap();
+        assert_eq!(stats.files_symlinked, 0);
+        assert_eq!(
+            tokio::fs::read_to_string(storage.join("latest"))
                 .await
                 .unwrap(),
-            "remote-content"
+            "keep me"
         );
-        // The symlink target was never touched; the stray symlink survived.
-        assert_eq!(std::fs::read_to_string(&target).unwrap(), "TARGET-CONTENT");
-        assert!(std::fs::symlink_metadata(storage.join("stray.lnk"))
+    }
+
+    #[tokio::test]
+    async fn same_size_local_file_is_not_planned_for_download() {
+        let mirror = TestMirror::new(&[("hello.txt", "hello"), ("sub/world.txt", "world")]);
+        let base = spawn_server(mirror);
+        let storage = unique_dir();
+        std::fs::create_dir_all(storage.join("sub")).unwrap();
+        // Identical size (different content is irrelevant — size is the
+        // documented lazy compare).
+        std::fs::write(storage.join("hello.txt"), "HELLO").unwrap();
+        std::fs::write(storage.join("sub/world.txt"), "WORLD").unwrap();
+        let fetcher = Fetcher::new().unwrap();
+        let plan = fetcher
+            .plan(&base, "nginx", &storage, false, 2, None)
+            .await
+            .unwrap();
+        assert!(
+            plan.downloads.is_empty(),
+            "size-identical files must not enter the downloads list: {:?}",
+            plan.downloads
+        );
+    }
+
+    #[tokio::test]
+    async fn threads_zero_is_clamped_and_sync_still_works() {
+        let mirror = TestMirror::new(&[("a.txt", "a"), ("b.txt", "b")]);
+        let base = spawn_server(mirror);
+        let storage = unique_dir();
+        // A 0-permit semaphore would deadlock; with_threads clamps to 1.
+        let fetcher = Fetcher::new().unwrap().with_threads(0);
+        assert_eq!(fetcher.threads, 1);
+        let cancel = CancellationToken::new();
+        let stats = fetcher
+            .sync(&base, "nginx", &storage, false, 2, &cancel, None)
+            .await
+            .unwrap();
+        assert_eq!(stats.files_downloaded, 2);
+        // threads = 1 works too.
+        let storage2 = unique_dir();
+        let stats = Fetcher::new()
             .unwrap()
-            .file_type()
-            .is_symlink());
+            .with_threads(1)
+            .sync(&base, "nginx", &storage2, false, 2, &cancel, None)
+            .await
+            .unwrap();
+        assert_eq!(stats.files_downloaded, 2);
+        // Default stays 8.
+        assert_eq!(Fetcher::new().unwrap().threads, DEFAULT_THREADS);
     }
 
     #[tokio::test]

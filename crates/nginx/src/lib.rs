@@ -10,6 +10,9 @@ use time::{Date, Month, PrimitiveDateTime, Time};
 pub enum EntryKind {
     File,
     Dir,
+    /// fancyindex symlink entry (displayed with a trailing `@`); the link
+    /// target is not part of the listing, so `symlink_target` is `None`.
+    Symlink,
 }
 
 /// One entry of a directory listing (spec §14).
@@ -19,6 +22,10 @@ pub struct RemoteEntry {
     pub size: Option<u64>,
     pub modified: Option<PrimitiveDateTime>,
     pub kind: EntryKind,
+    /// Link target when the listing format carries one (none of the
+    /// HTML/JSON parsers does today); `None` = target unknown.
+    #[serde(default)]
+    pub symlink_target: Option<String>,
 }
 
 pub struct NginxParser;
@@ -57,19 +64,34 @@ impl NginxParser {
                 continue;
             }
             let (size, modified) = scan_trailing(trailing);
+            let (kind, path, symlink_target) = classify(name.trim(), &href);
             entries.push(RemoteEntry {
-                path: name.trim().to_string(),
+                path,
                 size,
                 modified,
-                kind: if href.ends_with('/') {
-                    EntryKind::Dir
-                } else {
-                    EntryKind::File
-                },
+                kind,
+                symlink_target,
             });
         }
         entries
     }
+}
+
+/// Entry kind + mirror path + link target from the href and the displayed
+/// name. nginx autoindex carries no symlink marker, so a symlink there is
+/// indistinguishable from a plain entry; fancyindex appends `@` to the
+/// displayed name (`name@`, or `name@/` when the link points at a
+/// directory — the href never gets the trailing slash).
+fn classify(display: &str, href: &str) -> (EntryKind, String, Option<String>) {
+    if href.ends_with('/') {
+        return (EntryKind::Dir, display.to_string(), None);
+    }
+    if let Some(stripped) = display.trim_end_matches('/').strip_suffix('@') {
+        // ponytail: a plain file genuinely named `foo@` is misread as a
+        // symlink (fancyindex would render it `foo@@`); acceptable cost.
+        return (EntryKind::Symlink, stripped.to_string(), None);
+    }
+    (EntryKind::File, display.to_string(), None)
 }
 
 fn is_listable(href: &str) -> bool {
@@ -253,6 +275,44 @@ mod tests {
         assert_eq!(entries[0].kind, EntryKind::Dir);
         assert_eq!(entries[1].path, "repomd.xml");
         assert_eq!(entries[1].size, Some(456));
+    }
+
+    #[test]
+    fn fancyindex_symlink_marker() {
+        // fancyindex marks symlinks with a trailing `@` (and `@/` for links
+        // to directories); the href carries no trailing slash for either.
+        let html = r#"<html><head><title>Index of /repo/</title></head><body>
+<table class="fancy">
+<tr><td class="n"><a href="../">Parent Directory</a>/</td><td></td></tr>
+<tr><td class="n"><a href="latest">latest@/</a></td><td class="m">2026-08-13 12:53</td><td class="s">-</td></tr>
+<tr><td class="n"><a href="current.tar.gz">current.tar.gz@</a></td><td class="m">2026-08-13 12:53</td><td class="s">123</td></tr>
+<tr><td class="n"><a href="repomd.xml">repomd.xml</a></td><td class="m">2026-08-16 10:00</td><td class="s">456</td></tr>
+</table></body></html>"#;
+        let entries = NginxParser::parse(html.as_bytes());
+        assert_eq!(entries.len(), 3);
+        let link = &entries[0];
+        assert_eq!(link.path, "latest");
+        assert_eq!(link.kind, EntryKind::Symlink);
+        assert_eq!(link.symlink_target, None);
+        let file_link = &entries[1];
+        assert_eq!(file_link.path, "current.tar.gz");
+        assert_eq!(file_link.kind, EntryKind::Symlink);
+        assert_eq!(entries[2].path, "repomd.xml");
+        assert_eq!(entries[2].kind, EntryKind::File);
+    }
+
+    #[test]
+    fn autoindex_does_not_mark_symlinks() {
+        // nginx autoindex has no symlink marker: `latest/` (a symlink to a
+        // directory upstream) is served as a plain dir entry.
+        let html = r#"<pre><a href="../">../</a>
+<a href="latest/">latest/</a>  13-Aug-2026 12:53  -
+<a href="README">README</a>  05-Jan-2026 14:31  1731
+</pre>"#;
+        let entries = NginxParser::parse(html.as_bytes());
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].kind, EntryKind::Dir);
+        assert_eq!(entries[1].kind, EntryKind::File);
     }
 
     #[test]
