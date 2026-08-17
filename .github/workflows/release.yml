@@ -93,12 +93,12 @@ jobs:
         run: find artifacts -type f | sort
 
       - name: Publish release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ steps.version.outputs.value }}
-          name: v${{ steps.version.outputs.value }}
-          files: |
-            artifacts/synora-*.tar.gz
-            artifacts/synora-manager-*.tar.gz
-            artifacts/synora-worker-*.tar.gz
-          generate_release_notes: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VER: ${{ steps.version.outputs.value }}
+        run: |
+          gh release create "v$VER" \
+            artifacts/synora-*.tar.gz \
+            artifacts/synora-manager-*.tar.gz \
+            artifacts/synora-worker-*.tar.gz \
+            --title "v$VER" --notes-file RELEASE_NOTES.md
