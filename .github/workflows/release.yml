@@ -22,7 +22,7 @@ jobs:
           - target: x86_64-unknown-linux-gnu
           - target: aarch64-unknown-linux-gnu
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Read version
         id: version
@@ -76,7 +76,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Read version
         id: version
