@@ -215,7 +215,7 @@ impl Engine {
     }
 
     /// Sync config-defined jobs + schedules into the DB (idempotent, keeps
-    /// interval anchors). Jobs removed from config get disabled.
+    /// interval anchors). Jobs removed from config are purged from every table.
     pub async fn sync_config(&self) -> Result<(), String> {
         let now = unix_now();
         let jobs: Vec<JobSpec> = self.live_jobs.read().unwrap().values().cloned().collect();
@@ -230,27 +230,40 @@ impl Engine {
             .map_err(|e| e.to_string())?
         {
             if !jobs.iter().any(|j| j.name == name) {
-                let _ = self
-                    .store
-                    .db()
-                    .execute(
-                        "UPDATE jobs SET enabled = 0 WHERE name = ?",
-                        &[name.clone().into()],
-                    )
-                    .await;
-                // Stop its schedule too — a disabled job must not keep
-                // dispatching expired next_runs.
-                let _ = self
-                    .store
-                    .db()
-                    .execute(
-                        "UPDATE schedules SET next_run = NULL WHERE job_name = ?",
-                        &[name.clone().into()],
-                    )
-                    .await;
+                self.forget_job(&name).await?;
             }
         }
         Ok(())
+    }
+
+    /// Drop a job from memory, metrics, logs, and every DB table.
+    pub async fn forget_job(&self, name: &str) -> Result<(), String> {
+        let _ = self.stop_job(name).await;
+        let _ = self.store.set_cancelling_by_job(name).await;
+        {
+            self.live_jobs.write().unwrap().remove(name);
+            self.job_locks.write().unwrap().remove(name);
+            self.failure_streak.lock().unwrap().remove(name);
+            self.active.lock().unwrap().remove(name);
+            self.active_runs.lock().unwrap().remove(name);
+        }
+        self.store
+            .purge_job(name)
+            .await
+            .map_err(|e| e.to_string())?;
+        self.metrics.remove_job(name);
+        let log_dir = self.cfg.daemon.log_dir.join(name);
+        let _ = std::fs::remove_dir_all(log_dir);
+        tracing::info!("job `{name}` purged from database and runtime");
+        Ok(())
+    }
+
+    pub fn config_path(&self) -> Option<std::path::PathBuf> {
+        self.config_source
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|(path, _)| path.clone())
     }
 
     async fn sync_schedule_for(&self, job: &JobSpec, now: i64) -> Result<(), String> {
@@ -387,6 +400,11 @@ impl Engine {
             .cloned()
             .unwrap_or_else(|| Arc::new(tokio::sync::Mutex::new(())));
         let _guard = lock.lock().await;
+        if let Ok(inflight) = self.store.inflight_runs_of_job(job_name).await {
+            if let Some(existing) = inflight.into_iter().next() {
+                return Ok(existing.id);
+            }
+        }
         // Manager mode: planner picks (None = stay QUEUED, visible, spec §8).
         // Standalone: everything runs on the local worker.
         let worker: Option<String> = {
@@ -586,18 +604,22 @@ impl Engine {
             self.sync_schedule_for(job, now).await?;
         }
         for name in &removed {
-            let _ = self
-                .store
-                .db()
-                .execute(
-                    "UPDATE jobs SET enabled = 0 WHERE name = ?",
-                    &[name.clone().into()],
-                )
-                .await;
+            self.forget_job(name).await?;
         }
         let audit: Vec<(String, Option<String>, Option<String>)> = {
             let mut jobs = self.live_jobs.write().unwrap();
             let mut rows = Vec::new();
+            {
+                let mut locks = self.job_locks.write().unwrap();
+                for job in &new_cfg.jobs {
+                    locks
+                        .entry(job.name.clone())
+                        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())));
+                }
+                for name in &removed {
+                    locks.remove(name);
+                }
+            }
             for job in &new_cfg.jobs {
                 let before = jobs
                     .get(&job.name)

@@ -9,7 +9,8 @@ pub mod state;
 
 pub use job::{
     ErrorKind, Hooks, JobSpec, JobStatus, MisfirePolicy, OnWorkerLost, ProviderConfig,
-    RetentionPolicy, RunId, Safety, SnapshotPolicy, StatisticsMode, VerifyConfig,
+    RetentionPolicy, RunId, Safety, SnapshotPolicy, StatisticsMode, VerifyConfig, RUN_LEASE_SECS,
+    WORKER_HEARTBEAT_GRACE_SECS,
 };
 pub use metrics::Metrics;
 pub use schedule::{parse_cron_expr, parse_duration_human, Schedule, ScheduleKind};

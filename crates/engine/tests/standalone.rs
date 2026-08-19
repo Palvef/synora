@@ -121,7 +121,7 @@ storage = "{}"
         "{metrics}"
     );
     assert!(
-        metrics.contains("synora_repository_size_bytes{repository=\"smoke\"} 999"),
+        metrics.contains("synora_repository_size_bytes{job=\"smoke\"} 999"),
         "{metrics}"
     );
     // Log file exists with the run header (spec §49).
@@ -300,4 +300,74 @@ timeout = "5m"
     assert_eq!(status, synora_core::job::JobStatus::Cancelled);
     let log = std::fs::read_to_string(dir.join("logs/slow/current.log")).unwrap();
     assert!(log.contains("cancelled"), "{log}");
+}
+
+#[tokio::test]
+async fn forget_job_purges_db_and_metrics() {
+    let dir = temp_dir("purge");
+    write(
+        &dir,
+        "jobs/gone.toml",
+        &format!(
+            r#"[[jobs]]
+name = "gone"
+schedule = "manual"
+provider = "script"
+command = "true"
+storage = "{}"
+"#,
+            dir.join("repo/gone").display()
+        ),
+    );
+    write(&dir, "synora.toml", &config_text(&dir));
+    let engine = engine_for(&dir).await;
+    engine.sync_config().await.unwrap();
+    let run_id = engine.dispatch("gone", true).await.unwrap();
+    let _ = wait_terminal(&engine, &run_id, 20).await;
+    engine
+        .store
+        .insert_event(Some("gone"), Some(&run_id), "INFO", "bye")
+        .await
+        .unwrap();
+    engine.metrics.set_gauge(
+        "synora_job_status",
+        &[("job", "gone"), ("worker", "local")],
+        5.0,
+    );
+    engine.forget_job("gone").await.unwrap();
+    assert!(engine.job("gone").is_none());
+    let names: Vec<String> = engine
+        .store
+        .job_status_list()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(n, _)| n)
+        .collect();
+    assert!(!names.iter().any(|n| n == "gone"), "{names:?}");
+    assert!(engine
+        .store
+        .run_history("gone", 20)
+        .await
+        .unwrap()
+        .is_empty());
+    let events = engine
+        .store
+        .db()
+        .query("SELECT id FROM events WHERE job_id = ?", &["gone".into()])
+        .await
+        .unwrap();
+    assert!(events.is_empty(), "{events:?}");
+    let logs = engine
+        .store
+        .db()
+        .query(
+            "SELECT run_id FROM job_logs WHERE job_id = ?",
+            &["gone".into()],
+        )
+        .await
+        .unwrap();
+    assert!(logs.is_empty(), "{logs:?}");
+    let metrics = engine.metrics.render();
+    assert!(!metrics.contains("job=\"gone\""), "{metrics}");
 }

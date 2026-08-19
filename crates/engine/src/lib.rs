@@ -7,4 +7,4 @@ pub mod logs;
 pub mod scheduler;
 
 pub use engine::{Engine, RunStorageCtx, LOCAL_WORKER};
-pub use executor::{run_once, status_value, RunOutcome};
+pub use executor::{provider_name, run_once, status_value, RunOutcome};

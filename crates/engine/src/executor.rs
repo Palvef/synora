@@ -20,14 +20,15 @@ fn resolve_proxy_env(
     netroute: Option<&netroute::NetRoute>,
     job: &JobSpec,
 ) -> Vec<(String, String)> {
-    let selection = match netroute {
-        Some(nr) => nr.select_proxy(job.proxy.as_deref()),
-        None => netroute::Selection::Direct,
+    let Some(nr) = netroute else {
+        return Vec::new();
     };
-    match &selection {
-        netroute::Selection::Forward { env, .. } => env.clone(),
-        netroute::Selection::Direct => Vec::new(),
-    }
+    let selection = nr.select_proxy(job.proxy.as_deref());
+    let cfg = match &selection {
+        netroute::Selection::Forward { name, .. } => nr.proxy_configs().get(name),
+        _ => None,
+    };
+    netroute::dispatch_proxy_env(cfg, &selection)
 }
 
 /// What one provider execution produced.
@@ -88,6 +89,7 @@ pub async fn execute_run(
         engine.run_storage.as_ref(),
         netroute.as_deref(),
         None,
+        None,
     )
     .await;
 
@@ -108,6 +110,7 @@ pub async fn run_once(
     storage_ctx: Option<&crate::engine::RunStorageCtx>,
     netroute: Option<&netroute::NetRoute>,
     manager_proxy_env: Option<Vec<(String, String)>>,
+    shared_usage: Option<provider::UsageSink>,
 ) -> RunOutcome {
     let started = unix_now();
     // Multi-machine storage layouts: a job referencing a [storage.<name>]
@@ -221,11 +224,13 @@ pub async fn run_once(
         }
     }
 
-    // cgroup scope for resource limits (user-requested; tunasync parity).
+    // cgroup scope: MUST be a child of this process's cgroup, otherwise
+    // attaching rsync/git fails with EPERM and CPU/memory stay empty.
+    let cg_base = crate::cgroup::current_cgroup_dir()
+        .or_else(|| storage_ctx.map(|c| c.cgroup_base.clone()))
+        .unwrap_or_else(|| std::path::PathBuf::from("/sys/fs/cgroup/synora"));
     let cgroup_scope = crate::cgroup::CgroupScope::create(
-        &storage_ctx
-            .map(|c| c.cgroup_base.clone())
-            .unwrap_or_else(|| std::path::PathBuf::from("/sys/fs/cgroup/synora")),
+        &cg_base,
         &job.name,
         run_id,
         job.memory_limit,
@@ -273,7 +278,9 @@ pub async fn run_once(
                 .to_string()
             })
             .unwrap_or_else(|| job.family.clone()),
-        usage: Some(std::sync::Arc::new(std::sync::Mutex::new((None, None)))),
+        usage: Some(shared_usage.unwrap_or_else(|| {
+            std::sync::Arc::new(std::sync::Mutex::new(provider::ResourceUsage::default()))
+        })),
         log_file: Some(log_dir.join(&job.name).join("current.log")),
     };
 
@@ -291,6 +298,73 @@ pub async fn run_once(
             };
         }
     };
+
+    // Live resource sampler for every provider. Docker jobs are sampled
+    // inside the docker provider (`docker stats`). Everything else uses
+    // the cgroup scope, then /proc/self so HTTP / in-process work still
+    // reports CPU and memory.
+    if let Some(usage) = ctx.usage.clone() {
+        let cancel = cancel.clone();
+        let is_docker = matches!(job.provider, synora_core::ProviderConfig::Docker { .. });
+        let cname = format!("synora-job-{}", job.name);
+        let cg_path = cgroup_scope.as_ref().map(|c| c.path().clone());
+        let proc0 = read_proc_stat();
+        tokio::spawn(async move {
+            let mut peak = 0u64;
+            let mut last_cpu = 0.0f64;
+            let mut last_tick = std::time::Instant::now();
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(2));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    _ = ticker.tick() => {
+                        let docker = if is_docker {
+                            provider::docker::container_stats(&cname).await
+                        } else {
+                            None
+                        };
+                        if let Some((mem, pct)) = docker {
+                            peak = peak.max(mem);
+                            let prev = usage.lock().unwrap().cpu_seconds.unwrap_or(0.0);
+                            usage.lock().unwrap().record(peak, prev + (pct / 100.0) * 2.0, Some(pct));
+                            last_tick = std::time::Instant::now();
+                            continue;
+                        }
+                        let pgid = usage.lock().unwrap().child_pgid;
+                        let sample = pgid
+                            .and_then(proc_group_usage)
+                            .or_else(|| {
+                            cg_path.as_ref().and_then(|path| {
+                            let mem = std::fs::read_to_string(path.join("memory.current")).ok()?;
+                            let mem = mem.trim().parse::<u64>().ok()?;
+                            if mem == 0 {
+                                return None;
+                            }
+                            let cpu = std::fs::read_to_string(path.join("cpu.stat")).ok().and_then(|s| {
+                                s.lines().find_map(|l| l.strip_prefix("usage_usec ")).and_then(|v| v.trim().parse::<u64>().ok())
+                            }).unwrap_or(0) as f64 / 1_000_000.0;
+                            Some((mem, cpu))
+                            })
+                        }).or_else(|| {
+                            // In-process providers (http): worker RSS/CPU delta.
+                            let (rss, cpu) = read_proc_stat()?;
+                            let (rss0, cpu0) = proc0?;
+                            Some((rss.saturating_sub(rss0).max(1), (cpu - cpu0).max(0.0)))
+                        });
+                        if let Some((mem, cpu)) = sample {
+                            peak = peak.max(mem);
+                            let dt = last_tick.elapsed().as_secs_f64().max(0.001);
+                            let pct = ((cpu - last_cpu) / dt * 100.0).max(0.0);
+                            last_cpu = cpu;
+                            last_tick = std::time::Instant::now();
+                            usage.lock().unwrap().record(peak, cpu, Some(pct));
+                        }
+                    }
+                }
+            }
+        });
+    }
 
     run_hooks(&job.hooks.before_sync, &ctx, logger.as_mut()).await;
 
@@ -461,9 +535,9 @@ pub async fn run_once(
     // stats polling) wins, the cgroup scope is the fallback.
     let provider_usage = match &ctx.usage {
         Some(a) => *a.lock().unwrap(),
-        None => (None, None),
+        None => provider::ResourceUsage::default(),
     };
-    let (mem_peak, cpu_seconds) = match provider_usage {
+    let (mem_peak, cpu_seconds) = match (provider_usage.memory_bytes, provider_usage.cpu_seconds) {
         (Some(mem), cpu) => (Some(mem), cpu),
         (None, cpu) => match cgroup_scope.as_ref().and_then(|cg| cg.usage()) {
             Some((mem, c)) => (Some(mem), Some(c)),
@@ -497,7 +571,77 @@ impl provider::CgroupScopeRef for CgroupHandle {
     }
 }
 
-fn provider_name(job: &JobSpec) -> &'static str {
+fn proc_page_size() -> u64 {
+    4096
+}
+
+fn proc_clk_tck() -> f64 {
+    100.0
+}
+
+/// Sum RSS + CPU seconds of every process in `pgid` (rsync/git/script tree).
+fn proc_group_usage(pgid: u32) -> Option<(u64, f64)> {
+    let page = proc_page_size();
+    let tick = proc_clk_tck();
+    let mut rss = 0u64;
+    let mut cpu = 0.0f64;
+    let mut found = false;
+    let dir = std::fs::read_dir("/proc").ok()?;
+    for ent in dir.flatten() {
+        let name = ent.file_name();
+        let pid = match name.to_str().and_then(|s| s.parse::<u32>().ok()) {
+            Some(p) => p,
+            None => continue,
+        };
+        let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let rest = match stat.rsplit_once(')') {
+            Some((_, r)) => r,
+            None => continue,
+        };
+        let fields: Vec<&str> = rest.split_whitespace().collect();
+        let pgrp: u32 = match fields.get(2).and_then(|s| s.parse().ok()) {
+            Some(v) => v,
+            None => continue,
+        };
+        if pgrp != pgid && pid != pgid {
+            continue;
+        }
+        let utime: f64 = fields.get(11).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+        let stime: f64 = fields.get(12).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+        let rss_pages: u64 = fields.get(21).and_then(|s| s.parse().ok()).unwrap_or(0);
+        rss += rss_pages.saturating_mul(page);
+        cpu += (utime + stime) / tick;
+        found = true;
+    }
+    if found {
+        Some((rss.max(1), cpu))
+    } else {
+        None
+    }
+}
+
+fn read_proc_stat() -> Option<(u64, f64)> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let rss_kb = status.lines().find_map(|l| {
+        l.strip_prefix("VmRSS:")
+            .and_then(|v| v.split_whitespace().next())
+            .and_then(|v| v.parse::<u64>().ok())
+    })?;
+    let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+    // utime and stime are fields 14 and 15 (1-based) after comm, which may contain spaces.
+    let rparen = stat.rfind(')')?;
+    let rest = stat[rparen + 1..].split_whitespace().collect::<Vec<_>>();
+    // after comm: state(3) ppid(4) ... utime is 14 => index 11 in rest (fields 3..)
+    let utime: f64 = rest.get(11)?.parse().ok()?;
+    let stime: f64 = rest.get(12)?.parse().ok()?;
+    let ticks = 100.0; // Linux USER_HZ default
+    Some((rss_kb * 1024, (utime + stime) / ticks))
+}
+
+pub fn provider_name(job: &JobSpec) -> &'static str {
     match &job.provider {
         synora_core::ProviderConfig::Rsync { .. } => "rsync",
         synora_core::ProviderConfig::TwoStageRsync { .. } => "two-stage-rsync",
@@ -515,7 +659,7 @@ pub fn status_value(s: JobStatus) -> f64 {
         JobStatus::Pending => 0.0,
         JobStatus::Scheduled => 1.0,
         JobStatus::Queued => 2.0,
-        JobStatus::Starting => 3.0,
+        JobStatus::Syncing => 3.0,
         JobStatus::Running => 4.0,
         JobStatus::Success => 5.0,
         JobStatus::Failed => 6.0,
@@ -606,7 +750,7 @@ async fn finish_run(engine: &Arc<Engine>, run_id: &str, job: &JobSpec, outcome: 
                 .await;
             engine.metrics.set_gauge(
                 "synora_repository_size_bytes",
-                &[("repository", job.name.as_str())],
+                &[("job", job.name.as_str())],
                 size as f64,
             );
         }
@@ -721,6 +865,12 @@ async fn finish_run(engine: &Arc<Engine>, run_id: &str, job: &JobSpec, outcome: 
     }
 
     metrics_tail(engine, job, final_status, started, ended, duration, success);
+    if outcome.mem_peak.is_some() || outcome.cpu_seconds.is_some() {
+        let _ = engine
+            .store
+            .set_run_resources(run_id, outcome.mem_peak, outcome.cpu_seconds)
+            .await;
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -758,6 +908,11 @@ fn metrics_tail(
             "synora_job_last_success_timestamp",
             &[("job", job.name.as_str())],
             ended as f64,
+        );
+        engine.metrics.inc_counter(
+            "synora_job_success_total",
+            &[("job", job.name.as_str())],
+            1.0,
         );
     }
 }
@@ -821,6 +976,9 @@ fn hook_ctx(job: &JobSpec, run_id: &str) -> SyncContext {
 fn size_after(job: &JobSpec, result: Option<&SyncResult>) -> Option<i64> {
     if let Some(hint) = result.and_then(|r| r.size_hint) {
         return Some(hint as i64);
+    }
+    if let Some(zfs) = crate::logs::measure_repo_size(&job.storage) {
+        return Some(zfs as i64);
     }
     match job.statistics {
         synora_core::StatisticsMode::Filesystem => Some(walk_size(&job.storage) as i64),

@@ -79,3 +79,24 @@ fn is_cgroup_v2() -> bool {
     // cgroup v2 unified hierarchy: the controllers file exists at the root.
     Path::new("/sys/fs/cgroup/cgroup.controllers").exists()
 }
+
+/// Directory of this process's cgroup v2. Job scopes must be created as
+/// *children* of it — moving a pid from systemd's service cgroup into
+/// `/sys/fs/cgroup/synora/...` is EPERM, so rsync/git never got sampled.
+pub fn current_cgroup_dir() -> Option<PathBuf> {
+    let text = std::fs::read_to_string("/proc/self/cgroup").ok()?;
+    let rel = text.lines().find_map(|l| l.strip_prefix("0::"))?;
+    let rel = rel.trim().trim_start_matches('/');
+    let dir = if rel.is_empty() {
+        PathBuf::from("/sys/fs/cgroup")
+    } else {
+        PathBuf::from("/sys/fs/cgroup").join(rel)
+    };
+    if dir.join("cgroup.controllers").exists() || dir.exists() {
+        // Enable memory/cpu on the parent so children can use them.
+        let _ = std::fs::write(dir.join("cgroup.subtree_control"), "+memory +cpu +pids");
+        Some(dir)
+    } else {
+        None
+    }
+}

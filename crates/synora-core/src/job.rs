@@ -6,6 +6,17 @@ use std::path::PathBuf;
 use time::Duration;
 use uuid::Uuid;
 
+/// Claimed-run lease lifetime. Heartbeats refresh it; the reaper only
+/// marks LOST when the lease is expired *and* the worker is no longer
+/// heartbeating. 60s was too short for a swapping/busy worker: production
+/// AOSP/GXDE runs were re-dispatched, then `docker rm -f` SIGKILL'd the
+/// still-running container (exit 137).
+pub const RUN_LEASE_SECS: i64 = 300;
+
+/// A worker with a heartbeat newer than this is still alive for lease
+/// expiry purposes, even if a lease row was not refreshed.
+pub const WORKER_HEARTBEAT_GRACE_SECS: i64 = 90;
+
 /// Lifecycle of a job / run, per spec §5.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -13,7 +24,8 @@ pub enum JobStatus {
     Pending,
     Scheduled,
     Queued,
-    Starting,
+    /// Worker has claimed the run and is syncing (legacy name: starting).
+    Syncing,
     Running,
     Success,
     Failed,
@@ -24,6 +36,26 @@ pub enum JobStatus {
     Lost,
     /// Dependency failed or didn't run — this run never started (spec §93).
     Skipped,
+}
+
+impl JobStatus {
+    /// Stable lowercase API / TUI label.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Scheduled => "scheduled",
+            Self::Queued => "queued",
+            Self::Syncing => "syncing",
+            Self::Running => "running",
+            Self::Success => "success",
+            Self::Failed => "failed",
+            Self::Retrying => "retrying",
+            Self::Cancelling => "cancelling",
+            Self::Cancelled => "cancelled",
+            Self::Lost => "lost",
+            Self::Skipped => "skipped",
+        }
+    }
 }
 
 /// Classified failure cause — decides whether a retry makes sense (spec §54).

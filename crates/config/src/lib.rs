@@ -2,10 +2,12 @@
 //! `file:line` validation (spec §42–§44).
 
 pub mod error;
+mod jobfile;
 mod loader;
 mod schema;
 
 pub use error::ConfigError;
+pub use jobfile::remove_job_block;
 pub use loader::{
     ApiConfig, ApiToken, CgroupConfig, CliOverrides, ConfigLoader, DaemonConfig, DbConfig, DbKind,
     EgressConfig, EgressGroupConfig, NotificationConfig, ProxyConfig, ProxyGroupConfig, ProxyKind,

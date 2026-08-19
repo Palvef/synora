@@ -15,6 +15,75 @@ pub struct RsyncProvider {
     pub exclude: Vec<String>,
 }
 
+fn rsync_proxy_hostport(url: &str) -> String {
+    let rest = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    rest.rsplit_once('@')
+        .map(|(_, host)| host)
+        .unwrap_or(rest)
+        .to_string()
+}
+
+/// tunasync: `RSYNC_PROXY = "host:port"` (no scheme). Dispatch already
+/// emits it; synthesize from HTTP/ALL_PROXY when missing.
+/// Password/exclude files live on the worker. Job specs may still point at
+/// a manager-only or legacy tunasync path; rewrite to a local file if needed.
+fn rewrite_worker_local_path(opt: &str) -> String {
+    const PREFIXES: [&str; 2] = ["--password-file=", "--exclude-from="];
+    for prefix in PREFIXES {
+        let Some(path) = opt.strip_prefix(prefix) else {
+            continue;
+        };
+        let p = std::path::Path::new(path);
+        if p.is_file() {
+            return opt.to_string();
+        }
+        let mut candidates = Vec::new();
+        if path.contains("/etc/tunasync/") {
+            candidates.push(
+                path.replace("/etc/tunasync/syncpassword/", "/etc/synora/syncpassword/")
+                    .replace("/etc/tunasync/excludes/", "/etc/synora/excludes/"),
+            );
+        }
+        if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+            if prefix == "--password-file=" {
+                candidates.push(format!("/etc/synora/syncpassword/{name}"));
+                candidates.push(format!("/etc/tunasync/syncpassword/{name}"));
+            } else {
+                candidates.push(format!("/etc/synora/excludes/{name}"));
+                candidates.push(format!("/etc/tunasync/excludes/{name}"));
+            }
+        }
+        for candidate in candidates {
+            if candidate != path && std::path::Path::new(&candidate).is_file() {
+                tracing::info!("rsync {prefix}{path} missing; using {candidate}");
+                return format!("{prefix}{candidate}");
+            }
+        }
+    }
+    opt.to_string()
+}
+
+fn apply_rsync_proxy_env(cmd: &mut Command, proxy_env: &[(String, String)]) {
+    let mut have_rsync = false;
+    let mut url = None;
+    for (k, v) in proxy_env {
+        cmd.env(k, v);
+        if k.eq_ignore_ascii_case("RSYNC_PROXY") {
+            have_rsync = true;
+        }
+        if url.is_none()
+            && (k.eq_ignore_ascii_case("all_proxy") || k.eq_ignore_ascii_case("http_proxy"))
+        {
+            url = Some(v.clone());
+        }
+    }
+    if !have_rsync {
+        if let Some(u) = url {
+            cmd.env("RSYNC_PROXY", rsync_proxy_hostport(&u));
+        }
+    }
+}
+
 impl RsyncProvider {
     /// Parse a rsync size figure: "1,645,311,660,221", "1.5G", "37 bytes" —
     /// commas ignored, K/M/G/T suffixes honored.
@@ -92,7 +161,7 @@ impl RsyncProvider {
         let mut cmd = Command::new("rsync");
         // tunasync-aligned defaults (same argv as tunasync's rsync provider:
         // `-aH --delete --delete-delay --delay-updates --safe-links
-        //  --timeout=120 --contimeout=120`), then exclude, then job options,
+        //  --timeout=600 --contimeout=120`), then exclude, then job options,
         // then --stats.
         // -vh --no-o --no-g = tunasync's rsync verbosity: per-file transfer
         // lines (-v, human sizes -h) without owner/group noise. The run log
@@ -107,7 +176,7 @@ impl RsyncProvider {
             "--delete-delay",
             "--delay-updates",
             "--safe-links",
-            "--timeout=120",
+            "--timeout=600",
         ]);
         // --contimeout is daemon-connection only (rsync errors on local
         // paths); tunasync passes it because its upstreams are rsync://.
@@ -123,9 +192,7 @@ impl RsyncProvider {
         if let Some(max) = ctx.job.safety.max_delete_files {
             cmd.arg(format!("--max-delete={max}"));
         }
-        for (k, v) in &ctx.proxy_env {
-            cmd.env(k, v);
-        }
+        apply_rsync_proxy_env(&mut cmd, &ctx.proxy_env);
         if let Some(addr) = &ctx.egress_address {
             cmd.arg("--address").arg(addr);
         }
@@ -139,7 +206,7 @@ impl RsyncProvider {
             _ => {}
         }
         for opt in &self.options {
-            cmd.arg(opt);
+            cmd.arg(rewrite_worker_local_path(opt));
         }
         cmd.arg("--stats");
         cmd.arg(&source).arg(&dest);
@@ -319,9 +386,7 @@ impl TwoStageRsyncProvider {
                     cmd.arg(format!("--max-delete={max}"));
                 }
             }
-            for (k, v) in &ctx.proxy_env {
-                cmd.env(k, v);
-            }
+            apply_rsync_proxy_env(cmd, &ctx.proxy_env);
             if let Some(addr) = &ctx.egress_address {
                 cmd.arg("--address").arg(addr);
             }
@@ -352,7 +417,7 @@ impl TwoStageRsyncProvider {
             "--exclude",
             ".~tmp~/",
             "--safe-links",
-            "--timeout=120",
+            "--timeout=600",
         ]);
         for f in profile {
             cmd.arg(f);
@@ -387,13 +452,13 @@ impl TwoStageRsyncProvider {
             "--delete-after",
             "--delay-updates",
             "--safe-links",
-            "--timeout=120",
+            "--timeout=600",
         ]);
         tail(&mut cmd, true);
         // Options come after excludes: a user --include can still pull a
         // path back in (same order as the single rsync provider).
         for opt in &self.options {
-            cmd.arg(opt);
+            cmd.arg(rewrite_worker_local_path(opt));
         }
         let (code, stdout, stderr) = run_rsync(ctx, &mut cmd).await?;
         let (transferred, total_size) = RsyncProvider::parse_stats(&stdout);
@@ -432,5 +497,47 @@ impl TwoStageRsyncProvider {
                 }
             )))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{rewrite_worker_local_path, rsync_proxy_hostport};
+
+    #[test]
+    fn rsync_proxy_hostport_strips_scheme_and_userinfo() {
+        assert_eq!(
+            rsync_proxy_hostport("http://172.31.33.205:14000"),
+            "172.31.33.205:14000"
+        );
+        assert_eq!(
+            rsync_proxy_hostport("http://synora:pass@172.31.33.205:14000"),
+            "172.31.33.205:14000"
+        );
+        assert_eq!(rsync_proxy_hostport("172.17.0.1:5354"), "172.17.0.1:5354");
+    }
+
+    #[test]
+    fn rewrite_worker_local_path_keeps_existing_file() {
+        let dir = std::env::temp_dir().join(format!("synora-rsync-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("gxde");
+        std::fs::write(&file, b"secret\n").unwrap();
+        let opt = format!("--password-file={}", file.display());
+        assert_eq!(rewrite_worker_local_path(&opt), opt);
+        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn rewrite_worker_local_path_passthrough_when_missing() {
+        assert_eq!(
+            rewrite_worker_local_path("--password-file=/no/such/synora-password"),
+            "--password-file=/no/such/synora-password"
+        );
+        assert_eq!(
+            rewrite_worker_local_path("--delete-excluded"),
+            "--delete-excluded"
+        );
     }
 }

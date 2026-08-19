@@ -53,8 +53,8 @@ pub struct ProxyConfig {
     /// Local listener to expose when "exposed" from the TUI
     /// (e.g. "127.0.0.1:4000" for a local CF One / WARP endpoint).
     pub expose: Option<String>,
-    /// "user:pass" credentials for the exposed port (Basic auth; the
-    /// worker serves an authenticated CONNECT proxy on `expose`).
+    /// Optional "user:pass" for the exposed HTTP CONNECT port. Empty means
+    /// unauthenticated CONNECT (required for rsync `RSYNC_PROXY=host:port`).
     pub expose_auth: Option<String>,
 }
 
@@ -677,6 +677,16 @@ fn resolve(root: &RootDoc, jobs: Vec<JobEntry>) -> Result<ResolvedConfig, Config
                 0,
                 format!(
                     "api token `{}`: token value must be unique per token",
+                    t.name
+                ),
+            ));
+        }
+        if tokens.iter().any(|e: &ApiToken| e.name == t.name) {
+            return Err(ConfigError::new(
+                "<config>",
+                0,
+                format!(
+                    "api token `{}`: token name must be unique (worker identity binds to name)",
                     t.name
                 ),
             ));

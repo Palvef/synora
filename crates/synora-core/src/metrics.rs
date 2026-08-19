@@ -86,10 +86,17 @@ impl Metrics {
         entry.value += delta;
     }
 
-    /// Prometheus exposition format (TYPE lines + samples).
+    /// Drop every sample labeled with this job so a deleted job leaves no
+    /// gauge/counter residue in `/metrics`.
+    pub fn remove_job(&self, job: &str) {
+        let mut entries = self.entries.lock().unwrap();
+        entries.retain(|key, _| !key.labels.iter().any(|(n, v)| n == "job" && v == job));
+    }
+
+    /// Prometheus exposition format (one TYPE line per metric, then samples).
     pub fn render(&self) -> String {
         let entries = self.entries.lock().unwrap();
-        let mut lines: Vec<(String, String)> = Vec::new();
+        let mut samples: Vec<(String, MetricType, String)> = Vec::new();
         for (key, entry) in entries.iter() {
             let mut s = key.name.clone();
             if !key.labels.is_empty() {
@@ -102,15 +109,21 @@ impl Metrics {
                 s.push_str(&format!("{{{l}}}"));
             }
             s.push_str(&format!(" {}", entry.value));
-            let type_line = format!("# TYPE {} {}", key.name, entry.kind.as_str());
-            lines.push((type_line, s));
+            samples.push((key.name.clone(), entry.kind, s));
         }
-        lines.sort();
+        samples.sort_by(|a, b| a.0.cmp(&b.0).then(a.2.cmp(&b.2)));
         let mut out = String::new();
-        for (type_line, sample) in lines {
-            out.push_str(&type_line);
-            out.push('\n');
-            out.push_str(&sample);
+        let mut last: Option<&str> = None;
+        for (name, kind, sample) in &samples {
+            if last != Some(name.as_str()) {
+                out.push_str("# TYPE ");
+                out.push_str(name);
+                out.push(' ');
+                out.push_str(kind.as_str());
+                out.push('\n');
+                last = Some(name.as_str());
+            }
+            out.push_str(sample);
             out.push('\n');
         }
         out
@@ -168,5 +181,25 @@ mod tests {
         m.set_gauge("x", &[("k", "a\"b\\c")], 1.0);
         let out = m.render();
         assert!(out.contains("x{k=\"a\\\"b\\\\c\"} 1"), "{out}");
+    }
+
+    #[test]
+    fn remove_job_drops_labeled_samples() {
+        let m = Metrics::new();
+        m.set_gauge(
+            "synora_job_status",
+            &[("job", "gone"), ("worker", "w")],
+            3.0,
+        );
+        m.set_gauge(
+            "synora_job_status",
+            &[("job", "keep"), ("worker", "w")],
+            5.0,
+        );
+        m.inc_counter("synora_job_runs_total", &[("job", "gone")], 1.0);
+        m.remove_job("gone");
+        let out = m.render();
+        assert!(!out.contains("gone"), "{out}");
+        assert!(out.contains("job=\"keep\""), "{out}");
     }
 }

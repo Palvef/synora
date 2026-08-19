@@ -477,10 +477,22 @@ pub fn lan_ipv4() -> Option<String> {
     sock.local_addr().ok().map(|a| a.ip().to_string())
 }
 
+/// Strip scheme and userinfo from a proxy URL so rsync can consume it as
+/// `RSYNC_PROXY=host:port` (tunasync `worker.conf` style).
+pub fn proxy_hostport(url: &str) -> String {
+    let rest = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    rest.rsplit_once('@')
+        .map(|(_, host)| host)
+        .unwrap_or(rest)
+        .to_string()
+}
+
 /// The environment a worker should receive for a proxy (user requirement:
 /// workers always get the MANAGER's resolved proxy settings). When the
-/// proxy has an `expose` address, the worker gets that address (with the
-/// Basic credentials) instead of the manager-local loopback URL.
+/// proxy has an `expose` address, the worker gets that address as an
+/// HTTP CONNECT URL (the manager listens there and tunnels to the local
+/// upstream, e.g. WARP SOCKS). A proxy without expose keeps the upstream
+/// URL as-is. Exposed HTTP CONNECT (cf-warp) is `http://host:port`.
 pub fn dispatch_proxy_env(
     proxy: Option<&ProxyConfig>,
     selection: &Selection,
@@ -488,37 +500,40 @@ pub fn dispatch_proxy_env(
     let Selection::Forward { url, env, .. } = selection else {
         return Vec::new();
     };
-    let Some(p) = proxy else {
-        return env.clone();
+    let remote = match proxy.and_then(|p| p.expose.as_ref()) {
+        Some(expose) => {
+            let host = if let Some(lan) = lan_ipv4() {
+                expose
+                    .replace("127.0.0.1", &lan)
+                    .replace("0.0.0.0", &lan)
+                    .replace("localhost", &lan)
+            } else {
+                expose.clone()
+            };
+            let auth = proxy.and_then(|p| p.expose_auth.as_deref()).unwrap_or("");
+            // Expose is always HTTP CONNECT, even when the manager-local
+            // upstream is socks5h (cf-warp / WARP). Workers must not be
+            // given `socks5h://` on the expose port.
+            if auth.contains(':') {
+                format!("http://{auth}@{host}")
+            } else {
+                format!("http://{host}")
+            }
+        }
+        None => url.clone(),
     };
-    let Some(expose) = &p.expose else {
-        return env.clone();
-    };
-    // Rewrite 127.0.0.1 / 0.0.0.0 / localhost to a LAN-reachable address.
-    let host = if let Some(lan) = lan_ipv4() {
-        expose
-            .replace("127.0.0.1", &lan)
-            .replace("0.0.0.0", &lan)
-            .replace("localhost", &lan)
-    } else {
-        expose.clone()
-    };
-    let auth = p.expose_auth.as_deref().unwrap_or("");
-    let prefix = if url.starts_with("socks5h://") {
-        "socks5h://"
-    } else {
-        "http://"
-    };
-    let remote = if auth.contains(':') {
-        format!("{prefix}{auth}@{host}")
-    } else {
-        format!("{prefix}{host}")
-    };
-    vec![
+    let rsync = proxy_hostport(&remote);
+    let mut out = vec![
         ("HTTP_PROXY".to_string(), remote.clone()),
         ("HTTPS_PROXY".to_string(), remote.clone()),
         ("ALL_PROXY".to_string(), remote.clone()),
-    ]
+        ("http_proxy".to_string(), remote.clone()),
+        ("https_proxy".to_string(), remote.clone()),
+        ("all_proxy".to_string(), remote),
+        ("RSYNC_PROXY".to_string(), rsync),
+    ];
+    out.extend(env.iter().cloned());
+    out
 }
 
 pub fn proxy_env(selection: &Selection) -> Vec<(String, String)> {
@@ -911,9 +926,9 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-/// Serve a Basic-auth HTTP CONNECT proxy on `listen`, forwarding through the
-/// local WARP endpoint `upstream`. Runs forever (spawn it as a task); one
-/// connection per client, 401 on bad credentials.
+/// Serve an HTTP CONNECT proxy on `listen`, forwarding through the local
+/// WARP/SOCKS endpoint `upstream`. Empty user/pass allows unauthenticated
+/// CONNECT (needed for rsync `RSYNC_PROXY=host:port`). Runs forever.
 pub async fn serve_auth_proxy(
     listen: &str,
     upstream: &str,
@@ -924,7 +939,11 @@ pub async fn serve_auth_proxy(
         .await
         .map_err(|e| RouteError::Other(format!("auth proxy bind {listen}: {e}")))?;
     tracing::info!("auth proxy listening on {listen} → {upstream}");
-    let expected = format!("Basic {}", base64_auth(user, pass));
+    let expected = if user.is_empty() && pass.is_empty() {
+        String::new()
+    } else {
+        format!("Basic {}", base64_auth(user, pass))
+    };
     loop {
         let Ok((client, addr)) = listener.accept().await else {
             continue;
@@ -996,16 +1015,18 @@ async fn serve_auth_proxy_conn(
             .await;
         return Ok(());
     };
-    let auth_ok = lines
-        .find_map(|l| l.strip_prefix("Proxy-Authorization:"))
-        .map(|v| v.trim().as_bytes())
-        .map(|v| constant_time_eq(v, expected_auth.as_bytes()))
-        .unwrap_or(false);
-    if !auth_ok {
-        let _ = client
-            .write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"synora\"\r\n\r\n")
-            .await;
-        return Ok(());
+    if !expected_auth.is_empty() {
+        let auth_ok = lines
+            .find_map(|l| l.strip_prefix("Proxy-Authorization:"))
+            .map(|v| v.trim().as_bytes())
+            .map(|v| constant_time_eq(v, expected_auth.as_bytes()))
+            .unwrap_or(false);
+        if !auth_ok {
+            let _ = client
+                .write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"synora\"\r\n\r\n")
+                .await;
+            return Ok(());
+        }
     }
     let (target_host, target_port) = {
         let (h, p) = hostport
@@ -1458,6 +1479,92 @@ mod tests {
         assert_eq!(map.get("NO_PROXY"), Some(&"example.com"));
         assert_eq!(map.get("CUSTOM"), Some(&"1"));
         assert!(proxy_env(&Selection::Direct).is_empty());
+    }
+
+    #[test]
+    fn dispatch_without_expose_uses_upstream_url() {
+        let sel = Selection::Forward {
+            name: "docker-gw".into(),
+            url: "http://172.17.0.1:5354".into(),
+            env: vec![],
+        };
+        let cfg = ProxyConfig {
+            kind: fwd("http://172.17.0.1:5354"),
+            healthcheck: None,
+            timeout: 5,
+            expose: None,
+            expose_auth: None,
+        };
+        let env = dispatch_proxy_env(Some(&cfg), &sel);
+        let map: HashMap<&str, &str> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        assert_eq!(map.get("HTTP_PROXY"), Some(&"http://172.17.0.1:5354"));
+        assert_eq!(map.get("HTTPS_PROXY"), Some(&"http://172.17.0.1:5354"));
+        assert_eq!(map.get("https_proxy"), Some(&"http://172.17.0.1:5354"));
+        assert_eq!(map.get("RSYNC_PROXY"), Some(&"172.17.0.1:5354"));
+        assert!(dispatch_proxy_env(None, &Selection::Direct).is_empty());
+    }
+
+    #[test]
+    fn dispatch_with_expose_uses_http_connect() {
+        let sel = Selection::Forward {
+            name: "cf-warp".into(),
+            url: "socks5h://127.0.0.1:40000".into(),
+            env: vec![],
+        };
+        let cfg = ProxyConfig {
+            kind: fwd("socks5h://127.0.0.1:40000"),
+            healthcheck: None,
+            timeout: 5,
+            expose: Some("172.31.33.205:14000".into()),
+            expose_auth: None,
+        };
+        let env = dispatch_proxy_env(Some(&cfg), &sel);
+        let map: HashMap<&str, &str> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        assert_eq!(map.get("ALL_PROXY"), Some(&"http://172.31.33.205:14000"));
+        assert_eq!(map.get("HTTP_PROXY"), Some(&"http://172.31.33.205:14000"));
+        assert_eq!(map.get("http_proxy"), Some(&"http://172.31.33.205:14000"));
+        assert_eq!(map.get("RSYNC_PROXY"), Some(&"172.31.33.205:14000"));
+        assert!(!map.values().any(|v| v.starts_with("socks")));
+    }
+
+    #[test]
+    fn dispatch_with_expose_auth_strips_userinfo_for_rsync() {
+        let sel = Selection::Forward {
+            name: "cf-warp".into(),
+            url: "socks5h://127.0.0.1:40000".into(),
+            env: vec![],
+        };
+        let cfg = ProxyConfig {
+            kind: fwd("socks5h://127.0.0.1:40000"),
+            healthcheck: None,
+            timeout: 5,
+            expose: Some("172.31.33.205:14000".into()),
+            expose_auth: Some("synora:secret".into()),
+        };
+        let env = dispatch_proxy_env(Some(&cfg), &sel);
+        let map: HashMap<&str, &str> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        assert_eq!(
+            map.get("ALL_PROXY"),
+            Some(&"http://synora:secret@172.31.33.205:14000")
+        );
+        assert_eq!(map.get("RSYNC_PROXY"), Some(&"172.31.33.205:14000"));
+    }
+
+    #[test]
+    fn proxy_hostport_strips_scheme_and_userinfo() {
+        assert_eq!(
+            proxy_hostport("http://172.31.33.205:14000"),
+            "172.31.33.205:14000"
+        );
+        assert_eq!(
+            proxy_hostport("http://synora:pass@172.31.33.205:14000"),
+            "172.31.33.205:14000"
+        );
+        assert_eq!(
+            proxy_hostport("socks5h://127.0.0.1:40000"),
+            "127.0.0.1:40000"
+        );
+        assert_eq!(proxy_hostport("172.17.0.1:5354"), "172.17.0.1:5354");
     }
 
     #[tokio::test]

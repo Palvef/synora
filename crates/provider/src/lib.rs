@@ -1,10 +1,11 @@
 //! Sync providers (spec §12): the tools that actually move data.
-//! Synora only orchestrates — rsync/scripts/docker do the work.
+//! Synora only orchestrates — rsync, two-stage-rsync, http, git, docker
+//! and script do the work.
 //!
 //! A concrete enum rather than `Box<dyn Trait>`: native async fn in traits
-//! fights `dyn` compatibility, and there are exactly three providers. The
-//! open provider SDK (spec §115) is a Phase 7 concern; when it lands, the
-//! enum arm becomes a `Custom(Box<dyn ...>)` or the trait gets boxed futures.
+//! fights `dyn` compatibility. The open provider SDK (spec §115) is a
+//! Phase 7 concern; when it lands, the enum arm becomes a
+//! `Custom(Box<dyn ...>)` or the trait gets boxed futures.
 
 pub mod docker;
 pub mod git;
@@ -64,8 +65,13 @@ pub(crate) fn spawn_group(
     let child = cmd
         .spawn()
         .map_err(|e| ProviderError::Spawn(e.to_string()))?;
-    if let Some(cg) = &ctx.cgroup {
-        cg.attach(child.id().unwrap_or(0));
+    if let Some(pid) = child.id() {
+        if let Some(cg) = &ctx.cgroup {
+            cg.attach(pid);
+        }
+        if let Some(usage) = &ctx.usage {
+            usage.lock().unwrap().child_pgid = Some(pid);
+        }
     }
     let guard = KillOnDrop::arm(&child);
     Ok((child, guard))
@@ -204,17 +210,38 @@ pub struct SyncContext {
     pub egress_address: Option<String>,
     /// Resolved address family for the connection: ipv4 | ipv6 | any.
     pub family: String,
-    /// Shared usage sample sink (docker provider fills it with
-    /// `docker stats` polls; the executor reads it into the run outcome).
+    /// Shared usage sample sink. Every provider (docker stats, cgroup,
+    /// or process sampler) writes here so the worker heartbeat and the
+    /// run outcome can report live CPU / memory.
     pub usage: Option<UsageSink>,
     /// Run log file: providers tee their child's output here as it arrives
     /// (the tool's own output belongs in the run log, live).
     pub log_file: Option<std::path::PathBuf>,
 }
 
-/// (peak memory bytes, accumulated cpu seconds) shared between a provider
-/// and the executor.
-pub type UsageSink = std::sync::Arc<std::sync::Mutex<(Option<u64>, Option<f64>)>>;
+/// Live resource sample shared between a provider, the executor sampler
+/// and the worker heartbeat.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ResourceUsage {
+    pub memory_bytes: Option<u64>,
+    pub cpu_seconds: Option<f64>,
+    pub cpu_percent: Option<f64>,
+    /// Process-group id of the spawned provider child (rsync/git/script).
+    /// The executor sampler sums /proc RSS+CPU for this group.
+    pub child_pgid: Option<u32>,
+}
+
+impl ResourceUsage {
+    pub fn record(&mut self, memory_bytes: u64, cpu_seconds: f64, cpu_percent: Option<f64>) {
+        self.memory_bytes = Some(self.memory_bytes.unwrap_or(0).max(memory_bytes));
+        self.cpu_seconds = Some(cpu_seconds);
+        if let Some(pct) = cpu_percent {
+            self.cpu_percent = Some(pct);
+        }
+    }
+}
+
+pub type UsageSink = std::sync::Arc<std::sync::Mutex<ResourceUsage>>;
 
 /// Result of one provider run (spec §17: size comes from the provider when it
 /// knows it; from the script via SYNORA_SIZE=; else filesystem walk).

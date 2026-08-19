@@ -17,6 +17,123 @@ pub struct DockerProvider {
     pub command: Vec<String>,
 }
 
+/// tunasync `command` is a shell string stuffed into a one-element argv
+/// (`docker_command = ["timeout 18h python3 …"]`). Docker would otherwise
+/// look for a binary whose *name* is the whole string (exit 127).
+pub(crate) fn docker_exec_args(command: &[String]) -> Vec<String> {
+    match command {
+        [] => Vec::new(),
+        [single] if needs_shell(single) => {
+            vec!["/bin/sh".into(), "-c".into(), single.clone()]
+        }
+        args => args.to_vec(),
+    }
+}
+
+fn needs_shell(s: &str) -> bool {
+    s.chars().any(|c| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '|' | '&'
+                    | ';'
+                    | '<'
+                    | '>'
+                    | '*'
+                    | '?'
+                    | '['
+                    | ']'
+                    | '$'
+                    | '`'
+                    | '\''
+                    | '"'
+                    | '('
+                    | ')'
+            )
+    })
+}
+
+/// Container proxy env: never HTTP(S)_PROXY. Every container gets
+/// ALL_PROXY/all_proxy from the manager-assigned URL (HTTP CONNECT
+/// expose or SOCKS). Tools inside the image then honor all_proxy.
+pub(crate) fn docker_proxy_env(proxy_env: &[(String, String)]) -> Vec<(String, String)> {
+    let mut url = None;
+    for (k, v) in proxy_env {
+        if k.eq_ignore_ascii_case("all_proxy") {
+            url = Some(rewrite_loopback_proxy(v));
+            break;
+        }
+    }
+    if url.is_none() {
+        for (k, v) in proxy_env {
+            if k.eq_ignore_ascii_case("http_proxy") || k.eq_ignore_ascii_case("https_proxy") {
+                url = Some(rewrite_loopback_proxy(v));
+                break;
+            }
+        }
+    }
+    match url {
+        Some(url) => vec![("ALL_PROXY".into(), url.clone()), ("all_proxy".into(), url)],
+        None => Vec::new(),
+    }
+}
+
+/// Loopback proxy URLs are the manager host, not the container. Rewrite to
+/// the docker bridge gateway so in-container traffic can reach a host
+/// proxy. Production cf-warp is a LAN address and is left unchanged.
+fn rewrite_loopback_proxy(value: &str) -> String {
+    const GW: &str = "172.17.0.1";
+    value
+        .replace("@127.0.0.1", &format!("@{GW}"))
+        .replace("://127.0.0.1", &format!("://{GW}"))
+        .replace("@localhost", &format!("@{GW}"))
+        .replace("://localhost", &format!("://{GW}"))
+        .replace("@[::1]", &format!("@{GW}"))
+        .replace("://[::1]", &format!("://{GW}"))
+}
+
+/// One-shot `docker stats` for a named container: (memory_bytes, cpu_percent).
+pub async fn container_stats(name: &str) -> Option<(u64, f64)> {
+    let out = tokio::process::Command::new("docker")
+        .args([
+            "stats",
+            "--no-stream",
+            "--format",
+            "{{.MemUsage}}\t{{.CPUPerc}}",
+            name,
+        ])
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let line = String::from_utf8_lossy(&out.stdout);
+    let line = line.lines().next()?.trim();
+    if line.is_empty() {
+        return None;
+    }
+    let (mem_s, cpu_s) = line.split_once('\t').or_else(|| line.split_once(' '))?;
+    let mem = parse_docker_mem(mem_s.split('/').next().unwrap_or(mem_s).trim())?;
+    let cpu = cpu_s.trim().trim_end_matches('%').parse::<f64>().ok()?;
+    Some((mem, cpu))
+}
+
+fn parse_docker_mem(s: &str) -> Option<u64> {
+    let s = s.trim().replace(',', "");
+    let (num, unit) = s.split_at(s.find(|c: char| c.is_ascii_alphabetic()).unwrap_or(s.len()));
+    let n: f64 = num.trim().parse().ok()?;
+    let mul = match unit.trim().to_ascii_lowercase().as_str() {
+        "" | "b" => 1.0,
+        "kb" | "kib" => 1024.0,
+        "mb" | "mib" => 1024.0 * 1024.0,
+        "gb" | "gib" => 1024.0 * 1024.0 * 1024.0,
+        "tb" | "tib" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
+        _ => return None,
+    };
+    Some((n * mul) as u64)
+}
+
 impl DockerProvider {
     pub async fn sync(&self, ctx: &SyncContext) -> Result<SyncResult, ProviderError> {
         let mut cmd = Command::new("docker");
@@ -69,7 +186,16 @@ impl DockerProvider {
         for e in &self.env {
             cmd.arg("-e").arg(e);
         }
-        for (k, v) in &ctx.proxy_env {
+        if ctx.job.proxy.is_some() && ctx.proxy_env.is_empty() {
+            tracing::warn!(
+                "job `{}`: proxy `{}` selected but no proxy env was provided — container will go direct",
+                ctx.job_name,
+                ctx.job.proxy.as_deref().unwrap_or("")
+            );
+        }
+        // Docker must not inherit HTTP(S)_PROXY. Inject ALL_PROXY/all_proxy
+        // only (HTTP CONNECT expose or SOCKS).
+        for (k, v) in docker_proxy_env(&ctx.proxy_env) {
             cmd.arg("-e").arg(format!("{k}={v}"));
         }
         // SYNORA_* env for scripts inside the container.
@@ -110,8 +236,13 @@ impl DockerProvider {
             ))
             .arg("-e")
             .arg(format!("SYNORA_RUN_ID={}", ctx.run_id));
+        // git.sh against an interrupted bare clone (empty HEAD) fails with
+        // "not a git repository". Repair before the container starts.
+        if self.command.iter().any(|c| c.contains("git.sh")) {
+            let _ = crate::git::prepare_existing_repo(host_storage).await;
+        }
         cmd.arg(&self.image);
-        for arg in &self.command {
+        for arg in docker_exec_args(&self.command) {
             cmd.arg(arg);
         }
         cmd.stdin(Stdio::null())
@@ -139,13 +270,36 @@ impl DockerProvider {
         tokio::pin!(read_fut);
         let stdout: Vec<u8>;
         let stderr: Vec<u8>;
-        tokio::select! {
-            _ = ctx.cancel.cancelled() => {
-                kill_group(&mut child).await;
-                return Err(ProviderError::Cancelled);
+        let usage = ctx.usage.clone();
+        let stats_name = cname.clone();
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(2));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut peak_mem: u64 = 0;
+        let mut cpu_acc = 0.0f64;
+        loop {
+            tokio::select! {
+                _ = ctx.cancel.cancelled() => {
+                    kill_group(&mut child).await;
+                    return Err(ProviderError::Cancelled);
+                }
+                _ = ticker.tick() => {
+                    if let Some((mem, pct)) = container_stats(&stats_name).await {
+                        peak_mem = peak_mem.max(mem);
+                        cpu_acc += (pct / 100.0) * 2.0;
+                        if let Some(u) = &usage {
+                            u.lock().unwrap().record(peak_mem, cpu_acc, Some(pct));
+                        }
+                    }
+                }
+                r = &mut read_fut => {
+                    (stdout, stderr) = r;
+                    break;
+                }
             }
-            r = &mut read_fut => {
-                (stdout, stderr) = r;
+        }
+        if let Some(u) = &usage {
+            if peak_mem > 0 {
+                u.lock().unwrap().record(peak_mem, cpu_acc, None);
             }
         }
         let status = tokio::select! {
@@ -188,5 +342,87 @@ impl DockerProvider {
                 }
             )))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_string_becomes_sh_c() {
+        let args = docker_exec_args(&[
+            "timeout 18h python3 /home/tunasync-scripts/docker-ce.py --workers 10".into(),
+        ]);
+        assert_eq!(args[0], "/bin/sh");
+        assert_eq!(args[1], "-c");
+        assert!(args[2].contains("docker-ce.py"));
+    }
+
+    #[test]
+    fn argv_passthrough() {
+        let args = docker_exec_args(&["/home/tunasync-scripts/aosp.sh".into()]);
+        assert_eq!(args, vec!["/home/tunasync-scripts/aosp.sh"]);
+    }
+
+    #[test]
+    fn parse_docker_mem_units() {
+        assert_eq!(parse_docker_mem("16MiB"), Some(16 * 1024 * 1024));
+        assert_eq!(parse_docker_mem("1GiB"), Some(1024 * 1024 * 1024));
+        assert_eq!(parse_docker_mem("512KiB"), Some(512 * 1024));
+        assert_eq!(parse_docker_mem("100"), Some(100));
+    }
+
+    #[test]
+    fn rewrite_auth_and_plain_loopback() {
+        assert_eq!(
+            rewrite_loopback_proxy("http://127.0.0.1:5354"),
+            "http://172.17.0.1:5354"
+        );
+        assert_eq!(
+            rewrite_loopback_proxy("socks5h://synora:pass@127.0.0.1:14000"),
+            "socks5h://synora:pass@172.17.0.1:14000"
+        );
+    }
+
+    #[test]
+    fn docker_http_connect_as_all_proxy_only() {
+        let env = docker_proxy_env(&[
+            ("HTTP_PROXY".into(), "http://172.31.33.205:14000".into()),
+            ("HTTPS_PROXY".into(), "http://172.31.33.205:14000".into()),
+            ("ALL_PROXY".into(), "http://172.31.33.205:14000".into()),
+            ("http_proxy".into(), "http://172.31.33.205:14000".into()),
+        ]);
+        let map: std::collections::HashMap<_, _> = env.into_iter().collect();
+        assert!(!map.contains_key("HTTP_PROXY"));
+        assert!(!map.contains_key("HTTPS_PROXY"));
+        assert_eq!(
+            map.get("ALL_PROXY").map(String::as_str),
+            Some("http://172.31.33.205:14000")
+        );
+        assert_eq!(
+            map.get("all_proxy").map(String::as_str),
+            Some("http://172.31.33.205:14000")
+        );
+    }
+
+    #[test]
+    fn docker_keeps_socks_as_all_proxy_only() {
+        let env = docker_proxy_env(&[
+            ("HTTP_PROXY".into(), "socks5h://172.31.33.205:14001".into()),
+            ("HTTPS_PROXY".into(), "socks5h://172.31.33.205:14001".into()),
+            ("ALL_PROXY".into(), "socks5h://172.31.33.205:14001".into()),
+        ]);
+        let map: std::collections::HashMap<_, _> = env.into_iter().collect();
+        assert!(!map.contains_key("HTTP_PROXY"));
+        assert!(!map.contains_key("HTTPS_PROXY"));
+        assert_eq!(
+            map.get("ALL_PROXY").map(String::as_str),
+            Some("socks5h://172.31.33.205:14001")
+        );
+        assert_eq!(
+            map.get("all_proxy").map(String::as_str),
+            Some("socks5h://172.31.33.205:14001")
+        );
     }
 }

@@ -8,8 +8,60 @@
 use crate::{
     cancelled_after_wait, kill_group, spawn_group, ProviderError, SyncContext, SyncResult,
 };
+use std::path::Path;
 use std::process::Stdio;
 use tokio::process::Command;
+
+async fn git_ok(args: &[&str]) -> bool {
+    tokio::process::Command::new("git")
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Repair a bare repo with an empty HEAD (interrupted git.sh) or report
+/// that `dest` is not a usable git directory.
+pub(crate) async fn prepare_existing_repo(dest: &str) -> bool {
+    if git_ok(&["-C", dest, "rev-parse", "--git-dir"]).await {
+        return true;
+    }
+    let dest_path = Path::new(dest);
+    if dest_path.join("objects").is_dir() && dest_path.join("config").is_file() {
+        let head = dest_path.join("HEAD");
+        let bytes = tokio::fs::read(&head).await.unwrap_or_default();
+        if bytes.iter().all(|b| b.is_ascii_whitespace()) {
+            let _ = tokio::fs::write(&head, b"ref: refs/heads/master\n").await;
+        }
+        if git_ok(&["--git-dir", dest, "rev-parse", "--git-dir"]).await {
+            return true;
+        }
+    }
+    false
+}
+
+async fn quarantine_invalid_dest(dest: &str) -> Result<(), ProviderError> {
+    let path = Path::new(dest);
+    if !path.exists() {
+        return Ok(());
+    }
+    if prepare_existing_repo(dest).await {
+        return Ok(());
+    }
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let bak = format!("{dest}.corrupt.{ts}");
+    tokio::fs::rename(dest, &bak).await.map_err(|e| {
+        ProviderError::Other(format!("cannot quarantine invalid git dest {dest}: {e}"))
+    })?;
+    tracing::warn!("moved invalid git dest {dest} -> {bak}");
+    Ok(())
+}
 
 pub struct GitProvider {
     /// Clone only this branch (checkout mode); None = full mirror.
@@ -25,17 +77,13 @@ impl GitProvider {
             .storage
             .to_str()
             .ok_or_else(|| ProviderError::Config("storage path is not UTF-8".into()))?;
-        // A directory that is already a VALID git repo gets updated;
-        // anything else (including interrupted clone leftovers like an empty
-        // HEAD file) gets a fresh clone.
-        let is_repo = tokio::process::Command::new("git")
-            .args(["-C", dest, "rev-parse", "--git-dir"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await
-            .map(|s| s.success())
-            .unwrap_or(false);
+        // Valid repo (or a bare clone we could repair) is updated in place.
+        // Anything else that already occupies dest is quarantined so clone
+        // can write to an empty path — never clone onto leftovers.
+        let is_repo = prepare_existing_repo(dest).await;
+        if !is_repo {
+            quarantine_invalid_dest(dest).await?;
+        }
 
         let mut cmd = Command::new("git");
         match (&self.branch, is_repo) {

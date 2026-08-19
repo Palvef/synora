@@ -27,11 +27,13 @@ pub struct StateError {
 /// row is created when the job is re-dispatched (spec §29).
 pub fn transition(cur: JobStatus, ev: RunEvent) -> Result<JobStatus, StateError> {
     let next = match (cur, ev) {
-        (JobStatus::Queued, RunEvent::Starting) => JobStatus::Starting,
+        (JobStatus::Queued, RunEvent::Starting) => JobStatus::Syncing,
         (JobStatus::Queued, RunEvent::Cancelled) => JobStatus::Cancelled,
-        (JobStatus::Starting, RunEvent::Running) => JobStatus::Running,
-        (JobStatus::Starting, RunEvent::Cancelling) => JobStatus::Cancelling,
-        (JobStatus::Starting, RunEvent::Lost) => JobStatus::Lost,
+        (JobStatus::Syncing, RunEvent::Running) => JobStatus::Running,
+        (JobStatus::Syncing, RunEvent::Success) => JobStatus::Success,
+        (JobStatus::Syncing, RunEvent::Failed) => JobStatus::Failed,
+        (JobStatus::Syncing, RunEvent::Cancelling) => JobStatus::Cancelling,
+        (JobStatus::Syncing, RunEvent::Lost) => JobStatus::Lost,
         (JobStatus::Running, RunEvent::Success) => JobStatus::Success,
         (JobStatus::Running, RunEvent::Failed) => JobStatus::Failed,
         (JobStatus::Running, RunEvent::Cancelling) => JobStatus::Cancelling,
@@ -120,7 +122,7 @@ mod tests {
             JobStatus::Lost
         );
         assert_eq!(
-            transition(JobStatus::Starting, RunEvent::Lost).unwrap(),
+            transition(JobStatus::Syncing, RunEvent::Lost).unwrap(),
             JobStatus::Lost
         );
         // Lost is terminal for the run row.
