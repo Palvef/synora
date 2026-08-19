@@ -86,6 +86,51 @@ pub fn walk_size(root: &Path) -> u64 {
     walk(root).1
 }
 
+/// Best-effort repository size: prefer ZFS `used` (instant, matches the
+/// on-disk mirror) and never fall back to a full tree walk — alpine/AOSP
+/// are multi-terabyte.
+pub fn measure_repo_size(root: &Path) -> Option<u64> {
+    zfs_used_for(root)
+}
+
+/// Parse `zfs list -Hp -o used,mountpoint` and pick the longest mountpoint
+/// that equals `root` (exact match only — the pool root would otherwise
+/// report 70T+ for every job).
+pub fn zfs_used_for(root: &Path) -> Option<u64> {
+    let out = std::process::Command::new("zfs")
+        .args(["list", "-Hp", "-o", "used,mountpoint"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_zfs_used(&String::from_utf8_lossy(&out.stdout), root)
+}
+
+pub fn parse_zfs_used(text: &str, root: &Path) -> Option<u64> {
+    let want = root.to_string_lossy().trim_end_matches('/').to_string();
+    let mut best: Option<(usize, u64)> = None;
+    for line in text.lines() {
+        let mut parts = line.split('\t');
+        let (Some(used_s), Some(mp)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        let mp = mp.trim().trim_end_matches('/');
+        if mp.is_empty() {
+            continue;
+        }
+        if want == mp {
+            if let Ok(used) = used_s.parse::<u64>() {
+                let score = mp.len();
+                if best.map(|(s, _)| score >= s).unwrap_or(true) {
+                    best = Some((score, used));
+                }
+            }
+        }
+    }
+    best.map(|(_, used)| used)
+}
+
 /// Remove per-run log files beyond the newest `keep` (named
 /// `<job>_<timestamp>.log`).
 fn prune_run_logs(dir: &Path, job_name: &str, keep: usize) {
@@ -138,4 +183,31 @@ pub fn walk(root: &Path) -> (u64, u64) {
         }
     }
     (files, bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_zfs_used;
+    use std::path::Path;
+
+    #[test]
+    fn zfs_used_exact_mountpoint_only() {
+        let text = "\
+83902267392\t/datas/adobe-fonts
+1530082091008\t/datas/docker-ce
+1975684956160\t/datas/git/AOSP
+85899345920\t/datas
+";
+        assert_eq!(
+            parse_zfs_used(text, Path::new("/datas/git/AOSP")),
+            Some(1975684956160)
+        );
+        assert_eq!(
+            parse_zfs_used(text, Path::new("/datas/adobe-fonts")),
+            Some(83902267392)
+        );
+        assert_eq!(parse_zfs_used(text, Path::new("/datas/missing")), None);
+        // Pool root must not be used as a fallback for a child dataset.
+        assert_eq!(parse_zfs_used(text, Path::new("/datas/rubygems")), None);
+    }
 }

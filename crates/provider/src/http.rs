@@ -19,19 +19,15 @@ impl HttpProvider {
             .upstream
             .as_deref()
             .ok_or_else(|| ProviderError::Config("http provider requires `upstream`".into()))?;
-        // Egress: the manager-dispatched proxy env (e.g. cf-warp expose) wins.
-        // The expose endpoint is an authenticated HTTP CONNECT proxy, so a
-        // socks5h:// dispatch URL is used as http:// here (reqwest tunnels
-        // CONNECT; it has no socks feature).
+        // Manager-dispatched proxy env wins. Expose is HTTP CONNECT
+        // (`http://host:port`); reqwest uses that as-is. Do not rewrite.
         let proxy = ctx
             .proxy_env
             .iter()
-            .find(|(k, _)| k == "HTTP_PROXY" || k == "ALL_PROXY")
-            .map(|(_, v)| {
-                v.strip_prefix("socks5h://")
-                    .map(|rest| format!("http://{rest}"))
-                    .unwrap_or_else(|| v.clone())
-            });
+            .find(|(k, _)| {
+                k.eq_ignore_ascii_case("all_proxy") || k.eq_ignore_ascii_case("http_proxy")
+            })
+            .map(|(_, v)| v.clone());
         let fetcher = httpfetch::Fetcher::with_proxy(proxy.as_deref())
             .map_err(|e| ProviderError::Other(e.to_string()))?
             .with_threads(self.threads.unwrap_or(httpfetch::DEFAULT_THREADS as u32) as usize);

@@ -10,7 +10,6 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
@@ -88,8 +87,9 @@ pub struct FetchStats {
     /// Files skipped after a per-file failure (download error, timeout,
     /// failed delete) — a single bad file never aborts a sync.
     pub files_skipped: u32,
-    /// Sum of remote sizes of everything planned for download; `None` when
-    /// any planned file's size was unknown.
+    /// Sum of remote sizes of every regular file in the listing (the
+    /// repository size), whether or not it needs downloading. `None` when
+    /// any remote file's size was unknown.
     pub total_size_hint: Option<u64>,
     /// Per-file detail lines (downloaded/skipped/deleted) for run logs.
     pub log_lines: Vec<String>,
@@ -107,6 +107,9 @@ pub struct Plan {
     size_sum: u64,
     size_unknown: bool,
     total_size_hint: Option<u64>,
+    /// True when the listing was truncated or a subdirectory failed — deletes
+    /// must not run against a partial remote set.
+    incomplete: bool,
 }
 
 /// HTTP fetcher: a reqwest client with rustls, redirects followed (max 10),
@@ -155,6 +158,32 @@ impl Fetcher {
     /// the entry path to `base_url`. Fails only if the base index itself is
     /// unreachable; a broken subdirectory listing is warned about and
     /// skipped.
+    async fn get_listing(&self, url: &str) -> Result<Vec<u8>, FetchError> {
+        let mut last = FetchError::Http(format!("GET {url} failed"));
+        for attempt in 1..=4u32 {
+            let sent = self.client.get(url).send().await;
+            match sent {
+                Ok(resp) => match resp.error_for_status() {
+                    Ok(ok) => match ok.bytes().await {
+                        Ok(body) => return Ok(body.to_vec()),
+                        Err(e) => last = e.into(),
+                    },
+                    Err(e) => last = e.into(),
+                },
+                Err(e) => last = e.into(),
+            }
+            if attempt == 4 || !listing_error_transient(&last) {
+                return Err(last);
+            }
+            tracing::warn!("listing {url} attempt {attempt} failed: {last}; retrying");
+            tokio::time::sleep(std::time::Duration::from_millis(
+                300 * u64::from(attempt).pow(2),
+            ))
+            .await;
+        }
+        Err(last)
+    }
+
     pub async fn plan(
         &self,
         base_url: &str,
@@ -178,9 +207,20 @@ impl Fetcher {
             dirs: 0,
             last_report: tokio::time::Instant::now(),
             log_file,
+            listing_failed: false,
         };
         planner.dir(base_url, "", depth.min(MAX_DEPTH)).await?;
-        if delete {
+        if delete && planner.listing_failed {
+            return Err(FetchError::Http(
+                "subdirectory listing failed; refusing delete to avoid wiping the mirror".into(),
+            ));
+        }
+        if delete && plan.incomplete {
+            tracing::warn!(
+                "listing incomplete (entry/depth cap); skipping deletes for {}",
+                storage.display()
+            );
+        } else if delete {
             plan.deletes = local_extras(storage, &remote).await?;
         }
         plan.total_size_hint = if plan.size_unknown {
@@ -191,8 +231,8 @@ impl Fetcher {
         Ok(plan)
     }
 
-    /// Execute a plan concurrently (up to `self.threads` in-flight, via a
-    /// tokio semaphore) with a cancel token. Each file downloads to
+    /// Execute a plan concurrently (up to `self.threads` in-flight) with a
+    /// cancel token. Each file downloads to
     /// `dest.partial` then renames into place; a failed file is warned about
     /// and skipped, never fatal — only cancellation aborts the run. Planned
     /// symlinks are (re)created after downloads and deletes. Summed stats
@@ -232,31 +272,32 @@ impl Fetcher {
                 plan.symlinks.len()
             ),
         );
-        let sem = Arc::new(tokio::sync::Semaphore::new(self.threads));
-        let mut tasks = Vec::with_capacity(plan.downloads.len());
-        for (url, dest) in &plan.downloads {
+        let mut remaining = plan.downloads.iter().cloned();
+        let mut in_flight: tokio::task::JoinSet<Result<(u64, String), (FetchError, String)>> =
+            tokio::task::JoinSet::new();
+        let spawn_one = |set: &mut tokio::task::JoinSet<_>, url: String, dest: PathBuf| {
             let client = self.client.clone();
-            let sem = Arc::clone(&sem);
             let cancel = cancel.clone();
-            let url = url.clone();
-            let dest = dest.clone();
-            tasks.push(tokio::spawn(async move {
-                let _permit = sem
-                    .acquire_owned()
-                    .await
-                    .map_err(|_| (FetchError::Cancelled, url.clone()))?;
+            set.spawn(async move {
                 let u2 = url.clone();
                 download_one(&client, &url, &dest, &cancel)
                     .await
                     .map(|b| (b, u2.clone()))
                     .map_err(|e| (e, u2))
-            }));
+            });
+        };
+        for _ in 0..self.threads {
+            match remaining.next() {
+                Some((url, dest)) => spawn_one(&mut in_flight, url, dest),
+                None => break,
+            }
         }
         // Single-file failures must not sink the whole sync: warn (done in
-        // download_one) and carry on; only cancellation aborts.
+        // download_one) and carry on; only cancellation aborts. At most
+        // `threads` tasks exist at once (not one task per file).
         let mut cancelled = false;
-        for task in tasks {
-            match task.await {
+        while let Some(joined) = in_flight.join_next().await {
+            match joined {
                 Ok(Ok((bytes, url))) => {
                     stats.downloaded_bytes += bytes;
                     stats.files_downloaded += 1;
@@ -272,6 +313,15 @@ impl Fetcher {
                 Err(_) => {
                     tracing::warn!("download task panicked");
                     stats.files_skipped += 1;
+                }
+            }
+            if stats.log_lines.len() > 256 {
+                let drop_n = stats.log_lines.len() - 256;
+                stats.log_lines.drain(0..drop_n);
+            }
+            if !cancelled {
+                if let Some((url, dest)) = remaining.next() {
+                    spawn_one(&mut in_flight, url, dest);
                 }
             }
             if last_report.elapsed() >= PROGRESS_INTERVAL {
@@ -368,6 +418,23 @@ impl Default for Fetcher {
     }
 }
 
+fn listing_error_transient(err: &FetchError) -> bool {
+    let s = err.to_string().to_ascii_lowercase();
+    s.contains("timeout")
+        || s.contains("timed out")
+        || s.contains("connection")
+        || s.contains("reset")
+        || s.contains("refused")
+        || s.contains("proxy")
+        || s.contains("error sending request")
+        || s.contains("502")
+        || s.contains("503")
+        || s.contains("504")
+        || s.contains("522")
+        || s.contains("523")
+        || s.contains("524")
+}
+
 /// Recursive planner: fetches one index, diffs files against local storage,
 /// recurses into dirs. One planner per `plan()` call; `seen` bounds total
 /// entries and `dir` is reentrant per depth.
@@ -381,6 +448,7 @@ struct Planner<'a> {
     dirs: usize,
     last_report: tokio::time::Instant,
     log_file: Option<&'a Path>,
+    listing_failed: bool,
 }
 
 impl Planner<'_> {
@@ -395,18 +463,11 @@ impl Planner<'_> {
                 &format!("planning: listed {} entries so far (at {url})", self.seen),
             );
         }
-        let body = self
-            .fetcher
-            .client
-            .get(url)
-            .send()
-            .await?
-            .error_for_status()?
-            .bytes()
-            .await?;
+        let body = self.fetcher.get_listing(url).await?;
         for entry in self.parser.parse(&body) {
             if self.seen >= MAX_ENTRIES {
                 tracing::warn!("index entry cap ({MAX_ENTRIES}) reached at {url}");
+                self.plan.incomplete = true;
                 break;
             }
             if !is_safe_rel(&entry.path) {
@@ -424,24 +485,29 @@ impl Planner<'_> {
             match entry.kind {
                 parser::EntryKind::Dir => {
                     if depth == 0 {
+                        self.plan.incomplete = true;
                         continue;
                     }
                     let child_url = join_slash(url, &entry.path);
                     let child_rel = rel.trim_end_matches('/').to_string();
                     let result = Box::pin(self.dir(&child_url, &child_rel, depth - 1)).await;
                     if let Err(e) = result {
-                        // A broken subdirectory must not sink the whole plan.
+                        // A broken subdirectory must not sink the whole plan,
+                        // but it DOES make the remote set incomplete — deletes
+                        // are refused by the caller.
                         tracing::warn!("listing {child_url} failed: {e}");
+                        self.plan.incomplete = true;
+                        self.listing_failed = true;
                     }
                 }
                 parser::EntryKind::File => {
-                    let dest = self.storage.join(&rel);
-                    if local_matches(&dest, &entry).await {
-                        continue;
-                    }
                     match entry.size {
                         Some(s) => self.plan.size_sum += s,
                         None => self.plan.size_unknown = true,
+                    }
+                    let dest = self.storage.join(&rel);
+                    if local_matches(&dest, &entry).await {
+                        continue;
                     }
                     self.plan.downloads.push((join(url, &entry.path), dest));
                 }
@@ -480,17 +546,21 @@ async fn local_matches(dest: &Path, entry: &parser::Entry) -> bool {
         // match so the planner never plans a download for it.
         return true;
     }
-    if entry.size == Some(meta.len()) {
-        return true;
+    // Size is authoritative when the listing carries it. Same mtime with a
+    // different size is a change (OR-ing the two skipped real updates).
+    match entry.size {
+        Some(remote_size) => remote_size == meta.len(),
+        None => {
+            let Some(remote) = entry.modified else {
+                return false;
+            };
+            let Ok(local_sys) = meta.modified() else {
+                return false;
+            };
+            let local = time::OffsetDateTime::from(local_sys);
+            time::PrimitiveDateTime::new(local.date(), local.time()) == remote
+        }
     }
-    let Some(remote) = entry.modified else {
-        return false;
-    };
-    let Ok(local_sys) = meta.modified() else {
-        return false;
-    };
-    let local = time::OffsetDateTime::from(local_sys);
-    time::PrimitiveDateTime::new(local.date(), local.time()) == remote
 }
 
 /// Walk the local mirror; anything not present in the remote index is
@@ -847,6 +917,19 @@ mod tests {
 
     // --- tests --------------------------------------------------------
 
+    #[test]
+    fn listing_error_classifies_proxy_blips() {
+        assert!(listing_error_transient(&FetchError::Http(
+            "error sending request for url (https://example/)".into(),
+        )));
+        assert!(listing_error_transient(&FetchError::Http(
+            "http error: connection refused".into(),
+        )));
+        assert!(!listing_error_transient(&FetchError::Http(
+            "404 Not Found".into()
+        )));
+    }
+
     #[tokio::test]
     async fn sync_downloads_full_tree() {
         let mirror = TestMirror::new(&[
@@ -894,7 +977,7 @@ mod tests {
         std::fs::write(storage.join("hello.txt"), "HOLA!").unwrap();
         // Different size, different mtime → downloaded.
         std::fs::write(storage.join("sub/world.txt"), "world!").unwrap();
-        // Different size, but mtime matches the listing date → skipped.
+        // Different size, even if mtime matches the listing date → download.
         std::fs::write(storage.join("sub/deep/notes.md"), "LOCAL-NOTES").unwrap();
         set_mtime(&storage.join("sub/deep/notes.md"), listing_date());
         let fetcher = Fetcher::new().unwrap();
@@ -903,8 +986,8 @@ mod tests {
             .sync(&base, "nginx", &storage, false, 3, &cancel, None)
             .await
             .unwrap();
-        assert_eq!(stats.files_downloaded, 1);
-        assert_eq!(stats.downloaded_bytes, 5);
+        assert_eq!(stats.files_downloaded, 2);
+        assert_eq!(stats.total_size_hint, Some(15));
         assert_eq!(
             tokio::fs::read_to_string(storage.join("hello.txt"))
                 .await
@@ -921,7 +1004,7 @@ mod tests {
             tokio::fs::read_to_string(storage.join("sub/deep/notes.md"))
                 .await
                 .unwrap(),
-            "LOCAL-NOTES"
+            "note!"
         );
     }
 
@@ -1182,6 +1265,16 @@ mod tests {
             .unwrap();
         assert_eq!(plan.downloads.len(), 1);
         assert_eq!(plan.downloads[0].0, format!("{base}/ok.txt"));
+        // delete=true must refuse rather than treat missing children as extras.
+        let err = fetcher
+            .plan(&base, "nginx", &storage, true, 2, None)
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("refusing delete") || msg.contains("listing failed"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[tokio::test]

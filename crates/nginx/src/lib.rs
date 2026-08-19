@@ -83,29 +83,71 @@ impl NginxParser {
 /// displayed name (`name@`, or `name@/` when the link points at a
 /// directory — the href never gets the trailing slash).
 fn classify(display: &str, href: &str) -> (EntryKind, String, Option<String>) {
+    // Path comes from the href, never the visible label. Fancyindex /
+    // postgres-style pages put chrome text ("FilesAdmin…>") in the
+    // anchor body; using that as a path produced garbage URLs and an
+    // incomplete remote set (dangerous with delete=true).
+    let path = percent_decode(href);
     if href.ends_with('/') {
-        return (EntryKind::Dir, display.to_string(), None);
+        return (EntryKind::Dir, path, None);
     }
-    if let Some(stripped) = display.trim_end_matches('/').strip_suffix('@') {
+    if display.trim_end_matches('/').ends_with('@') {
         // ponytail: a plain file genuinely named `foo@` is misread as a
         // symlink (fancyindex would render it `foo@@`); acceptable cost.
-        return (EntryKind::Symlink, stripped.to_string(), None);
+        return (EntryKind::Symlink, path, None);
     }
-    (EntryKind::File, display.to_string(), None)
+    (EntryKind::File, path, None)
 }
 
 fn is_listable(href: &str) -> bool {
     if href == "../"
+        || href == ".."
         || href == "/"
         || href.starts_with("http://")
         || href.starts_with("https://")
         || href.starts_with("mailto:")
-        || href.contains("?")
+        || href.contains('?')
     {
+        return false;
+    }
+    if href
+        .chars()
+        .any(|c| c.is_whitespace() || c == '<' || c == '>')
+    {
+        return false;
+    }
+    if href.split('/').any(|seg| seg == "..") {
         return false;
     }
     let name = href.trim_end_matches('/').rsplit('/').next().unwrap_or("");
     !name.is_empty() && name != "."
+}
+
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (from_hex(bytes[i + 1]), from_hex(bytes[i + 2])) {
+                out.push((hi << 4) | lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn from_hex(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// href attribute value from the anchor tag, without quotes and HTML entities.
@@ -366,5 +408,30 @@ mod tests {
         );
         assert_eq!(parse_size_token("42").unwrap(), 42);
         assert!(parse_size_token("abc").is_none());
+    }
+
+    #[test]
+    fn href_is_the_path_not_display_text() {
+        let html = r#"<pre>
+<a href="A/">FilesAdmin something&gt;</a>    16-Aug-2026 10:00    -
+<a href="ok.txt">FilesAdmin</a>    16-Aug-2026 10:00    3
+</pre>"#;
+        let entries = NginxParser::parse(html.as_bytes());
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].path, "A/");
+        assert_eq!(entries[0].kind, EntryKind::Dir);
+        assert_eq!(entries[1].path, "ok.txt");
+    }
+
+    #[test]
+    fn rejects_traversal_whitespace_and_junk_href() {
+        let html = r#"<pre>
+<a href="../secret">x</a>    16-Aug-2026 10:00    1
+<a href="foo bar">y</a>    16-Aug-2026 10:00    1
+<a href="ok.txt">ok.txt</a>    16-Aug-2026 10:00    3
+</pre>"#;
+        let entries = NginxParser::parse(html.as_bytes());
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "ok.txt");
     }
 }
