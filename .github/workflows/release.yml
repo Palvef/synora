@@ -1,37 +1,73 @@
 name: Release
 
-# Bumping the VERSION file on master builds every platform and publishes a
-# GitHub release tagged v<version>.
+# VERSION bumps, this workflow file, or a manual dispatch publish v<VERSION>
+# when that GitHub release is still missing.
 on:
+  workflow_dispatch:
   push:
     branches: [master]
     paths:
       - "VERSION"
+      - ".github/workflows/release.yml"
+
+concurrency:
+  group: release
+  cancel-in-progress: true
 
 permissions:
   contents: write
 
 jobs:
+  gate:
+    name: Decide whether to publish
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      sha: ${{ steps.meta.outputs.sha }}
+      should: ${{ steps.meta.outputs.should }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Inspect version and existing release
+        id: meta
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ver=$(tr -d '[:space:]' < VERSION)
+          sha=$(git rev-parse HEAD)
+          echo "version=$ver" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          if gh release view "v$ver" >/dev/null 2>&1; then
+            echo "GitHub release v$ver already exists"
+            echo "should=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "should=true" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
     name: Build ${{ matrix.target }}
+    needs: gate
+    if: needs.gate.outputs.should == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 40
+    continue-on-error: ${{ matrix.optional }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
+            optional: false
           - target: aarch64-unknown-linux-gnu
+            optional: true
     steps:
       - uses: actions/checkout@v5
-
-      - name: Read version
-        id: version
-        run: echo "value=$(cat VERSION | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
 
       - name: Check VERSION matches Cargo.toml
         run: |
           cargo_ver=$(grep -m1 '^version' Cargo.toml | sed 's/.*= *"\([0-9.]*\)".*/\1/')
-          ver=$(cat VERSION | tr -d '[:space:]')
+          ver=$(tr -d '[:space:]' < VERSION)
           test "$ver" = "$cargo_ver" || { echo "VERSION ($ver) != Cargo.toml ($cargo_ver)"; exit 1; }
 
       - uses: dtolnay/rust-toolchain@stable
@@ -44,9 +80,12 @@ jobs:
 
       - name: Install cross toolchain (linux aarch64)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          timeout 180 sudo -E apt-get -o Acquire::Retries=5 update -y
+          timeout 240 sudo -E apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu libc6-dev-arm64-cross
 
       - name: Build release binaries
         env:
@@ -56,7 +95,7 @@ jobs:
 
       - name: Package
         env:
-          VER: ${{ steps.version.outputs.value }}
+          VER: ${{ needs.gate.outputs.version }}
         run: |
           cd target/${{ matrix.target }}/release
           for b in synora synora-manager synora-worker; do
@@ -67,22 +106,18 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: synora-${{ matrix.target }}
-          # synora-*.tar.gz already covers manager and worker: overlapping
-          # patterns upload each file twice and break the release step
-          # with "ReleaseAsset.name already exists".
           path: synora-*.tar.gz
           if-no-files-found: error
 
   publish:
     name: Publish GitHub release
-    needs: build
+    needs: [gate, build]
+    if: always() && needs.gate.outputs.should == 'true' && !cancelled()
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-
-      - name: Read version
-        id: version
-        run: echo "value=$(cat VERSION | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
 
       - uses: actions/download-artifact@v4
         with:
@@ -95,9 +130,16 @@ jobs:
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
-          VER: ${{ steps.version.outputs.value }}
+          VER: ${{ needs.gate.outputs.version }}
         run: |
+          shopt -s nullglob
+          files=(artifacts/synora-*-x86_64-unknown-linux-gnu.tar.gz)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "x86_64 release artifacts are missing"
+            exit 1
+          fi
           gh release create "v$VER" \
             artifacts/synora-*.tar.gz \
             --title "v$VER" --notes-file RELEASE_NOTES.md \
+            --target "${{ needs.gate.outputs.sha }}" \
           || gh release upload "v$VER" artifacts/synora-*.tar.gz --clobber
