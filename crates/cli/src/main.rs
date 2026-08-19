@@ -115,8 +115,9 @@ enum WorkerCmd {
         #[arg(long)]
         token: Option<String>,
     },
-    /// Drain a worker (no new runs; unregister when idle)
-    Drain {
+    /// Stop a worker accepting new runs; `drain` is a compatibility alias
+    #[command(visible_alias = "drain")]
+    Retire {
         id: String,
         #[arg(long)]
         manager: Option<String>,
@@ -255,7 +256,7 @@ async fn run(cli: Cli) -> Result<(), String> {
             }
             JobCmd::Stop { job } => cmd_stop(job, config)?,
             JobCmd::Logs { job, lines } => cmd_logs(job, lines, config)?,
-            JobCmd::Delete { job } => cmd_delete_job(job, config)?,
+            JobCmd::Delete { job } => cmd_delete_job(job, config).await?,
         },
         Command::Logs { job, lines } => cmd_logs(job, lines, config)?,
         Command::Stop { job } => cmd_stop(job, config)?,
@@ -270,7 +271,7 @@ async fn run(cli: Cli) -> Result<(), String> {
         },
         Command::Worker { cmd } => match cmd {
             WorkerCmd::List { manager, token } => cmd_worker_list(config, manager, token).await?,
-            WorkerCmd::Drain { id, manager, token } => {
+            WorkerCmd::Retire { id, manager, token } => {
                 cmd_worker_drain(id, config, manager, token).await?
             }
         },
@@ -521,50 +522,31 @@ fn cmd_logs(job: String, lines: usize, config: Option<PathBuf>) -> Result<(), St
     Ok(())
 }
 
-/// Remove a `[[jobs]]` entry (by name) from every file in the include
-/// tree, then reload. The job definition is expected in one of the
-/// `jobs/*.toml` files; a file whose job list becomes empty is removed.
-fn cmd_delete_job(job: String, config: Option<PathBuf>) -> Result<(), String> {
+/// Remove a `[[jobs]]` entry from every file in the include tree, then
+/// ask the manager to purge every DB row for that job.
+async fn cmd_delete_job(job: String, config: Option<PathBuf>) -> Result<(), String> {
     if !valid_job_name(&job) {
         return Err(format!("invalid job name `{job}`"));
     }
-    let path = find_config(config)?;
-    let mut removed = false;
-    let main_dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
-    for entry in glob::glob(&format!("{}/**/*.toml", main_dir.display()))
-        .map_err(|e| e.to_string())?
-        .flatten()
-    {
-        let text = std::fs::read_to_string(&entry).map_err(|e| e.to_string())?;
-        let needle = format!("name = \"{job}\"");
-        if !text.contains(&needle) {
-            continue;
-        }
-        let mut out = String::new();
-        let mut skip = false;
-        for line in text.lines() {
-            if line.trim() == "[[jobs]]" {
-                skip = false;
-            } else if line.trim() == needle.trim() {
-                skip = true;
-                continue;
+    let path = find_config(config.clone())?;
+    match config::remove_job_block(&path, &job) {
+        Ok(files) => {
+            for f in files {
+                println!("removed job `{job}` from {}", f.display());
             }
-            if skip {
-                continue;
-            }
-            out.push_str(line);
-            out.push('\n');
         }
-        std::fs::write(&entry, out).map_err(|e| e.to_string())?;
-        println!("removed job `{job}` from {}", entry.display());
-        removed = true;
+        Err(e) => println!("config: {e}"),
     }
-    if !removed {
-        return Err(format!("job `{job}` not found in any config file"));
+    let (url, token) = manager_creds(config, None, None)?;
+    let client = api::Client::new(&url, &token).map_err(|e| e.to_string())?;
+    match client.delete_job(&job).await {
+        Ok(()) => println!("purged job `{job}` from manager database"),
+        Err(e) => {
+            return Err(format!(
+                "config updated but manager purge failed: {e} (is synora-manager running?)"
+            ));
+        }
     }
-    // Reload through the local daemon (SIGHUP) when running standalone;
-    // the manager API otherwise.
-    println!("run `synora reload` (or POST /api/v1/reload) to apply");
     Ok(())
 }
 
@@ -732,7 +714,7 @@ async fn cmd_worker_drain(
     let (url, token) = manager_creds(config, manager, token)?;
     let client = api::Client::new(&url, &token).map_err(|e| e.to_string())?;
     client.drain_worker(&id).await.map_err(|e| e.to_string())?;
-    println!("worker `{id}` draining");
+    println!("worker `{id}` stopped accepting new runs");
     Ok(())
 }
 
