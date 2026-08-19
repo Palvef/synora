@@ -729,6 +729,7 @@ async fn finish_run(engine: &Arc<Engine>, run_id: &str, job: &JobSpec, outcome: 
     };
 
     if success {
+        run_hooks(&job.hooks.on_success, &hook_ctx(job, run_id), None).await;
         let result = outcome.result.as_ref().ok();
         let _ = engine
             .store
@@ -782,7 +783,6 @@ async fn finish_run(engine: &Arc<Engine>, run_id: &str, job: &JobSpec, outcome: 
         engine
             .notify("sync_success", Some(&job.name), "run succeeded")
             .await;
-        run_hooks(&job.hooks.on_success, &hook_ctx(job, run_id), None).await;
     } else {
         let kind = outcome
             .result
