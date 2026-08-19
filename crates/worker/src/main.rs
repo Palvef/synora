@@ -49,6 +49,8 @@ fn default_log_dir() -> String {
 
 struct Running {
     cancel: CancellationToken,
+    job: String,
+    usage: provider::UsageSink,
 }
 
 /// toml::Value → serde_json::Value (our inert sections are TOML).
@@ -169,22 +171,41 @@ async fn main() -> Result<(), String> {
     let shutdown = Arc::new(AtomicBool::new(false));
     let running: Arc<tokio::sync::Mutex<HashMap<String, Running>>> =
         Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-    // Worker exit stops every sync and removes the job containers (user
-    // requirement). Helper defined inline so both signal paths share it.
-    async fn stop_everything(
+    // Worker exit: stop accepting work, cancel runs, then the main loop
+    // drains, removes leftover job containers, and unregisters.
+    async fn request_stop(
         running: Arc<tokio::sync::Mutex<HashMap<String, Running>>>,
         shutdown: Arc<AtomicBool>,
     ) {
+        shutdown.store(true, Ordering::SeqCst);
         for r in running.lock().await.values() {
             r.cancel.cancel();
         }
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        let _ = tokio::process::Command::new("docker")
-            .args(["rm", "-f"])
-            .arg("$(docker ps -aq --filter name=synora-job-)")
-            .status()
+    }
+
+    async fn cleanup_job_containers() {
+        let out = tokio::process::Command::new("docker")
+            .args(["ps", "-aq", "--filter", "name=synora-job-"])
+            .output()
             .await;
-        shutdown.store(true, Ordering::SeqCst);
+        let Ok(out) = out else {
+            return;
+        };
+        let ids: Vec<String> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        let mut cmd = tokio::process::Command::new("docker");
+        cmd.arg("rm").arg("-f");
+        for id in &ids {
+            cmd.arg(id);
+        }
+        let _ = cmd.status().await;
     }
 
     // SIGTERM/SIGINT: drain — finish current runs, unregister, exit (spec §11).
@@ -197,7 +218,7 @@ async fn main() -> Result<(), String> {
                 _ = wait_sigterm() => {}
             }
             tracing::info!("stopping all runs and removing job containers");
-            stop_everything(running2, shutdown2).await;
+            request_stop(running2, shutdown2).await;
         });
         // SIGHUP (systemd reload): exit cleanly — Restart=always brings the
         // worker back with the updated config and proxy listeners.
@@ -207,20 +228,58 @@ async fn main() -> Result<(), String> {
             tokio::spawn(async move {
                 wait_sighup().await;
                 tracing::info!("SIGHUP received — stopping runs for restart");
-                stop_everything(running2, shutdown2).await;
+                request_stop(running2, shutdown2).await;
             });
         }
     }
 
     loop {
-        // Idle workers poll fast so forced runs start almost immediately;
-        // busy workers keep the normal cadence.
+        // Poll fast while under the concurrency cap so a worker can fill
+        // all slots (production: 30) instead of claiming one every 15s.
         let jobs_running = running.lock().await.len() as u32;
-        let delay = if jobs_running == 0 { 2 } else { 15 };
-        tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
         if shutdown.load(Ordering::SeqCst) {
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+            while tokio::time::Instant::now() < deadline && !running.lock().await.is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            cleanup_job_containers().await;
+            if let Err(e) = client.unregister(&worker_id).await {
+                tracing::warn!("unregister failed: {e}");
+            } else {
+                tracing::info!("unregistered cleanly");
+            }
             break;
         }
+        let delay = if jobs_running < worker_cfg.max_concurrency {
+            2
+        } else {
+            15
+        };
+        tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+        if shutdown.load(Ordering::SeqCst) {
+            continue;
+        }
+        let (resources, active_jobs) = {
+            let guard = running.lock().await;
+            let active_jobs: Vec<String> = guard.values().map(|r| r.job.clone()).collect();
+            let mut out = Vec::new();
+            for r in guard.values() {
+                let sample = *r.usage.lock().unwrap();
+                if sample.memory_bytes.is_none()
+                    && sample.cpu_seconds.is_none()
+                    && sample.cpu_percent.is_none()
+                {
+                    continue;
+                }
+                out.push(api::JobResourceSample {
+                    job: r.job.clone(),
+                    memory_bytes: sample.memory_bytes,
+                    cpu_seconds: sample.cpu_seconds,
+                    cpu_percent: sample.cpu_percent,
+                });
+            }
+            (out, active_jobs)
+        };
         let heartbeat = client
             .heartbeat(
                 &worker_id,
@@ -231,6 +290,9 @@ async fn main() -> Result<(), String> {
                         "idle".into()
                     },
                     jobs_running,
+                    resources,
+                    repository_sizes: collect_repo_sizes(),
+                    active_jobs,
                 },
             )
             .await;
@@ -268,10 +330,15 @@ async fn main() -> Result<(), String> {
                         let cancel = CancellationToken::new();
                         let run_storage = run_storage.clone();
                         let netroute = netroute.clone();
+                        let usage = std::sync::Arc::new(std::sync::Mutex::new(
+                            provider::ResourceUsage::default(),
+                        ));
                         running.lock().await.insert(
                             a.run_id.clone(),
                             Running {
                                 cancel: cancel.clone(),
+                                job: a.job.name.clone(),
+                                usage: usage.clone(),
                             },
                         );
                         tokio::spawn(async move {
@@ -286,11 +353,41 @@ async fn main() -> Result<(), String> {
                                 run_storage.as_ref(),
                                 netroute.as_deref(),
                                 Some(a.proxy_env),
+                                Some(usage),
                             )
                             .await;
-                            let req = outcome_to_complete(&worker_id, &job, &outcome, &log_dir);
-                            if let Err(e) = client.complete_run(&a.run_id, &req).await {
-                                tracing::warn!("complete_run {} failed: {e}", a.run_id);
+                            let req = outcome_to_complete(
+                                &worker_id,
+                                &job,
+                                &outcome,
+                                &log_dir,
+                                run_storage.as_ref(),
+                            );
+                            let mut reported = false;
+                            for attempt in 1..=8u32 {
+                                match client.complete_run(&a.run_id, &req).await {
+                                    Ok(()) => {
+                                        reported = true;
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "complete_run {} attempt {attempt} failed: {e}",
+                                            a.run_id
+                                        );
+                                        tokio::time::sleep(std::time::Duration::from_secs(
+                                            2 * u64::from(attempt),
+                                        ))
+                                        .await;
+                                    }
+                                }
+                            }
+                            if !reported {
+                                tracing::error!(
+                                    "complete_run {} dropped after retries ({})",
+                                    a.run_id,
+                                    req.status
+                                );
                             }
                             running.lock().await.remove(&a.run_id);
                             tracing::info!("job `{name}` finished ({})", req.status);
@@ -303,25 +400,18 @@ async fn main() -> Result<(), String> {
                 }
             }
         }
-
-        if shutdown.load(Ordering::SeqCst) {
-            if let Err(e) = client.unregister(&worker_id).await {
-                tracing::warn!("unregister failed: {e}");
-            } else {
-                tracing::info!("unregistered cleanly");
-            }
-        }
     }
     Ok(())
 }
 
 /// RunOutcome → manager report (size detection priority: provider hint →
-/// filesystem walk, spec §17/§58).
+/// ZFS used on the resolved worker path).
 fn outcome_to_complete(
     worker_id: &str,
     job: &JobSpec,
     outcome: &engine::RunOutcome,
     log_dir: &std::path::Path,
+    storage_ctx: Option<&engine::RunStorageCtx>,
 ) -> CompleteRequest {
     let status = match &outcome.result {
         Ok(_) => "success",
@@ -329,12 +419,17 @@ fn outcome_to_complete(
         Err(_) => "failed",
     };
     let ok = outcome.result.as_ref().ok();
-    let size_after = match job.statistics {
-        synora_core::StatisticsMode::Provider => ok.and_then(|r| r.size_hint).map(|v| v as i64),
-        synora_core::StatisticsMode::Filesystem => {
-            Some(engine::logs::walk_size(&job.storage) as i64)
-        }
-    };
+    let dest = storage_ctx
+        .map(|ctx| ctx.resolve_storage_path(job))
+        .unwrap_or_else(|| job.storage.clone());
+    let size_after = ok
+        .and_then(|r| r.size_hint)
+        .or_else(|| engine::logs::measure_repo_size(&dest))
+        .or_else(|| match job.statistics {
+            synora_core::StatisticsMode::Filesystem => Some(engine::logs::walk_size(&dest)),
+            synora_core::StatisticsMode::Provider => None,
+        })
+        .map(|v| v as i64);
     // Report the run log so the manager can serve job_logs for
     // distributed runs (the log lives on this worker host).
     let log = std::fs::read_to_string(log_dir.join(&job.name).join("current.log"))
@@ -361,7 +456,36 @@ fn outcome_to_complete(
             Err(e) => Some(e.to_string()),
         },
         log,
+        memory_bytes: outcome.mem_peak,
+        cpu_seconds: outcome.cpu_seconds,
     }
+}
+
+fn collect_repo_sizes() -> Vec<api::RepoSizeSample> {
+    let out = std::process::Command::new("zfs")
+        .args(["list", "-Hp", "-o", "used,mountpoint"])
+        .output();
+    let Ok(out) = out else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split('\t');
+            let bytes = parts.next()?.parse::<u64>().ok()?;
+            let path = parts.next()?.trim();
+            if path.is_empty() || path == "/" {
+                return None;
+            }
+            Some(api::RepoSizeSample {
+                path: path.to_string(),
+                bytes,
+            })
+        })
+        .collect()
 }
 
 fn find_config(explicit: Option<PathBuf>) -> Result<PathBuf, String> {

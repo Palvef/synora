@@ -17,6 +17,14 @@ const EMBEDDED: &[(u64, &str)] = &[
     (3, include_str!("../../../migrations/0003_worker_token.sql")),
     (4, include_str!("../../../migrations/0004_log_content.sql")),
     (5, include_str!("../../../migrations/0005_run_priority.sql")),
+    (
+        6,
+        include_str!("../../../migrations/0006_run_resources.sql"),
+    ),
+    (
+        7,
+        include_str!("../../../migrations/0007_syncing_status.sql"),
+    ),
 ];
 
 pub struct Migrator {

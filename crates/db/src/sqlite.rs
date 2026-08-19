@@ -81,6 +81,14 @@ impl From<Option<i64>> for Param {
         }
     }
 }
+impl From<Option<f64>> for Param {
+    fn from(v: Option<f64>) -> Self {
+        match v {
+            Some(f) => Param::Real(f),
+            None => Param::Null,
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {

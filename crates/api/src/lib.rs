@@ -80,6 +80,32 @@ pub struct RegisterResponse {
 pub struct HeartbeatRequest {
     pub status: String, // "idle" | "running"
     pub jobs_running: u32,
+    /// Live per-job resource samples so the manager can export CPU/memory
+    /// gauges while a run is still in flight.
+    #[serde(default)]
+    pub resources: Vec<JobResourceSample>,
+    /// Worker-local repository sizes (ZFS used / provider hint). Manager
+    /// matches these onto jobs so Grafana can show docker/git/script sizes.
+    #[serde(default)]
+    pub repository_sizes: Vec<RepoSizeSample>,
+    /// Job names this worker is actually executing right now. Manager
+    /// only refreshes those run leases.
+    #[serde(default)]
+    pub active_jobs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RepoSizeSample {
+    pub path: String,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct JobResourceSample {
+    pub job: String,
+    pub memory_bytes: Option<u64>,
+    pub cpu_seconds: Option<f64>,
+    pub cpu_percent: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -116,6 +142,12 @@ pub struct CompleteRequest {
     /// job_logs without touching the worker host).
     #[serde(default)]
     pub log: Option<String>,
+    /// Peak memory observed during the run (cgroup / docker stats / proc).
+    #[serde(default)]
+    pub memory_bytes: Option<u64>,
+    /// Accumulated CPU seconds for the run.
+    #[serde(default)]
+    pub cpu_seconds: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -194,6 +226,17 @@ impl Client {
         req.send().await.map_err(|e| ApiError::Http(e.to_string()))
     }
 
+    async fn reject(resp: reqwest::Response) -> ApiError {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        let detail = if text.trim().is_empty() {
+            format!("HTTP {status}")
+        } else {
+            format!("HTTP {status}: {text}")
+        };
+        ApiError::Rejected(detail)
+    }
+
     async fn json<T: for<'de> Deserialize<'de>>(
         &self,
         method: reqwest::Method,
@@ -204,8 +247,7 @@ impl Client {
         if resp.status().is_success() {
             resp.json().await.map_err(|e| ApiError::Http(e.to_string()))
         } else {
-            let text = resp.text().await.unwrap_or_default();
-            Err(ApiError::Rejected(text))
+            Err(Self::reject(resp).await)
         }
     }
 
@@ -221,8 +263,7 @@ impl Client {
         if resp.status().is_success() {
             Ok(())
         } else {
-            let text = resp.text().await.unwrap_or_default();
-            Err(ApiError::Rejected(text))
+            Err(Self::reject(resp).await)
         }
     }
 
@@ -274,7 +315,7 @@ impl Client {
                     .map_err(|e| ApiError::Http(e.to_string()))?,
             )),
             409 => Ok(None),
-            _ => Err(ApiError::Rejected(resp.text().await.unwrap_or_default())),
+            _ => Err(Self::reject(resp).await),
         }
     }
 
@@ -321,6 +362,15 @@ impl Client {
         .await
     }
 
+    pub async fn delete_job(&self, job: &str) -> Result<(), ApiError> {
+        self.send_ok(
+            reqwest::Method::DELETE,
+            &format!("{API_V1}/jobs/{job}"),
+            None::<&()>,
+        )
+        .await
+    }
+
     pub async fn list_workers(&self) -> Result<Vec<WorkerDTO>, ApiError> {
         self.json(
             reqwest::Method::GET,
@@ -347,8 +397,7 @@ impl Client {
         if resp.status().is_success() {
             resp.text().await.map_err(|e| ApiError::Http(e.to_string()))
         } else {
-            let text = resp.text().await.unwrap_or_default();
-            Err(ApiError::Rejected(text))
+            Err(Self::reject(resp).await)
         }
     }
 

@@ -3,7 +3,7 @@
 
 use crate::sqlite::{DbError, DbResult, DbValue, Param};
 use crate::Db;
-use synora_core::job::{JobSpec, JobStatus};
+use synora_core::job::{JobSpec, JobStatus, RUN_LEASE_SECS, WORKER_HEARTBEAT_GRACE_SECS};
 
 #[derive(Debug, Clone)]
 pub struct ScheduleRow {
@@ -12,6 +12,17 @@ pub struct ScheduleRow {
     pub misfire_policy: String,
     pub next_run: Option<i64>,
     pub anchor_at: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct JobRunStats {
+    pub job_id: String,
+    pub last_start: Option<i64>,
+    pub last_end: Option<i64>,
+    pub last_success: Option<i64>,
+    pub duration_secs: Option<i64>,
+    pub memory_bytes: Option<i64>,
+    pub cpu_seconds: Option<f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -321,7 +332,13 @@ impl Store {
         Ok(rows.pop())
     }
 
-    pub async fn touch_heartbeat(&self, id: &str, jobs_running: u32, status: &str) -> DbResult<()> {
+    pub async fn touch_heartbeat(
+        &self,
+        id: &str,
+        jobs_running: u32,
+        status: &str,
+        active_jobs: &[String],
+    ) -> DbResult<()> {
         let _ = status; // heartbeat "idle/running" is informational; worker
                         // lifecycle status (ONLINE/OFFLINE/DRAINING/MAINTENANCE) is managed
                         // by register/reaper/drain only.
@@ -334,14 +351,31 @@ impl Store {
                 &[unix_now().into(), (jobs_running as i64).into(), id.into()],
             )
             .await?;
-        // Refresh the lease of this worker's active runs (spec §29).
-        self.db
-            .execute(
-                "UPDATE job_runs SET lease_expires_at = ?
-                 WHERE worker_id = ? AND status IN ('STARTING','RUNNING')",
-                &[(unix_now() + 60).into(), id.into()],
-            )
-            .await?;
+        // Refresh leases only for jobs this worker is actually running.
+        // Refreshing every SYNCING/RUNNING row kept cancelled ghosts alive
+        // after a missed complete_run (GXDE/ceph stayed syncing forever).
+        let lease = unix_now() + RUN_LEASE_SECS;
+        if !active_jobs.is_empty() {
+            for job in active_jobs {
+                self.db
+                    .execute(
+                        "UPDATE job_runs SET lease_expires_at = ?
+                         WHERE worker_id = ? AND job_id = ? AND status IN ('STARTING','SYNCING','RUNNING')",
+                        &[lease.into(), id.into(), job.clone().into()],
+                    )
+                    .await?;
+            }
+        } else if jobs_running > 0 {
+            // Legacy worker without active_jobs: keep the old refresh so a
+            // rolling upgrade does not lease-expire a live run.
+            self.db
+                .execute(
+                    "UPDATE job_runs SET lease_expires_at = ?
+                     WHERE worker_id = ? AND status IN ('STARTING','SYNCING','RUNNING')",
+                    &[lease.into(), id.into()],
+                )
+                .await?;
+        }
         Ok(())
     }
 
@@ -401,15 +435,13 @@ impl Store {
                    WHERE status = 'QUEUED' AND worker_id = ?
                      AND job_id NOT IN (
                          SELECT job_id FROM job_runs
-                         WHERE status IN ('STARTING','RUNNING')
+                         WHERE status IN ('STARTING','SYNCING','RUNNING')
                      )
                    ORDER BY priority DESC, created_at";
         let rows = self.db.query(sql, &[worker.into()]).await?;
         Ok(rows.iter().map(|r| run_row(r)).collect())
     }
 
-    /// QUEUED runs with no worker assigned (queued while no worker was
-    /// online, or unassigned by the reaper) — candidates for re-dispatch.
     /// The token name that registered this worker (identity binding).
     pub async fn worker_token(&self, id: &str) -> DbResult<Option<String>> {
         let rows = self
@@ -422,9 +454,36 @@ impl Store {
             .map(String::from))
     }
 
+    /// QUEUED runs with no worker assigned (queued while no worker was
+    /// online, or unassigned by the reaper) — candidates for re-dispatch.
     pub async fn unassigned_runs(&self) -> DbResult<Vec<RunRow>> {
         self.runs_where("status = 'QUEUED' AND worker_id IS NULL", &[])
             .await
+    }
+
+    /// Any in-flight run of a job (queued or executing). Used as the
+    /// per-job concurrency gate at dispatch time.
+    pub async fn inflight_runs_of_job(&self, job: &str) -> DbResult<Vec<RunRow>> {
+        self.runs_where(
+            "job_id = ? AND status IN ('QUEUED','STARTING','SYNCING','RUNNING')",
+            &[job.into()],
+        )
+        .await
+    }
+
+    pub async fn count_runs_with_status(&self, status: &str) -> DbResult<i64> {
+        let rows = self
+            .db
+            .query(
+                "SELECT COUNT(*) AS n FROM job_runs WHERE status = ?",
+                &[status.into()],
+            )
+            .await?;
+        Ok(rows
+            .first()
+            .and_then(|r| cell(r, "n"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0))
     }
 
     /// Atomically assign an unassigned QUEUED run to a worker. Returns true
@@ -441,11 +500,11 @@ impl Store {
         Ok(n > 0)
     }
 
-    /// Active runs of a job (STARTING/RUNNING) — the per-job concurrency
+    /// Active runs of a job (SYNCING/RUNNING) — the per-job concurrency
     /// gate for claim.
     pub async fn active_runs_of_job(&self, job: &str) -> DbResult<Vec<RunRow>> {
         self.runs_where(
-            "job_id = ? AND status IN ('STARTING','RUNNING')",
+            "job_id = ? AND status IN ('STARTING','SYNCING','RUNNING')",
             &[job.into()],
         )
         .await
@@ -454,7 +513,7 @@ impl Store {
     /// Active (claimed) runs of a worker.
     pub async fn active_runs_of(&self, worker: &str) -> DbResult<Vec<RunRow>> {
         self.runs_where(
-            "worker_id = ? AND status IN ('STARTING','RUNNING')",
+            "worker_id = ? AND status IN ('STARTING','SYNCING','RUNNING')",
             &[worker.into()],
         )
         .await
@@ -468,9 +527,13 @@ impl Store {
 
     /// Runs whose lease expired (worker vanished) — the reaper marks LOST.
     pub async fn expired_runs(&self, now: i64) -> DbResult<Vec<RunRow>> {
+        // A live worker (recent heartbeat) still owns the run even if a
+        // lease row was not refreshed in time — do not mark LOST / re-dispatch
+        // and docker-rm a still-running job.
+        let alive_after = now - WORKER_HEARTBEAT_GRACE_SECS;
         self.runs_where(
-            "status IN ('STARTING','RUNNING') AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?",
-            &[now.into()],
+            "status IN ('STARTING','SYNCING','RUNNING','CANCELLING')              AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?              AND (worker_id IS NULL OR worker_id NOT IN (                  SELECT id FROM workers                  WHERE last_heartbeat IS NOT NULL                    AND last_heartbeat >= ?                    AND status IN ('ONLINE','DRAINING')              ))",
+            &[now.into(), alive_after.into()],
         )
         .await
     }
@@ -479,11 +542,20 @@ impl Store {
         self.db
             .execute(
                 "UPDATE job_runs SET status = 'LOST', finished_at = ?, message = 'lease expired (worker lost)'
-                 WHERE id = ?",
+                 WHERE id = ? AND status IN ('STARTING','SYNCING','RUNNING','CANCELLING')",
                 &[unix_now().into(), id.into()],
             )
             .await?;
-        Ok(())
+        self.set_job_status_for_run(id, JobStatus::Lost).await
+    }
+
+    /// Worker process restarted: every run it had claimed is gone.
+    pub async fn mark_worker_runs_lost(&self, worker_id: &str) -> DbResult<Vec<RunRow>> {
+        let runs = self.active_runs_of(worker_id).await?;
+        for run in &runs {
+            self.set_run_lost(&run.id).await?;
+        }
+        Ok(runs)
     }
 
     /// New run row on worker loss (LOST does not burn the retry budget, §29).
@@ -494,13 +566,21 @@ impl Store {
         worker: Option<&str>,
     ) -> DbResult<Option<String>> {
         let new_id = synora_core::RunId::new().to_string();
-        self.db
+        let n = self
+            .db
             .execute(
                 "INSERT INTO job_runs (id, job_id, worker_id, status, lost_count, created_at)
                  SELECT ?, job_id, ?, 'QUEUED',
                         COALESCE((SELECT lost_count FROM job_runs WHERE id = ?), 0) + 1,
                         ?
-                 FROM job_runs WHERE id = ?",
+                 FROM job_runs WHERE id = ?
+                   AND NOT EXISTS (
+                       SELECT 1 FROM (
+                           SELECT 1 FROM job_runs jr
+                           WHERE jr.job_id = job_runs.job_id
+                             AND jr.status IN ('QUEUED','STARTING','SYNCING','RUNNING')
+                       )
+                   )",
                 &[
                     new_id.clone().into(),
                     worker.map(|w| w.to_string()).into(),
@@ -511,6 +591,10 @@ impl Store {
             )
             .await?;
         let _ = job_name;
+        if n == 0 {
+            return Ok(None);
+        }
+        self.set_job_status(job_name, JobStatus::Queued).await?;
         Ok(Some(new_id))
     }
 
@@ -548,13 +632,19 @@ impl Store {
         let n = self
             .db
             .execute(
-                "UPDATE job_runs SET status = 'STARTING', worker_id = ?, started_at = ?,
+                "UPDATE job_runs SET status = 'SYNCING', worker_id = ?, started_at = ?,
                         lease_expires_at = ?
-                 WHERE id = ? AND status = 'QUEUED' AND (worker_id IS NULL OR worker_id = ?)",
+                 WHERE id = ? AND status = 'QUEUED' AND (worker_id IS NULL OR worker_id = ?)
+                   AND job_id NOT IN (
+                       SELECT job_id FROM (
+                           SELECT job_id FROM job_runs
+                           WHERE status IN ('STARTING','SYNCING','RUNNING')
+                       )
+                   )",
                 &[
                     worker.into(),
                     unix_now().into(),
-                    (unix_now() + 60).into(),
+                    (unix_now() + RUN_LEASE_SECS).into(),
                     id.into(),
                     worker.into(),
                 ],
@@ -569,10 +659,27 @@ impl Store {
                 .first()
                 .and_then(|r| cell(r, "job_id").and_then(|v| v.as_str()))
             {
-                self.set_job_status(name, JobStatus::Starting).await?;
+                self.set_job_status(name, JobStatus::Syncing).await?;
             }
         }
         Ok(n > 0)
+    }
+
+    /// Heartbeat promotion: a job the worker is actually executing is
+    /// `RUNNING` (Grafana and the TUI both render this as syncing).
+    pub async fn mark_jobs_running(&self, worker: &str, jobs: &[String]) -> DbResult<()> {
+        for job in jobs {
+            self.db
+                .execute(
+                    "UPDATE job_runs SET status = 'RUNNING'
+                     WHERE worker_id = ? AND job_id = ?
+                       AND status IN ('STARTING','SYNCING')",
+                    &[worker.into(), job.as_str().into()],
+                )
+                .await?;
+            self.set_job_status(job, JobStatus::Running).await?;
+        }
+        Ok(())
     }
 
     pub async fn set_run_status(&self, id: &str, status: JobStatus) -> DbResult<()> {
@@ -709,7 +816,7 @@ impl Store {
         self.db
             .execute(
                 "UPDATE job_runs SET status = 'CANCELLING'
-                 WHERE job_id = ? AND status IN ('STARTING','RUNNING')",
+                 WHERE job_id = ? AND status IN ('STARTING','SYNCING','RUNNING')",
                 &[job_name.into()],
             )
             .await
@@ -727,6 +834,52 @@ impl Store {
             )
             .await?;
         Ok(())
+    }
+
+    pub async fn list_repository_sizes(&self) -> DbResult<Vec<(String, i64)>> {
+        let rows = self
+            .db
+            .query("SELECT path, size_bytes FROM repositories", &[])
+            .await?;
+        Ok(rows
+            .iter()
+            .filter_map(|r| {
+                let path = cell(r, "path").and_then(|v| v.as_str()).map(String::from)?;
+                let size = cell(r, "size_bytes").and_then(|v| v.as_i64())?;
+                Some((path, size))
+            })
+            .collect())
+    }
+
+    /// Latest non-null `size_after` per job (any successful/failed run that
+    /// reported a size). Used to backfill Grafana when repositories.path
+    /// does not match the live job storage field.
+    pub async fn latest_run_sizes(&self) -> DbResult<Vec<(String, i64)>> {
+        let rows = self
+            .db
+            .query(
+                "SELECT job_id, size_after FROM (
+                     SELECT job_id, size_after,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY job_id
+                                ORDER BY COALESCE(finished_at, created_at) DESC
+                            ) AS rn
+                     FROM job_runs
+                     WHERE size_after IS NOT NULL
+                 ) WHERE rn = 1",
+                &[],
+            )
+            .await?;
+        Ok(rows
+            .iter()
+            .filter_map(|r| {
+                let job = cell(r, "job_id")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)?;
+                let size = cell(r, "size_after").and_then(|v| v.as_i64())?;
+                Some((job, size))
+            })
+            .collect())
     }
 
     pub async fn repository_size(&self, path: &str) -> DbResult<Option<i64>> {
@@ -810,6 +963,183 @@ impl Store {
             .map(String::from))
     }
 
+    /// Latest finished run per job: timestamps + last resource sample.
+    pub async fn latest_run_stats(&self) -> DbResult<Vec<JobRunStats>> {
+        let rows = self
+            .db
+            .query(
+                "SELECT job_id, started_at, finished_at, duration_secs, status,
+                        memory_bytes, cpu_seconds FROM (
+                     SELECT job_id, started_at, finished_at, duration_secs, status,
+                            memory_bytes, cpu_seconds,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY job_id
+                                ORDER BY COALESCE(finished_at, created_at) DESC
+                            ) AS rn
+                     FROM job_runs
+                     WHERE finished_at IS NOT NULL
+                 ) WHERE rn = 1",
+                &[],
+            )
+            .await?;
+        let success_rows = self
+            .db
+            .query(
+                "SELECT job_id, finished_at FROM (
+                     SELECT job_id, finished_at,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY job_id
+                                ORDER BY finished_at DESC
+                            ) AS rn
+                     FROM job_runs
+                     WHERE status = 'SUCCESS' AND finished_at IS NOT NULL
+                 ) WHERE rn = 1",
+                &[],
+            )
+            .await?;
+        let mut success = std::collections::HashMap::new();
+        for r in &success_rows {
+            if let (Some(job), Some(ts)) = (
+                cell(r, "job_id").and_then(|v| v.as_str()).map(String::from),
+                cell(r, "finished_at").and_then(|v| v.as_i64()),
+            ) {
+                success.insert(job, ts);
+            }
+        }
+        Ok(rows
+            .iter()
+            .filter_map(|r| {
+                let job_id = cell(r, "job_id")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)?;
+                let cpu = cell(r, "cpu_seconds").and_then(|v| match v {
+                    crate::sqlite::DbValue::Int(i) => Some(*i as f64),
+                    crate::sqlite::DbValue::Text(s) => s.parse().ok(),
+                    _ => None,
+                });
+                Some(JobRunStats {
+                    last_success: success.get(&job_id).copied(),
+                    job_id,
+                    last_start: cell(r, "started_at").and_then(|v| v.as_i64()),
+                    last_end: cell(r, "finished_at").and_then(|v| v.as_i64()),
+                    duration_secs: cell(r, "duration_secs").and_then(|v| v.as_i64()),
+                    memory_bytes: cell(r, "memory_bytes").and_then(|v| v.as_i64()),
+                    cpu_seconds: cpu,
+                })
+            })
+            .collect())
+    }
+
+    pub async fn set_run_resources(
+        &self,
+        id: &str,
+        memory_bytes: Option<u64>,
+        cpu_seconds: Option<f64>,
+    ) -> DbResult<()> {
+        self.db
+            .execute(
+                "UPDATE job_runs SET memory_bytes = COALESCE(?, memory_bytes),
+                        cpu_seconds = COALESCE(?, cpu_seconds) WHERE id = ?",
+                &[
+                    memory_bytes.map(|v| v as i64).into(),
+                    cpu_seconds.into(),
+                    id.into(),
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn last_run_worker(&self, job: &str) -> DbResult<Option<String>> {
+        let rows = self
+            .db
+            .query(
+                "SELECT worker_id FROM job_runs
+                 WHERE job_id = ? AND worker_id IS NOT NULL
+                 ORDER BY created_at DESC LIMIT 1",
+                &[job.into()],
+            )
+            .await?;
+        Ok(rows
+            .first()
+            .and_then(|r| cell(r, "worker_id").and_then(|v| v.as_str()))
+            .map(String::from))
+    }
+
+    /// Delete a job and every row that references it. Config is the source
+    /// of truth; a removed job must not leave runs/logs/events/schedules.
+    pub async fn purge_job(&self, name: &str) -> DbResult<()> {
+        let storage_rows = self
+            .db
+            .query(
+                "SELECT storage_path FROM jobs WHERE name = ?",
+                &[name.into()],
+            )
+            .await?;
+        let storage_path = storage_rows
+            .first()
+            .and_then(|r| cell(r, "storage_path").and_then(|v| v.as_str()))
+            .map(str::to_string);
+        self.db
+            .execute("DELETE FROM job_logs WHERE job_id = ?", &[name.into()])
+            .await?;
+        self.db
+            .execute("DELETE FROM events WHERE job_id = ?", &[name.into()])
+            .await?;
+        self.db
+            .execute(
+                "DELETE FROM config_history WHERE job_name = ?",
+                &[name.into()],
+            )
+            .await?;
+        self.db
+            .execute("DELETE FROM job_runs WHERE job_id = ?", &[name.into()])
+            .await?;
+        self.db
+            .execute("DELETE FROM schedules WHERE job_name = ?", &[name.into()])
+            .await?;
+        self.db
+            .execute("DELETE FROM jobs WHERE name = ?", &[name.into()])
+            .await?;
+        if let Some(path) = storage_path {
+            let others = self
+                .db
+                .query(
+                    "SELECT name FROM jobs WHERE storage_path = ? LIMIT 1",
+                    &[path.clone().into()],
+                )
+                .await?;
+            if others.is_empty() {
+                let _ = self
+                    .db
+                    .execute("DELETE FROM repositories WHERE path = ?", &[path.into()])
+                    .await;
+            }
+        }
+        Ok(())
+    }
+
+    /// If `jobs.status` is still SYNCING/RUNNING/QUEUED but no inflight run
+    /// exists, copy the latest run status so Grafana/TUI stop showing ghosts.
+    pub async fn reconcile_stale_job_status(&self) -> DbResult<usize> {
+        self.db
+            .execute(
+                "UPDATE jobs SET status = COALESCE((
+                     SELECT jr.status FROM job_runs jr
+                     WHERE jr.job_id = jobs.name
+                     ORDER BY jr.created_at DESC LIMIT 1
+                 ), 'PENDING')
+                 WHERE status IN ('QUEUED','STARTING','SYNCING','RUNNING','CANCELLING')
+                   AND NOT EXISTS (
+                     SELECT 1 FROM job_runs jr
+                     WHERE jr.job_id = jobs.name
+                       AND jr.status IN ('QUEUED','STARTING','SYNCING','RUNNING','RETRYING','CANCELLING')
+                 )",
+                &[],
+            )
+            .await
+    }
+
     /// Jobs with their denormalized status, for CLI/TUI listing.
     pub async fn job_status_list(&self) -> DbResult<Vec<(String, JobStatus)>> {
         let rows = self
@@ -847,7 +1177,7 @@ impl JobStatusDb for JobStatus {
             JobStatus::Pending => "PENDING",
             JobStatus::Scheduled => "SCHEDULED",
             JobStatus::Queued => "QUEUED",
-            JobStatus::Starting => "STARTING",
+            JobStatus::Syncing => "SYNCING",
             JobStatus::Running => "RUNNING",
             JobStatus::Success => "SUCCESS",
             JobStatus::Failed => "FAILED",
@@ -864,7 +1194,7 @@ impl JobStatusDb for JobStatus {
             "PENDING" => JobStatus::Pending,
             "SCHEDULED" => JobStatus::Scheduled,
             "QUEUED" => JobStatus::Queued,
-            "STARTING" => JobStatus::Starting,
+            "STARTING" | "SYNCING" => JobStatus::Syncing,
             "RUNNING" => JobStatus::Running,
             "SUCCESS" => JobStatus::Success,
             "FAILED" => JobStatus::Failed,

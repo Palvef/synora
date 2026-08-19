@@ -1,6 +1,6 @@
 //! REST API surface (spec §46) + worker picker + TLS serving.
 
-use crate::auth::{require, AuthUser};
+use crate::auth::{has_perm, require, AuthUser};
 use api::{
     CompleteRequest, HeartbeatRequest, HeartbeatResponse, JobDTO, RegisterRequest,
     RegisterResponse, ReloadResponse, RunAssignment, RunDTO, WorkerDTO, API_V1,
@@ -135,6 +135,7 @@ pub fn build(
         .route("/workers/register", post(register))
         .route("/workers/{id}/heartbeat", post(heartbeat))
         .route("/workers/{id}/drain", post(drain))
+        .route("/workers/{id}/retire", post(drain))
         .route("/workers/{id}", axum::routing::delete(unregister))
         .route("/runs/{id}/claim", post(claim))
         .route("/runs/{id}/complete", post(complete))
@@ -144,6 +145,7 @@ pub fn build(
         .route("/jobs/{name}/history", get(history))
         .route("/jobs/{name}/spec", get(job_spec))
         .route("/jobs/{name}/logs", get(job_logs))
+        .route("/jobs/{name}", axum::routing::delete(delete_job))
         .route("/workers", get(list_workers))
         .route("/proxies", get(list_proxies))
         .route("/reload", post(reload))
@@ -253,7 +255,7 @@ async fn status_entries(state: &AppState) -> Vec<serde_json::Value> {
                 .flatten();
             out.push(serde_json::json!({
                 "name": name,
-                "status": format!("{status:?}").to_lowercase(),
+                "status": status.as_str().to_string(),
                 "worker": last.as_ref().and_then(|r| r.worker_id.clone()),
                 "upstream": job
                     .as_ref()
@@ -302,6 +304,11 @@ async fn register(
         .clone()
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| auth.name.clone());
+    if let Ok(Some(owner)) = state.engine.store.worker_token(&worker_id).await {
+        if !owner.is_empty() && owner != auth.name {
+            return Err(StatusCode::CONFLICT);
+        }
+    }
     let mut capabilities = body.capabilities.clone();
     if capabilities.get("max_concurrency").is_none() {
         capabilities["max_concurrency"] = serde_json::json!(8);
@@ -319,19 +326,45 @@ async fn register(
         )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    // The worker restarted: runs it had claimed are lost (a restarted
-    // process never resumes them). Mark them LOST so the reaper can
-    // re-dispatch instead of the heartbeat lease keeping them alive forever.
-    let _ = state
+    // The worker process restarted: claimed runs cannot be resumed.
+    // Mark them LOST and honor on_worker_lost=retry here — the reaper
+    // only re-queues runs that *it* expires, so a register-path LOST
+    // would otherwise sit until the next interval.
+    let lost = state
         .engine
         .store
-        .db()
-        .execute(
-            "UPDATE job_runs SET status = 'LOST'
-             WHERE worker_id = ? AND status IN ('STARTING','RUNNING')",
-            &[worker_id.clone().into()],
-        )
-        .await;
+        .mark_worker_runs_lost(&worker_id)
+        .await
+        .unwrap_or_default();
+    for run in lost {
+        tracing::warn!(
+            "run {} (job {}) lost: worker `{worker_id}` re-registered",
+            run.id,
+            run.job_id
+        );
+        let job = state.engine.job(&run.job_id);
+        let retry = job
+            .as_ref()
+            .map(|j| matches!(j.on_worker_lost, synora_core::OnWorkerLost::Retry))
+            .unwrap_or(false);
+        if !retry {
+            continue;
+        }
+        let worker = job.as_ref().and_then(|j| state.picker.pick(j));
+        match state
+            .engine
+            .store
+            .create_lost_requeue(&run.id, &run.job_id, worker.as_deref())
+            .await
+        {
+            Ok(Some(new_id)) => tracing::info!(
+                "job `{}`: re-queued as {new_id} after worker re-register",
+                run.job_id
+            ),
+            Ok(None) => {}
+            Err(e) => tracing::warn!("job `{}`: lost re-queue failed: {e}", run.job_id),
+        }
+    }
     // Persist capabilities (incl. max_concurrency).
     let _ = state
         .engine
@@ -351,10 +384,77 @@ async fn register(
 }
 
 /// Identity gate: the calling token must have registered this worker.
+/// A worker token whose name equals the worker id is always accepted
+/// (self-identity), so a renamed/reissued token can still heartbeat.
 async fn token_owns_worker(state: &AppState, auth: &AuthUser, worker_id: &str) -> bool {
+    if auth.name == worker_id {
+        return true;
+    }
     match state.engine.store.worker_token(worker_id).await {
-        Ok(Some(t)) => t == auth.name,
-        _ => false,
+        Ok(Some(t)) => t.is_empty() || t == auth.name,
+        Ok(None) => false,
+        Err(_) => false,
+    }
+}
+
+fn size_keys_for(state: &AppState, job: &synora_core::job::JobSpec) -> Vec<String> {
+    let raw = job.storage.display().to_string();
+    let resolved = state
+        .engine
+        .run_storage
+        .as_ref()
+        .map(|c| c.resolve_storage_path(job).display().to_string())
+        .unwrap_or_else(|| raw.clone());
+    let mut keys = vec![job.name.clone(), raw.clone(), resolved.clone()];
+    if let Some(file) = std::path::Path::new(&resolved)
+        .file_name()
+        .and_then(|s| s.to_str())
+    {
+        keys.push(file.to_string());
+    }
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
+async fn persist_repository_size(state: &AppState, job: &synora_core::job::JobSpec, size: i64) {
+    for key in size_keys_for(state, job) {
+        let _ = state.engine.store.set_repository_size(&key, size).await;
+    }
+    state.engine.metrics.set_gauge(
+        "synora_repository_size_bytes",
+        &[("job", job.name.as_str())],
+        size as f64,
+    );
+}
+
+async fn apply_repository_sizes(state: &AppState, samples: &[api::RepoSizeSample]) {
+    if samples.is_empty() {
+        return;
+    }
+    let jobs = state.engine.jobs();
+    for job in &jobs {
+        let raw = job.storage.display().to_string();
+        let resolved = state
+            .engine
+            .run_storage
+            .as_ref()
+            .map(|c| c.resolve_storage_path(job).display().to_string())
+            .unwrap_or_else(|| raw.clone());
+        let wants = [
+            resolved.trim_end_matches('/'),
+            raw.trim_end_matches('/'),
+            job.name.as_str(),
+        ];
+        // Exact mountpoint / storage path only. A prefix match would assign
+        // the whole pool (70T+) to every job.
+        let hit = samples.iter().find(|s| {
+            let p = s.path.trim_end_matches('/');
+            wants.iter().any(|want| !want.is_empty() && p == *want)
+        });
+        if let Some(sample) = hit {
+            persist_repository_size(state, job, sample.bytes as i64).await;
+        }
     }
 }
 
@@ -371,7 +471,12 @@ async fn heartbeat(
     state
         .engine
         .store
-        .touch_heartbeat(&worker_id, body.jobs_running, &body.status)
+        .touch_heartbeat(
+            &worker_id,
+            body.jobs_running,
+            &body.status,
+            &body.active_jobs,
+        )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     state.engine.metrics.set_gauge(
@@ -386,6 +491,44 @@ async fn heartbeat(
         &[("worker", worker_id.as_str())],
         1.0,
     );
+    for sample in &body.resources {
+        if let Some(mem) = sample.memory_bytes {
+            state.engine.metrics.set_gauge(
+                "synora_job_memory_bytes",
+                &[("job", sample.job.as_str()), ("worker", worker_id.as_str())],
+                mem as f64,
+            );
+        }
+        if let Some(cpu) = sample.cpu_seconds {
+            state.engine.metrics.set_gauge(
+                "synora_job_cpu_seconds",
+                &[("job", sample.job.as_str()), ("worker", worker_id.as_str())],
+                cpu,
+            );
+        }
+        if let Some(pct) = sample.cpu_percent {
+            state.engine.metrics.set_gauge(
+                "synora_job_cpu_percent",
+                &[("job", sample.job.as_str()), ("worker", worker_id.as_str())],
+                pct,
+            );
+        }
+    }
+    apply_repository_sizes(&state, &body.repository_sizes).await;
+    if !body.active_jobs.is_empty() {
+        let _ = state
+            .engine
+            .store
+            .mark_jobs_running(&worker_id, &body.active_jobs)
+            .await;
+        for job in &body.active_jobs {
+            state.engine.metrics.set_gauge(
+                "synora_job_status",
+                &[("job", job.as_str()), ("worker", worker_id.as_str())],
+                engine::status_value(JobStatus::Running),
+            );
+        }
+    }
 
     let mut response = HeartbeatResponse {
         assignment: None,
@@ -406,7 +549,12 @@ async fn heartbeat(
                     .and_then(|g| {
                         g.as_ref().map(|nr| {
                             let sel = nr.select_proxy(job.proxy.as_deref());
-                            let cfg = job.proxy.as_deref().and_then(|n| nr.proxy_configs().get(n));
+                            let cfg = match &sel {
+                                netroute::Selection::Forward { name, .. } => {
+                                    nr.proxy_configs().get(name)
+                                }
+                                _ => None,
+                            };
                             netroute::dispatch_proxy_env(cfg, &sel)
                         })
                     })
@@ -480,11 +628,31 @@ async fn claim(
         .and_then(|g| {
             g.as_ref().map(|nr| {
                 let sel = nr.select_proxy(job.proxy.as_deref());
-                let cfg = job.proxy.as_deref().and_then(|n| nr.proxy_configs().get(n));
+                let cfg = match &sel {
+                    netroute::Selection::Forward { name, .. } => nr.proxy_configs().get(name),
+                    _ => None,
+                };
                 netroute::dispatch_proxy_env(cfg, &sel)
             })
         })
         .unwrap_or_default();
+    state
+        .engine
+        .metrics
+        .inc_counter("synora_job_runs_total", &[("job", job.name.as_str())], 1.0);
+    state.engine.metrics.set_gauge(
+        "synora_job_last_start_timestamp",
+        &[("job", job.name.as_str())],
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as f64)
+            .unwrap_or(0.0),
+    );
+    state.engine.metrics.set_gauge(
+        "synora_job_status",
+        &[("job", job.name.as_str()), ("worker", worker.as_str())],
+        engine::status_value(JobStatus::Syncing),
+    );
     Ok(axum::Json(RunAssignment {
         run_id,
         job,
@@ -574,16 +742,7 @@ async fn complete(
                 )
                 .await;
             if let Some(size) = body.size_after {
-                let _ = state
-                    .engine
-                    .store
-                    .set_repository_size(&job.storage.display().to_string(), size)
-                    .await;
-                state.engine.metrics.set_gauge(
-                    "synora_repository_size_bytes",
-                    &[("repository", job.name.as_str())],
-                    size as f64,
-                );
+                persist_repository_size(&state, &job, size).await;
             }
             if let Some(bytes) = body.bytes_transferred {
                 state.engine.metrics.inc_counter(
@@ -595,6 +754,16 @@ async fn complete(
                     bytes as f64,
                 );
             }
+            state.engine.metrics.set_gauge(
+                "synora_job_last_success_timestamp",
+                &[("job", job.name.as_str())],
+                ended as f64,
+            );
+            state.engine.metrics.inc_counter(
+                "synora_job_success_total",
+                &[("job", job.name.as_str())],
+                1.0,
+            );
         }
         "failed" => {
             let kind = synora_core::ErrorKind::ProviderError; // worker-reported failure
@@ -650,6 +819,41 @@ async fn complete(
         }
         _ => return Err(StatusCode::BAD_REQUEST),
     }
+    if body.memory_bytes.is_some() || body.cpu_seconds.is_some() {
+        let _ = state
+            .engine
+            .store
+            .set_run_resources(&run_id, body.memory_bytes, body.cpu_seconds)
+            .await;
+    }
+    if let Some(mem) = body.memory_bytes {
+        state.engine.metrics.set_gauge(
+            "synora_job_memory_bytes",
+            &[
+                ("job", job.name.as_str()),
+                ("worker", worker_label.as_str()),
+            ],
+            mem as f64,
+        );
+    }
+    if let Some(cpu) = body.cpu_seconds {
+        state.engine.metrics.inc_counter(
+            "synora_job_cpu_usage_seconds_total",
+            &[
+                ("job", job.name.as_str()),
+                ("worker", worker_label.as_str()),
+            ],
+            cpu,
+        );
+        state.engine.metrics.set_gauge(
+            "synora_job_cpu_seconds",
+            &[
+                ("job", job.name.as_str()),
+                ("worker", worker_label.as_str()),
+            ],
+            cpu,
+        );
+    }
     state.engine.metrics.set_gauge(
         "synora_job_status",
         &[
@@ -677,8 +881,7 @@ async fn drain(
     axum::Extension(auth): axum::Extension<AuthUser>,
     Path(worker_id): Path<String>,
 ) -> Result<axum::Json<serde_json::Value>, StatusCode> {
-    require(&auth, "workers.write")?;
-    if !token_owns_worker(&state, &auth, &worker_id).await {
+    if !has_perm(&auth, "workers.write") && !token_owns_worker(&state, &auth, &worker_id).await {
         return Err(StatusCode::FORBIDDEN);
     }
     state
@@ -688,7 +891,7 @@ async fn drain(
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
     state.picker.refresh().await;
-    tracing::info!("worker `{worker_id}` draining");
+    tracing::info!("worker `{worker_id}` stopped accepting new runs");
     Ok(axum::Json(serde_json::json!({"ok": true})))
 }
 
@@ -697,9 +900,13 @@ async fn unregister(
     axum::Extension(auth): axum::Extension<AuthUser>,
     Path(worker_id): Path<String>,
 ) -> Result<axum::Json<serde_json::Value>, StatusCode> {
-    require(&auth, "workers.write")?;
-    if !token_owns_worker(&state, &auth, &worker_id).await {
-        return Err(StatusCode::FORBIDDEN);
+    // Operators use workers.write; a worker token (runs.manage) may
+    // unregister itself on shutdown.
+    if !has_perm(&auth, "workers.write") {
+        require(&auth, "runs.manage")?;
+        if !token_owns_worker(&state, &auth, &worker_id).await {
+            return Err(StatusCode::FORBIDDEN);
+        }
     }
     // Only unregister when nothing is running on it (spec §11).
     if let Ok(runs) = state.engine.store.active_runs_of(&worker_id).await {
@@ -761,7 +968,7 @@ async fn list_jobs(
         out.push(JobDTO {
             name: name.clone(),
             enabled: job.as_ref().map(|j| j.enabled).unwrap_or(false),
-            status: format!("{:?}", status),
+            status: status.as_str().to_string(),
             worker: job.as_ref().and_then(|j| j.worker.clone()),
             provider: job
                 .as_ref()
@@ -790,6 +997,40 @@ async fn list_jobs(
         });
     }
     Ok(axum::Json(out))
+}
+
+async fn delete_job(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthUser>,
+    Path(name): Path<String>,
+) -> Result<axum::Json<serde_json::Value>, StatusCode> {
+    require(&auth, "jobs.write")?;
+    if state.engine.job(&name).is_none()
+        && state
+            .engine
+            .store
+            .job_status_list()
+            .await
+            .map(|rows| !rows.iter().any(|(n, _)| n == &name))
+            .unwrap_or(true)
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    if let Some(path) = state.engine.config_path() {
+        match config::remove_job_block(&path, &name) {
+            Ok(_) => {}
+            Err(e) if e.contains("not found") => {}
+            Err(e) => {
+                tracing::error!("delete `{name}` config: {e}");
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+        }
+    }
+    state.engine.forget_job(&name).await.map_err(|e| {
+        tracing::error!("purge `{name}`: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    Ok(axum::Json(serde_json::json!({"ok": true, "deleted": name})))
 }
 
 async fn trigger_run(
@@ -925,8 +1166,12 @@ fn tail_of_str(s: &str, n: usize) -> String {
 }
 
 fn tail_of_str_skip(s: &str, n: usize, skip_first: usize) -> String {
-    let lines: Vec<&str> = s.lines().collect();
-    let start = lines.len().saturating_sub(n).saturating_sub(skip_first);
+    let mut lines: Vec<&str> = s.lines().collect();
+    if skip_first > 0 && !lines.is_empty() {
+        let drop_n = skip_first.min(lines.len());
+        lines.drain(0..drop_n);
+    }
+    let start = lines.len().saturating_sub(n);
     lines[start..].join("\n")
 }
 
@@ -1060,7 +1305,7 @@ fn run_dto(run: db::store::RunRow) -> RunDTO {
         id: run.id,
         job_id: run.job_id,
         worker_id: run.worker_id,
-        status: format!("{:?}", run.status),
+        status: run.status.as_str().to_string(),
         retry_count: run.retry_count,
         started_at: run.started_at,
         finished_at: run.finished_at,
@@ -1152,7 +1397,7 @@ mod tests {
     fn tail_of_str_skip_drops_partial_first_line() {
         let text = "l1\nl2\nl3\nl4\nl5\n";
         assert_eq!(tail_of_str_skip(text, 2, 0), "l4\nl5");
-        assert_eq!(tail_of_str_skip(text, 2, 1), "l3\nl4\nl5");
+        assert_eq!(tail_of_str_skip(text, 2, 1), "l4\nl5");
         // tail larger than the file: everything
         assert_eq!(tail_of_str_skip(text, 99, 0), "l1\nl2\nl3\nl4\nl5");
     }

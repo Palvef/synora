@@ -46,23 +46,36 @@ async fn main() -> Result<(), String> {
         )
         .init();
 
-    // Serve authenticated expose proxies for the MANAGER's own proxy
-    // configs (workers receive these exposed addresses with the assignment).
+    // Serve HTTP CONNECT expose proxies for the manager's own proxy
+    // configs. Workers receive these addresses with the assignment and
+    // must not talk to manager-local loopback/SOCKS directly. Auth is
+    // optional: rsync's RSYNC_PROXY=host:port cannot send Basic credentials.
     for (name, p) in &cfg.proxies {
-        if let (Some(expose), Some(auth)) = (&p.expose, &p.expose_auth) {
-            if let Some((user, pass)) = auth.split_once(':') {
-                if let config::ProxyKind::Forward { url, .. } = &p.kind {
-                    let e2 = expose.clone();
-                    let u2 = url.clone();
-                    let user = user.to_string();
-                    let pass = pass.to_string();
-                    tokio::spawn(async move {
-                        let _ = netroute::serve_auth_proxy(&e2, &u2, &user, &pass).await;
-                    });
-                    tracing::info!("proxy `{name}`: serving authenticated expose {expose} → {url}");
-                }
+        let Some(expose) = &p.expose else { continue };
+        let config::ProxyKind::Forward { url, .. } = &p.kind else {
+            continue;
+        };
+        let (user, pass) = p
+            .expose_auth
+            .as_deref()
+            .and_then(|auth| auth.split_once(':'))
+            .map(|(u, pw)| (u.to_string(), pw.to_string()))
+            .unwrap_or_default();
+        let e2 = expose.clone();
+        let u2 = url.clone();
+        tokio::spawn(async move {
+            if let Err(e) = netroute::serve_auth_proxy(&e2, &u2, &user, &pass).await {
+                tracing::error!("proxy expose {e2} failed: {e}");
             }
-        }
+        });
+        tracing::info!(
+            "proxy `{name}`: serving HTTP CONNECT expose {expose} → {url}{}",
+            if p.expose_auth.is_some() {
+                " (auth)"
+            } else {
+                ""
+            }
+        );
     }
 
     let engine = Engine::new(cfg, &PathBuf::from("migrations"), false).await?;
@@ -108,9 +121,15 @@ async fn main() -> Result<(), String> {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
+            let _ = reaper_engine.store.reconcile_stale_job_status().await;
             if let Ok(expired) = reaper_engine.store.expired_runs(now).await {
                 for run in expired {
                     let _ = reaper_engine.store.set_run_lost(&run.id).await;
+                    reaper_engine.metrics.inc_counter(
+                        "synora_job_lost_total",
+                        &[("job", run.job_id.as_str())],
+                        1.0,
+                    );
                     tracing::warn!("run {} (job {}) lost: lease expired", run.id, run.job_id);
                     let job = reaper_engine.job(&run.job_id);
                     let on_worker_lost_retry = job
@@ -132,7 +151,7 @@ async fn main() -> Result<(), String> {
                     }
                 }
             }
-            // Heartbeat timeout → OFFLINE (45s, spec §29).
+            // Heartbeat timeout → OFFLINE.
             let _ = reaper_engine
                 .store
                 .db()
@@ -140,7 +159,7 @@ async fn main() -> Result<(), String> {
                     "UPDATE workers SET status = 'OFFLINE'
                      WHERE (last_heartbeat < ? OR last_heartbeat IS NULL)
                        AND status NOT IN ('DRAINING','MAINTENANCE')",
-                    &[(now - 45).into()],
+                    &[(now - synora_core::WORKER_HEARTBEAT_GRACE_SECS).into()],
                 )
                 .await;
             // QUEUED runs assigned to workers that are no longer ONLINE wait
@@ -182,6 +201,153 @@ async fn main() -> Result<(), String> {
                         &[("worker", id.as_str())],
                         running as f64,
                     );
+                }
+            }
+            if let Ok(queued) = reaper_engine.store.count_runs_with_status("QUEUED").await {
+                reaper_engine
+                    .metrics
+                    .set_gauge("synora_runs_queued", &[], queued as f64);
+            }
+            // Export every job's latest DB status + known repository size so
+            // Grafana is complete even when a job has not reported recently.
+            let size_map: std::collections::HashMap<String, i64> = reaper_engine
+                .store
+                .list_repository_sizes()
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            let run_sizes: std::collections::HashMap<String, i64> = reaper_engine
+                .store
+                .latest_run_sizes()
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            let run_stats: std::collections::HashMap<String, db::store::JobRunStats> =
+                reaper_engine
+                    .store
+                    .latest_run_stats()
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|s| (s.job_id.clone(), s))
+                    .collect();
+            if let Ok(statuses) = reaper_engine.store.job_status_list().await {
+                for (name, status) in statuses {
+                    let job = reaper_engine.job(&name);
+                    let worker = match job
+                        .as_ref()
+                        .and_then(|j| j.worker.clone())
+                        .filter(|s| !s.is_empty())
+                    {
+                        Some(w) => w,
+                        None => reaper_engine
+                            .store
+                            .last_run_worker(&name)
+                            .await
+                            .ok()
+                            .flatten()
+                            .unwrap_or_else(|| "unassigned".into()),
+                    };
+                    let provider = job
+                        .as_ref()
+                        .map(|j| engine::provider_name(j))
+                        .unwrap_or("unknown");
+                    reaper_engine.metrics.set_gauge(
+                        "synora_job_status",
+                        &[("job", name.as_str()), ("worker", worker.as_str())],
+                        engine::status_value(status),
+                    );
+                    reaper_engine.metrics.set_gauge(
+                        "synora_job_info",
+                        &[
+                            ("job", name.as_str()),
+                            ("worker", worker.as_str()),
+                            ("provider", provider),
+                        ],
+                        1.0,
+                    );
+                    if let Some(j) = job.as_ref() {
+                        let raw = j.storage.display().to_string();
+                        let resolved = reaper_engine
+                            .run_storage
+                            .as_ref()
+                            .map(|c| c.resolve_storage_path(j).display().to_string())
+                            .unwrap_or_else(|| raw.clone());
+                        let size = size_map
+                            .get(&resolved)
+                            .or_else(|| size_map.get(&raw))
+                            .or_else(|| size_map.get(&name))
+                            .copied()
+                            .or_else(|| run_sizes.get(&name).copied())
+                            .or_else(|| {
+                                size_map.iter().find_map(|(path, sz)| {
+                                    let p = path.trim_end_matches('/');
+                                    if p.ends_with(&format!("/{name}"))
+                                        || p.ends_with(&format!("/{raw}"))
+                                        || p == name
+                                        || p == raw
+                                        || p == resolved
+                                    {
+                                        Some(*sz)
+                                    } else {
+                                        None
+                                    }
+                                })
+                            });
+                        if let Some(size) = size {
+                            reaper_engine.metrics.set_gauge(
+                                "synora_repository_size_bytes",
+                                &[("job", name.as_str())],
+                                size as f64,
+                            );
+                        }
+                    }
+                    if let Some(st) = run_stats.get(&name) {
+                        if let Some(ts) = st.last_end {
+                            reaper_engine.metrics.set_gauge(
+                                "synora_job_last_end_timestamp",
+                                &[("job", name.as_str())],
+                                ts as f64,
+                            );
+                        }
+                        if let Some(ts) = st.last_start {
+                            reaper_engine.metrics.set_gauge(
+                                "synora_job_last_start_timestamp",
+                                &[("job", name.as_str())],
+                                ts as f64,
+                            );
+                        }
+                        if let Some(ts) = st.last_success {
+                            reaper_engine.metrics.set_gauge(
+                                "synora_job_last_success_timestamp",
+                                &[("job", name.as_str())],
+                                ts as f64,
+                            );
+                        }
+                        if let Some(d) = st.duration_secs {
+                            reaper_engine.metrics.set_gauge(
+                                "synora_job_duration_seconds",
+                                &[("job", name.as_str())],
+                                d as f64,
+                            );
+                        }
+                        if let Some(mem) = st.memory_bytes {
+                            reaper_engine.metrics.set_gauge(
+                                "synora_job_memory_bytes",
+                                &[("job", name.as_str()), ("worker", worker.as_str())],
+                                mem as f64,
+                            );
+                        }
+                        if let Some(cpu) = st.cpu_seconds {
+                            reaper_engine.metrics.set_gauge(
+                                "synora_job_cpu_seconds",
+                                &[("job", name.as_str()), ("worker", worker.as_str())],
+                                cpu,
+                            );
+                        }
+                    }
                 }
             }
             reaper_picker.refresh().await;
