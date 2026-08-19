@@ -110,6 +110,11 @@ def render_job(m, log_dir, storage_dir, global_docker_volumes, global_interval):
         exclude = m.get("exclude_file")
         if exclude:
             options.append(f"--exclude-from={exclude}")
+        options = [
+            o.replace("/etc/tunasync/syncpassword/", "/etc/synora/syncpassword/")
+            .replace("/etc/tunasync/excludes/", "/etc/synora/excludes/")
+            for o in options
+        ]
         if options:
             lines.append(f"options = {toml_list(options)}")
         codes = parse_list(m.get("rsync_success_exit_codes")) or parse_list(
@@ -126,7 +131,7 @@ def render_job(m, log_dir, storage_dir, global_docker_volumes, global_interval):
             lines.append(f"docker_command = [{toml_str(m.get('command', ''))}]")
             lines.append(f"upstream = {toml_str(m.get('upstream', ''))}")
             env = list(stripped_env)
-            # Fixed proxy envs migrate to the cf-warp exit (manager-shipped).
+            # Fixed proxy envs migrate to the worker docker-bridge HTTP proxy.
             proxy_env = [e for e in env if any(k in e.upper() for k in ("PROXY",))]
             if proxy_env:
                 lines.append('proxy = "cf-warp"')
@@ -164,7 +169,7 @@ def render_job(m, log_dir, storage_dir, global_docker_volumes, global_interval):
         lines.append(f"image = {toml_str(image)}")
         lines.append(f"upstream = {toml_str(m.get('upstream', ''))}")
         env = list(stripped_env)
-        # Fixed proxy envs migrate to the cf-warp exit (manager-shipped).
+        # Fixed proxy envs migrate to the worker docker-bridge HTTP proxy.
         proxy_env = [e for e in env if any(k in e.upper() for k in ("PROXY",))]
         if proxy_env:
             lines.append('proxy = "cf-warp"')
@@ -214,6 +219,10 @@ def render_job(m, log_dir, storage_dir, global_docker_volumes, global_interval):
         lines.append("[jobs.hooks]")
         for dst, items in hooks.items():
             lines.append(f"{dst} = {toml_list(items)}")
+
+    mem = m.get("memory_limit")
+    if mem:
+        lines.append(f"memory_limit = {toml_str(str(mem))}")
 
     return "\n".join(lines) + "\n"
 

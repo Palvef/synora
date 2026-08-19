@@ -83,7 +83,7 @@ WARP、添加代理、TUI 键位、命令对照、systemd 部署、与 tunasync 
 `synora_job_bytes_transferred_total`、`synora_job_duration_seconds`、
 `synora_job_memory_bytes`、`synora_job_cpu_usage_seconds_total`、
 `synora_repository_size_bytes`、`synora_job_next_run_timestamp`、
-`synora_worker_status`（0 离线/1 在线/2 排水/3 维护）、`synora_worker_jobs_running`。
+`synora_worker_status`（0 离线/1 在线/2 停接/3 维护）、`synora_worker_jobs_running`。
 
 Grafana 面板模板：`deploy/grafana-synora.json`（导入后选择 Prometheus 数据源）。
 
@@ -99,7 +99,7 @@ viewer，权限键 `jobs.read` / `jobs.write` / `runs.manage` / `workers.read` /
 | POST | `/workers/{id}/heartbeat` | 心跳 + 续租 + 领任务 |
 | POST | `/runs/{id}/claim` | 原子认领（`?worker=`） |
 | POST | `/runs/{id}/complete` | 回写结果 |
-| POST | `/workers/{id}/drain` / DELETE `/workers/{id}` | 排水 / 注销 |
+| POST | `/workers/{id}/retire`（兼容 `/drain`） / DELETE `/workers/{id}` | 停接新任务 / 注销 |
 | GET | `/jobs` | 任务列表 |
 | POST | `/jobs/{name}/run` / `/jobs/{name}/stop` | 触发 / 取消 |
 | GET | `/jobs/{name}/history` / `/jobs/{name}/logs?tail=` | 历史 / 日志 |

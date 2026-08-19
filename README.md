@@ -131,7 +131,7 @@ schedule = "cron"                # cron | daily | weekly | interval | manual | s
 cron = "0 */6 * * *"
 timezone = "Asia/Shanghai"
 
-provider = "rsync"               # rsync | script | docker
+provider = "rsync"               # rsync | two-stage-rsync | http | git | docker | script
 upstream = "rsync://archive.ubuntu.com/ubuntu/"
 storage = "/srv/mirror/ubuntu"
 options = ["--delete", "--delay-updates"]
@@ -177,7 +177,7 @@ admin / operator / viewer; permission keys: `jobs.read`, `jobs.write`,
 | POST | `/workers/{id}/heartbeat` | runs.manage | heartbeat + lease refresh; returns run assignment / cancel request |
 | POST | `/runs/{id}/claim` | runs.manage | atomic claim (409 if taken) |
 | POST | `/runs/{id}/complete` | runs.manage | success / failed / cancelled report |
-| POST | `/workers/{id}/drain` | workers.write | stop accepting new runs |
+| POST | `/workers/{id}/retire` (alias `/drain`) | workers.write | stop accepting new runs |
 | DELETE | `/workers/{id}` | workers.write | unregister (only when idle) |
 | GET | `/jobs` | jobs.read | jobs with status/next_run/size |
 | POST | `/jobs/{name}/run` | jobs.write | trigger a run now |

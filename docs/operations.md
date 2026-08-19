@@ -121,7 +121,7 @@ proxy = "default"          # 显式指定才走代理组（一般不需要）
 | 快照列表 | `synora snapshot list <job>` |
 | 快照回滚 | `synora snapshot rollback <job> <snapshot>` |
 | worker 列表 | `synora worker list --manager http://<manager> --token <token>` |
-| worker 排水 | `synora worker drain <id> --manager ... --token ...` |
+| worker 停接新任务 | `synora worker retire <id> --manager ... --token ...` |
 | TUI | `synora tui -c /etc/synora/synora.toml`（自动加载 /etc/synora 配置） |
 
 所有命令同时支持 `--` 风格：`synora --check`、`synora --status`、
