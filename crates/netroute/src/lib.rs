@@ -1063,7 +1063,7 @@ async fn serve_auth_proxy_conn(
                 .map_err(|_| RouteError::BadResponse("bad port".into()))?,
         )
     };
-    let tunnel = match socks5_connect_tunnel(upstream, &target_host, target_port).await {
+    let mut tunnel = match socks5_connect_tunnel(upstream, &target_host, target_port).await {
         Ok(t) => t,
         Err(_) => {
             let _ = client.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await;
@@ -1073,12 +1073,11 @@ async fn serve_auth_proxy_conn(
     let _ = client
         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         .await;
-    let (mut cr, mut cw) = client.into_split();
-    let (mut tr, mut tw) = tunnel.into_split();
-    tokio::select! {
-        _ = tokio::io::copy(&mut tr, &mut cw) => {}
-        _ = tokio::io::copy(&mut cr, &mut tw) => {}
-    }
+    let _ = client.flush().await;
+    // copy_bidirectional shuts down each write half when the matching read
+    // hits EOF. A `select!` of two `copy`s cancelled the other direction and
+    // dropped TLS records; a raw `join!` leaked CLOSE-WAIT sockets.
+    let _ = tokio::io::copy_bidirectional(&mut client, &mut tunnel).await;
     Ok(())
 }
 
