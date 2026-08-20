@@ -220,17 +220,11 @@ async fn main() -> Result<(), String> {
             tracing::info!("stopping all runs and removing job containers");
             request_stop(running2, shutdown2).await;
         });
-        // SIGHUP (systemd reload): exit cleanly — Restart=always brings the
-        // worker back with the updated config and proxy listeners.
-        {
-            let running2 = running.clone();
-            let shutdown2 = shutdown.clone();
-            tokio::spawn(async move {
-                wait_sighup().await;
-                tracing::info!("SIGHUP received — stopping runs for restart");
-                request_stop(running2, shutdown2).await;
-            });
-        }
+        // SIGHUP (systemd reload): ignore. Reload used to cancel every
+        // running job; apply config with `systemctl restart`.
+        tokio::spawn(async {
+            ignore_sighup().await;
+        });
     }
 
     loop {
@@ -522,13 +516,15 @@ async fn wait_sigterm() {
 }
 
 #[cfg(unix)]
-async fn wait_sighup() {
+async fn ignore_sighup() {
     let mut s = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
         .expect("SIGHUP handler");
-    let _ = s.recv().await;
+    while s.recv().await.is_some() {
+        tracing::warn!("SIGHUP ignored; restart the service to apply config changes");
+    }
 }
 
 #[cfg(not(unix))]
-async fn wait_sighup() {
+async fn ignore_sighup() {
     std::future::pending::<()>().await;
 }

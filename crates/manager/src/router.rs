@@ -521,13 +521,10 @@ async fn heartbeat(
             .store
             .mark_jobs_running(&worker_id, &body.active_jobs)
             .await;
-        for job in &body.active_jobs {
-            state.engine.metrics.set_gauge(
-                "synora_job_status",
-                &[("job", job.as_str()), ("worker", worker_id.as_str())],
-                engine::status_value(JobStatus::Running),
-            );
-        }
+        // Do not overwrite job_status from the heartbeat. A worker can
+        // still list a job for one tick after complete_run marked it
+        // RETRYING/FAILED; the reaper and complete/claim handlers own
+        // the gauge.
     }
 
     let mut response = HeartbeatResponse {
@@ -648,8 +645,9 @@ async fn claim(
             .map(|d| d.as_secs() as f64)
             .unwrap_or(0.0),
     );
-    state.engine.metrics.set_gauge(
+    state.engine.metrics.set_job_gauge(
         "synora_job_status",
+        &job.name,
         &[("job", job.name.as_str()), ("worker", worker.as_str())],
         engine::status_value(JobStatus::Syncing),
     );
@@ -854,8 +852,9 @@ async fn complete(
             cpu,
         );
     }
-    state.engine.metrics.set_gauge(
+    state.engine.metrics.set_job_gauge(
         "synora_job_status",
+        &job.name,
         &[
             ("job", job.name.as_str()),
             ("worker", worker_label.as_str()),

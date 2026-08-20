@@ -63,8 +63,9 @@ pub async fn execute_run(
         .store
         .set_run_status(&run_id, JobStatus::Running)
         .await;
-    engine.metrics.set_gauge(
+    engine.metrics.set_job_gauge(
         "synora_job_status",
+        &job.name,
         &[("job", job.name.as_str()), ("worker", LOCAL_WORKER)],
         status_value(JobStatus::Running),
     );
@@ -883,8 +884,9 @@ fn metrics_tail(
     duration: i64,
     success: bool,
 ) {
-    engine.metrics.set_gauge(
+    engine.metrics.set_job_gauge(
         "synora_job_status",
+        &job.name,
         &[("job", job.name.as_str()), ("worker", LOCAL_WORKER)],
         status_value(status),
     );

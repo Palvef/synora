@@ -68,6 +68,33 @@ impl Metrics {
         self.write(MetricType::Gauge, name, labels, value);
     }
 
+    /// Set a per-job gauge and drop leftover samples of the same metric
+    /// that still carry this job label (usually a previous worker).
+    /// Grafana `max by (exported_job)` would otherwise pick Failed over
+    /// Running when both `worker=local` and `worker=mirror-zfs` exist.
+    pub fn set_job_gauge(&self, name: &str, job: &str, labels: &[(&str, &str)], value: f64) {
+        let mut sorted: Vec<(String, String)> = labels
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        sorted.sort();
+        let key = Key {
+            name: name.to_string(),
+            labels: sorted,
+        };
+        let mut entries = self.entries.lock().unwrap();
+        entries.retain(|existing, _| {
+            !(existing.name == name && existing.labels.iter().any(|(n, v)| n == "job" && v == job))
+        });
+        entries.insert(
+            key,
+            Entry {
+                kind: MetricType::Gauge,
+                value,
+            },
+        );
+    }
+
     pub fn inc_counter(&self, name: &str, labels: &[(&str, &str)], delta: f64) {
         let mut sorted: Vec<(String, String)> = labels
             .iter()
@@ -201,5 +228,27 @@ mod tests {
         let out = m.render();
         assert!(!out.contains("gone"), "{out}");
         assert!(out.contains("job=\"keep\""), "{out}");
+    }
+
+    #[test]
+    fn set_job_gauge_replaces_stale_worker_series() {
+        let m = Metrics::new();
+        m.set_job_gauge(
+            "synora_job_status",
+            "rustup",
+            &[("job", "rustup"), ("worker", "local")],
+            6.0,
+        );
+        m.set_job_gauge(
+            "synora_job_status",
+            "rustup",
+            &[("job", "rustup"), ("worker", "mirror-zfs")],
+            4.0,
+        );
+        let out = m.render();
+        assert!(!out.contains("worker=\"local\""), "{out}");
+        assert!(out.contains("worker=\"mirror-zfs\""), "{out}");
+        assert_eq!(out.matches("synora_job_status{").count(), 1, "{out}");
+        assert!(out.contains("} 4"), "{out}");
     }
 }

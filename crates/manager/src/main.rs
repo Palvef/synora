@@ -201,6 +201,16 @@ async fn main() -> Result<(), String> {
                         &[("worker", id.as_str())],
                         running as f64,
                     );
+                    let max_c = cell("capabilities")
+                        .and_then(|v| v.as_str().map(String::from))
+                        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                        .and_then(|c| c.get("max_concurrency").and_then(|m| m.as_u64()))
+                        .unwrap_or(8);
+                    reaper_engine.metrics.set_gauge(
+                        "synora_worker_max_concurrency",
+                        &[("worker", id.as_str())],
+                        max_c as f64,
+                    );
                 }
             }
             if let Ok(queued) = reaper_engine.store.count_runs_with_status("QUEUED").await {
@@ -254,13 +264,15 @@ async fn main() -> Result<(), String> {
                         .as_ref()
                         .map(|j| engine::provider_name(j))
                         .unwrap_or("unknown");
-                    reaper_engine.metrics.set_gauge(
+                    reaper_engine.metrics.set_job_gauge(
                         "synora_job_status",
+                        &name,
                         &[("job", name.as_str()), ("worker", worker.as_str())],
                         engine::status_value(status),
                     );
-                    reaper_engine.metrics.set_gauge(
+                    reaper_engine.metrics.set_job_gauge(
                         "synora_job_info",
+                        &name,
                         &[
                             ("job", name.as_str()),
                             ("worker", worker.as_str()),
@@ -305,21 +317,21 @@ async fn main() -> Result<(), String> {
                         }
                     }
                     if let Some(st) = run_stats.get(&name) {
-                        if let Some(ts) = st.last_end {
+                        if let Some(ts) = st.last_end.filter(|t| *t > 0) {
                             reaper_engine.metrics.set_gauge(
                                 "synora_job_last_end_timestamp",
                                 &[("job", name.as_str())],
                                 ts as f64,
                             );
                         }
-                        if let Some(ts) = st.last_start {
+                        if let Some(ts) = st.last_start.filter(|t| *t > 0) {
                             reaper_engine.metrics.set_gauge(
                                 "synora_job_last_start_timestamp",
                                 &[("job", name.as_str())],
                                 ts as f64,
                             );
                         }
-                        if let Some(ts) = st.last_success {
+                        if let Some(ts) = st.last_success.filter(|t| *t > 0) {
                             reaper_engine.metrics.set_gauge(
                                 "synora_job_last_success_timestamp",
                                 &[("job", name.as_str())],
@@ -401,6 +413,13 @@ async fn main() -> Result<(), String> {
         }
     });
 
+    // SIGHUP is systemd `reload`. Treating it as shutdown took the
+    // production manager offline. Config changes need a restart.
+    #[cfg(unix)]
+    tokio::spawn(async {
+        ignore_sighup().await;
+    });
+
     // Signal: graceful stop of the HTTP server.
     let shutdown_engine = engine.clone();
     let signal_task = tokio::spawn(async move {
@@ -445,6 +464,15 @@ async fn wait_sigterm() {
     let mut s = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("SIGTERM handler");
     let _ = s.recv().await;
+}
+
+#[cfg(unix)]
+async fn ignore_sighup() {
+    let mut s = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+        .expect("SIGHUP handler");
+    while s.recv().await.is_some() {
+        tracing::warn!("SIGHUP ignored; restart the service to apply config changes");
+    }
 }
 
 #[cfg(not(unix))]
