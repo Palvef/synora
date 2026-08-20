@@ -703,7 +703,7 @@ fn manager_creds(
             let (cfg, _) = load_config(config, None)?;
             let url = match manager {
                 Some(u) => u,
-                None => manager_url_from_listen(&cfg.api.listen),
+                None => manager_url_from_listen(cfg.api.listen),
             };
             let token =
                 match token {
