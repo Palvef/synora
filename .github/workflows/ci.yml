@@ -49,11 +49,19 @@ jobs:
           git commit -m "Apply rustfmt"
           git push
 
+      - name: Check VERSION matches Cargo.lock
+        run: |
+          ver=$(tr -d '[:space:]' < VERSION)
+          cargo_ver=$(grep -m1 '^version' Cargo.toml | sed 's/.*= *"\([0-9.]*\)".*/\1/')
+          lock_ver=$(awk '$0=="name = \"synora-core\""{getline; if ($1=="version") {gsub(/"/, "", $3); print $3; exit}}' Cargo.lock)
+          test "$ver" = "$cargo_ver" || { echo "VERSION ($ver) != Cargo.toml ($cargo_ver)"; exit 1; }
+          test "$ver" = "$lock_ver" || { echo "VERSION ($ver) != Cargo.lock synora-core ($lock_ver)"; exit 1; }
+
       - name: Clippy (all targets, warnings denied)
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --workspace --locked
 
       - name: Build
-        run: cargo build --workspace
+        run: cargo build --workspace --locked

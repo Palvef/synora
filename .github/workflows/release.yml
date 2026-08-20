@@ -64,11 +64,13 @@ jobs:
         with:
           ref: ${{ needs.gate.outputs.sha }}
 
-      - name: Check VERSION matches Cargo.toml
+      - name: Check VERSION matches Cargo.toml and Cargo.lock
         run: |
           cargo_ver=$(grep -m1 '^version' Cargo.toml | sed 's/.*= *"\([0-9.]*\)".*/\1/')
           ver=$(tr -d '[:space:]' < VERSION)
+          lock_ver=$(awk '$0=="name = \"synora-core\""{getline; if ($1=="version") {gsub(/"/, "", $3); print $3; exit}}' Cargo.lock)
           test "$ver" = "$cargo_ver" || { echo "VERSION ($ver) != Cargo.toml ($cargo_ver)"; exit 1; }
+          test "$ver" = "$lock_ver" || { echo "VERSION ($ver) != Cargo.lock synora-core ($lock_ver)"; exit 1; }
 
       - uses: dtolnay/rust-toolchain@stable
         with:
