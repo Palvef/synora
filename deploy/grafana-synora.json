@@ -1,34 +1,24 @@
 {
   "overwrite": true,
   "folderId": 0,
-  "message": "Success rate uses live counters so it is not stuck at 0 after manager restart",
+  "message": "Drop leftover Value #B columns; hide local worker; keep running table title as 正在运行",
   "dashboard": {
     "id": null,
     "uid": "synora-mirror",
     "title": "Synora 镜像同步",
-    "description": "镜像同步总览：任务状态、仓库大小、CPU/内存、Worker。启动中与运行中统一显示为同步中。",
+    "description": "镜像同步总览：任务状态、仓库大小、CPU/内存、Worker 占用与上限。启动中与运行中统一显示为同步中。24h 指标使用 increase()，成功率使用 live counter。",
     "tags": [
       "synora",
       "mirror"
     ],
     "timezone": "browser",
-    "schemaVersion": 39,
-    "version": 0,
     "refresh": "10s",
-    "editable": true,
+    "schemaVersion": 39,
     "graphTooltip": 1,
+    "editable": true,
     "time": {
       "from": "now-6h",
       "to": "now"
-    },
-    "timepicker": {
-      "refresh_intervals": [
-        "5s",
-        "10s",
-        "30s",
-        "1m",
-        "5m"
-      ]
     },
     "templating": {
       "list": [
@@ -54,9 +44,6 @@
         }
       ]
     },
-    "annotations": {
-      "list": []
-    },
     "panels": [
       {
         "id": 1,
@@ -78,7 +65,7 @@
         "gridPos": {
           "x": 0,
           "y": 1,
-          "w": 4,
+          "w": 3,
           "h": 3
         },
         "datasource": {
@@ -92,9 +79,9 @@
               "type": "prometheus",
               "uid": "ae4bld7vas268d"
             },
-            "expr": "count(max by (exported_job) (synora_job_status{exported_job=~\"$job_name\"}))",
+            "expr": "count(max by (exported_job) (synora_job_status{exported_job=~\"$job_name\"})) or vector(0)",
             "instant": true,
-            "format": "time_series",
+            "range": false,
             "exemplar": false
           }
         ],
@@ -109,7 +96,8 @@
           "textMode": "value",
           "colorMode": "background",
           "graphMode": "none",
-          "justifyMode": "center"
+          "justifyMode": "center",
+          "orientation": "auto"
         },
         "fieldConfig": {
           "defaults": {
@@ -137,9 +125,9 @@
         "type": "stat",
         "title": "同步中",
         "gridPos": {
-          "x": 4,
+          "x": 3,
           "y": 1,
-          "w": 4,
+          "w": 3,
           "h": 3
         },
         "datasource": {
@@ -153,9 +141,9 @@
               "type": "prometheus",
               "uid": "ae4bld7vas268d"
             },
-            "expr": "count(max by (exported_job) ((synora_job_status{exported_job=~\"$job_name\"} == 3 or synora_job_status{exported_job=~\"$job_name\"} == 4)))",
+            "expr": "count(max by (exported_job) ((synora_job_status{exported_job=~\"$job_name\"} == 3 or synora_job_status{exported_job=~\"$job_name\"} == 4))) or vector(0)",
             "instant": true,
-            "format": "time_series",
+            "range": false,
             "exemplar": false
           }
         ],
@@ -170,19 +158,20 @@
           "textMode": "value",
           "colorMode": "background",
           "graphMode": "none",
-          "justifyMode": "center"
+          "justifyMode": "center",
+          "orientation": "auto"
         },
         "fieldConfig": {
           "defaults": {
             "color": {
               "mode": "fixed",
-              "fixedColor": "yellow"
+              "fixedColor": "orange"
             },
             "thresholds": {
               "mode": "absolute",
               "steps": [
                 {
-                  "color": "yellow",
+                  "color": "orange",
                   "value": null
                 }
               ]
@@ -198,9 +187,9 @@
         "type": "stat",
         "title": "失败",
         "gridPos": {
-          "x": 8,
+          "x": 6,
           "y": 1,
-          "w": 4,
+          "w": 3,
           "h": 3
         },
         "datasource": {
@@ -214,9 +203,9 @@
               "type": "prometheus",
               "uid": "ae4bld7vas268d"
             },
-            "expr": "count(max by (exported_job) (synora_job_status{exported_job=~\"$job_name\"} == 6))",
+            "expr": "count(max by (exported_job) (synora_job_status{exported_job=~\"$job_name\"} == 6)) or vector(0)",
             "instant": true,
-            "format": "time_series",
+            "range": false,
             "exemplar": false
           }
         ],
@@ -231,7 +220,8 @@
           "textMode": "value",
           "colorMode": "background",
           "graphMode": "none",
-          "justifyMode": "center"
+          "justifyMode": "center",
+          "orientation": "auto"
         },
         "fieldConfig": {
           "defaults": {
@@ -259,9 +249,9 @@
         "type": "stat",
         "title": "重试中",
         "gridPos": {
-          "x": 12,
+          "x": 9,
           "y": 1,
-          "w": 4,
+          "w": 3,
           "h": 3
         },
         "datasource": {
@@ -275,9 +265,9 @@
               "type": "prometheus",
               "uid": "ae4bld7vas268d"
             },
-            "expr": "count(max by (exported_job) (synora_job_status{exported_job=~\"$job_name\"} == 7))",
+            "expr": "count(max by (exported_job) (synora_job_status{exported_job=~\"$job_name\"} == 7)) or vector(0)",
             "instant": true,
-            "format": "time_series",
+            "range": false,
             "exemplar": false
           }
         ],
@@ -292,7 +282,8 @@
           "textMode": "value",
           "colorMode": "background",
           "graphMode": "none",
-          "justifyMode": "center"
+          "justifyMode": "center",
+          "orientation": "auto"
         },
         "fieldConfig": {
           "defaults": {
@@ -320,9 +311,9 @@
         "type": "stat",
         "title": "丢失 24h",
         "gridPos": {
-          "x": 16,
+          "x": 12,
           "y": 1,
-          "w": 4,
+          "w": 3,
           "h": 3
         },
         "datasource": {
@@ -336,9 +327,9 @@
               "type": "prometheus",
               "uid": "ae4bld7vas268d"
             },
-            "expr": "sum(synora_job_lost_total{exported_job=~\"$job_name\"}) or vector(0)",
+            "expr": "sum(increase(synora_job_lost_total{exported_job=~\"$job_name\"}[24h])) or vector(0)",
             "instant": true,
-            "format": "time_series",
+            "range": false,
             "exemplar": false
           }
         ],
@@ -353,7 +344,8 @@
           "textMode": "value",
           "colorMode": "background",
           "graphMode": "none",
-          "justifyMode": "center"
+          "justifyMode": "center",
+          "orientation": "auto"
         },
         "fieldConfig": {
           "defaults": {
@@ -371,7 +363,8 @@
               ]
             },
             "unit": "none",
-            "noValue": "0"
+            "noValue": "0",
+            "decimals": 0
           },
           "overrides": []
         }
@@ -381,9 +374,9 @@
         "type": "stat",
         "title": "Worker 在线",
         "gridPos": {
-          "x": 20,
+          "x": 15,
           "y": 1,
-          "w": 4,
+          "w": 3,
           "h": 3
         },
         "datasource": {
@@ -397,9 +390,9 @@
               "type": "prometheus",
               "uid": "ae4bld7vas268d"
             },
-            "expr": "count(max by (worker) (synora_worker_status == 1))",
+            "expr": "count(max by (worker) (synora_worker_status{worker!=\"local\"} == 1)) or vector(0)",
             "instant": true,
-            "format": "time_series",
+            "range": false,
             "exemplar": false
           }
         ],
@@ -414,7 +407,8 @@
           "textMode": "value",
           "colorMode": "background",
           "graphMode": "none",
-          "justifyMode": "center"
+          "justifyMode": "center",
+          "orientation": "auto"
         },
         "fieldConfig": {
           "defaults": {
@@ -438,9 +432,135 @@
         }
       },
       {
+        "id": 21,
+        "type": "stat",
+        "title": "同步槽",
+        "gridPos": {
+          "x": 18,
+          "y": 1,
+          "w": 3,
+          "h": 3
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "ae4bld7vas268d"
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ae4bld7vas268d"
+            },
+            "expr": "sum(synora_worker_jobs_running{worker!=\"local\"} and on(worker) (synora_worker_status{worker!=\"local\"} == 1)) or vector(0)",
+            "instant": true,
+            "range": false,
+            "exemplar": false
+          }
+        ],
+        "options": {
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": "",
+            "values": false
+          },
+          "textMode": "value",
+          "colorMode": "background",
+          "graphMode": "none",
+          "justifyMode": "center",
+          "orientation": "auto"
+        },
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "fixed",
+              "fixedColor": "purple"
+            },
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "purple",
+                  "value": null
+                }
+              ]
+            },
+            "unit": "none",
+            "noValue": "0",
+            "decimals": 0
+          },
+          "overrides": []
+        }
+      },
+      {
+        "id": 22,
+        "type": "stat",
+        "title": "Worker 上限",
+        "gridPos": {
+          "x": 21,
+          "y": 1,
+          "w": 3,
+          "h": 3
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "ae4bld7vas268d"
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ae4bld7vas268d"
+            },
+            "expr": "sum(synora_worker_max_concurrency{worker!=\"local\"} and on(worker) (synora_worker_status{worker!=\"local\"} == 1)) or vector(0)",
+            "instant": true,
+            "range": false,
+            "exemplar": false
+          }
+        ],
+        "options": {
+          "reduceOptions": {
+            "calcs": [
+              "lastNotNull"
+            ],
+            "fields": "",
+            "values": false
+          },
+          "textMode": "value",
+          "colorMode": "background",
+          "graphMode": "none",
+          "justifyMode": "center",
+          "orientation": "auto"
+        },
+        "fieldConfig": {
+          "defaults": {
+            "color": {
+              "mode": "fixed",
+              "fixedColor": "super-light-blue"
+            },
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "super-light-blue",
+                  "value": null
+                }
+              ]
+            },
+            "unit": "none",
+            "noValue": "0",
+            "decimals": 0
+          },
+          "overrides": []
+        }
+      },
+      {
         "id": 11,
         "type": "stat",
-        "title": "成功率",
+        "title": "成功率 24h",
         "gridPos": {
           "x": 0,
           "y": 4,
@@ -458,9 +578,9 @@
               "type": "prometheus",
               "uid": "ae4bld7vas268d"
             },
-            "expr": "100 * sum(synora_job_success_total{exported_job=~\"$job_name\"})\n/\n(\n  sum(synora_job_success_total{exported_job=~\"$job_name\"})\n  + (sum(synora_job_failures_total{exported_job=~\"$job_name\"}) or vector(0))\n)",
+            "expr": "100 * sum(increase(synora_job_success_total{exported_job=~\"$job_name\"}[24h])) / (sum(increase(synora_job_success_total{exported_job=~\"$job_name\"}[24h])) + sum(increase(synora_job_failures_total{exported_job=~\"$job_name\"}[24h])))",
             "instant": true,
-            "format": "time_series",
+            "range": false,
             "exemplar": false
           }
         ],
@@ -475,7 +595,8 @@
           "textMode": "value",
           "colorMode": "background",
           "graphMode": "none",
-          "justifyMode": "center"
+          "justifyMode": "center",
+          "orientation": "auto"
         },
         "fieldConfig": {
           "defaults": {
@@ -501,13 +622,12 @@
             },
             "unit": "percent",
             "noValue": "—",
+            "decimals": 1,
             "min": 0,
-            "max": 100,
-            "decimals": 1
+            "max": 100
           },
           "overrides": []
-        },
-        "description": "Success / (success + failure) from live Prometheus counters. After a manager restart the window starts over; this avoids increase() collapsing to 0."
+        }
       },
       {
         "id": 15,
@@ -530,9 +650,9 @@
               "type": "prometheus",
               "uid": "ae4bld7vas268d"
             },
-            "expr": "max(synora_runs_queued)",
+            "expr": "max(synora_runs_queued) or vector(0)",
             "instant": true,
-            "format": "time_series",
+            "range": false,
             "exemplar": false
           }
         ],
@@ -547,7 +667,8 @@
           "textMode": "value",
           "colorMode": "background",
           "graphMode": "none",
-          "justifyMode": "center"
+          "justifyMode": "center",
+          "orientation": "auto"
         },
         "fieldConfig": {
           "defaults": {
@@ -591,9 +712,9 @@
               "type": "prometheus",
               "uid": "ae4bld7vas268d"
             },
-            "expr": "sum(synora_job_failures_total{exported_job=~\"$job_name\"}) or vector(0)",
+            "expr": "sum(increase(synora_job_failures_total{exported_job=~\"$job_name\"}[24h])) or vector(0)",
             "instant": true,
-            "format": "time_series",
+            "range": false,
             "exemplar": false
           }
         ],
@@ -608,7 +729,8 @@
           "textMode": "value",
           "colorMode": "background",
           "graphMode": "none",
-          "justifyMode": "center"
+          "justifyMode": "center",
+          "orientation": "auto"
         },
         "fieldConfig": {
           "defaults": {
@@ -626,7 +748,8 @@
               ]
             },
             "unit": "none",
-            "noValue": "0"
+            "noValue": "0",
+            "decimals": 0
           },
           "overrides": []
         }
@@ -638,7 +761,7 @@
         "gridPos": {
           "x": 12,
           "y": 4,
-          "w": 4,
+          "w": 6,
           "h": 3
         },
         "datasource": {
@@ -652,9 +775,9 @@
               "type": "prometheus",
               "uid": "ae4bld7vas268d"
             },
-            "expr": "sum(synora_job_bytes_transferred_total{exported_job=~\"$job_name\"}) or vector(0)",
+            "expr": "sum(increase(synora_job_bytes_transferred_total{exported_job=~\"$job_name\"}[24h])) or vector(0)",
             "instant": true,
-            "format": "time_series",
+            "range": false,
             "exemplar": false
           }
         ],
@@ -669,19 +792,20 @@
           "textMode": "value",
           "colorMode": "background",
           "graphMode": "none",
-          "justifyMode": "center"
+          "justifyMode": "center",
+          "orientation": "auto"
         },
         "fieldConfig": {
           "defaults": {
             "color": {
               "mode": "fixed",
-              "fixedColor": "purple"
+              "fixedColor": "green"
             },
             "thresholds": {
               "mode": "absolute",
               "steps": [
                 {
-                  "color": "purple",
+                  "color": "green",
                   "value": null
                 }
               ]
@@ -698,9 +822,9 @@
         "type": "stat",
         "title": "仓库总大小",
         "gridPos": {
-          "x": 16,
+          "x": 18,
           "y": 4,
-          "w": 8,
+          "w": 6,
           "h": 3
         },
         "datasource": {
@@ -714,9 +838,9 @@
               "type": "prometheus",
               "uid": "ae4bld7vas268d"
             },
-            "expr": "sum(max by (exported_job) (synora_repository_size_bytes{exported_job=~\"$job_name\"}))",
+            "expr": "sum(max by (exported_job) (synora_repository_size_bytes{exported_job=~\"$job_name\"})) or vector(0)",
             "instant": true,
-            "format": "time_series",
+            "range": false,
             "exemplar": false
           }
         ],
@@ -731,19 +855,20 @@
           "textMode": "value",
           "colorMode": "background",
           "graphMode": "none",
-          "justifyMode": "center"
+          "justifyMode": "center",
+          "orientation": "auto"
         },
         "fieldConfig": {
           "defaults": {
             "color": {
               "mode": "fixed",
-              "fixedColor": "blue"
+              "fixedColor": "semi-dark-blue"
             },
             "thresholds": {
               "mode": "absolute",
               "steps": [
                 {
-                  "color": "blue",
+                  "color": "semi-dark-blue",
                   "value": null
                 }
               ]
@@ -771,12 +896,12 @@
       {
         "id": 30,
         "type": "table",
-        "title": "正在运行（每个任务一行）",
+        "title": "正在运行",
         "gridPos": {
           "x": 0,
           "y": 8,
-          "w": 12,
-          "h": 10
+          "w": 14,
+          "h": 11
         },
         "datasource": {
           "type": "prometheus",
@@ -791,8 +916,10 @@
             },
             "expr": "max by (exported_job, worker) ((synora_job_status{exported_job=~\"$job_name\"} == 3 or synora_job_status{exported_job=~\"$job_name\"} == 4))",
             "instant": true,
+            "range": false,
             "format": "table",
-            "exemplar": false
+            "exemplar": false,
+            "hide": false
           },
           {
             "refId": "B",
@@ -802,8 +929,10 @@
             },
             "expr": "max by (exported_job, provider) (synora_job_info{exported_job=~\"$job_name\"} and on (exported_job) (synora_job_status{exported_job=~\"$job_name\"} == 3 or synora_job_status{exported_job=~\"$job_name\"} == 4))",
             "instant": true,
+            "range": false,
             "format": "table",
-            "exemplar": false
+            "exemplar": false,
+            "hide": false
           },
           {
             "refId": "C",
@@ -813,8 +942,10 @@
             },
             "expr": "max by (exported_job) (synora_job_memory_bytes{exported_job=~\"$job_name\"} and on (exported_job) (synora_job_status{exported_job=~\"$job_name\"} == 3 or synora_job_status{exported_job=~\"$job_name\"} == 4))",
             "instant": true,
+            "range": false,
             "format": "table",
-            "exemplar": false
+            "exemplar": false,
+            "hide": false
           },
           {
             "refId": "D",
@@ -824,8 +955,10 @@
             },
             "expr": "max by (exported_job) (synora_job_cpu_percent{exported_job=~\"$job_name\"} and on (exported_job) (synora_job_status{exported_job=~\"$job_name\"} == 3 or synora_job_status{exported_job=~\"$job_name\"} == 4))",
             "instant": true,
+            "range": false,
             "format": "table",
-            "exemplar": false
+            "exemplar": false,
+            "hide": false
           },
           {
             "refId": "E",
@@ -835,8 +968,10 @@
             },
             "expr": "max by (exported_job) (synora_job_cpu_seconds{exported_job=~\"$job_name\"} and on (exported_job) (synora_job_status{exported_job=~\"$job_name\"} == 3 or synora_job_status{exported_job=~\"$job_name\"} == 4))",
             "instant": true,
+            "range": false,
             "format": "table",
-            "exemplar": false
+            "exemplar": false,
+            "hide": false
           },
           {
             "refId": "F",
@@ -846,17 +981,13 @@
             },
             "expr": "max by (exported_job) (synora_job_duration_seconds{exported_job=~\"$job_name\"} and on (exported_job) (synora_job_status{exported_job=~\"$job_name\"} == 3 or synora_job_status{exported_job=~\"$job_name\"} == 4))",
             "instant": true,
+            "range": false,
             "format": "table",
-            "exemplar": false
+            "exemplar": false,
+            "hide": false
           }
         ],
         "transformations": [
-          {
-            "id": "labelsToFields",
-            "options": {
-              "mode": "columns"
-            }
-          },
           {
             "id": "joinByField",
             "options": {
@@ -885,8 +1016,19 @@
                 "exported_job 1": true,
                 "exported_job 2": true,
                 "exported_job 3": true,
+                "exported_job 4": true,
+                "exported_job 5": true,
+                "exported_job 6": true,
+                "exported_job 7": true,
+                "exported_job 8": true,
+                "exported_job 9": true,
                 "worker 1": true,
-                "provider 1": true
+                "provider 1": true,
+                "Value #B": true,
+                "Value B": true,
+                "Value #B (last)": true,
+                "Value #B (mean)": true,
+                "Value #B (max)": true
               },
               "renameByName": {
                 "exported_job": "任务",
@@ -907,6 +1049,23 @@
                 "CPU %": 5,
                 "CPU 秒": 6,
                 "耗时": 7
+              }
+            }
+          },
+          {
+            "id": "filterFieldsByName",
+            "options": {
+              "include": {
+                "names": [
+                  "任务",
+                  "Worker",
+                  "状态",
+                  "Provider",
+                  "内存",
+                  "CPU %",
+                  "CPU 秒",
+                  "耗时"
+                ]
               }
             }
           }
@@ -994,73 +1153,17 @@
                         },
                         "11": {
                           "text": "跳过",
-                          "color": "text"
+                          "color": "dark-purple"
                         }
                       }
                     }
                   ]
                 },
                 {
-                  "id": "custom.cellOptions",
+                  "id": "custom",
                   "value": {
-                    "type": "color-text"
+                    "width": 90
                   }
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "Worker状态"
-              },
-              "properties": [
-                {
-                  "id": "mappings",
-                  "value": [
-                    {
-                      "type": "value",
-                      "options": {
-                        "0": {
-                          "text": "离线",
-                          "color": "red"
-                        },
-                        "1": {
-                          "text": "在线",
-                          "color": "green"
-                        },
-                        "2": {
-                          "text": "停接",
-                          "color": "orange"
-                        },
-                        "3": {
-                          "text": "维护",
-                          "color": "purple"
-                        }
-                      }
-                    }
-                  ]
-                },
-                {
-                  "id": "custom.cellOptions",
-                  "value": {
-                    "type": "color-text"
-                  }
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "仓库大小"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "bytes"
-                },
-                {
-                  "id": "decimals",
-                  "value": 1
                 }
               ]
             },
@@ -1127,170 +1230,6 @@
                   "value": 1
                 }
               ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "上次结束"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "dateTimeAsIso"
-                },
-                {
-                  "id": "mappings",
-                  "value": [
-                    {
-                      "type": "value",
-                      "options": {
-                        "0": {
-                          "text": "—",
-                          "color": "text"
-                        }
-                      }
-                    },
-                    {
-                      "type": "special",
-                      "options": {
-                        "match": "null",
-                        "result": {
-                          "text": "—",
-                          "color": "text"
-                        }
-                      }
-                    },
-                    {
-                      "type": "special",
-                      "options": {
-                        "match": "empty",
-                        "result": {
-                          "text": "—",
-                          "color": "text"
-                        }
-                      }
-                    }
-                  ]
-                },
-                {
-                  "id": "noValue",
-                  "value": "—"
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "上次成功"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "dateTimeAsIso"
-                },
-                {
-                  "id": "mappings",
-                  "value": [
-                    {
-                      "type": "value",
-                      "options": {
-                        "0": {
-                          "text": "—",
-                          "color": "text"
-                        }
-                      }
-                    },
-                    {
-                      "type": "special",
-                      "options": {
-                        "match": "null",
-                        "result": {
-                          "text": "—",
-                          "color": "text"
-                        }
-                      }
-                    },
-                    {
-                      "type": "special",
-                      "options": {
-                        "match": "empty",
-                        "result": {
-                          "text": "—",
-                          "color": "text"
-                        }
-                      }
-                    }
-                  ]
-                },
-                {
-                  "id": "noValue",
-                  "value": "—"
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "24h 失败"
-              },
-              "properties": [
-                {
-                  "id": "decimals",
-                  "value": 0
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "24h 重试"
-              },
-              "properties": [
-                {
-                  "id": "decimals",
-                  "value": 0
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "24h 丢失"
-              },
-              "properties": [
-                {
-                  "id": "decimals",
-                  "value": 0
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "24h 传输"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "bytes"
-                },
-                {
-                  "id": "decimals",
-                  "value": 1
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "正在执行"
-              },
-              "properties": [
-                {
-                  "id": "decimals",
-                  "value": 0
-                }
-              ]
             }
           ]
         }
@@ -1300,10 +1239,10 @@
         "type": "table",
         "title": "当前失败 / 丢失 / 重试 / 取消",
         "gridPos": {
-          "x": 12,
+          "x": 14,
           "y": 8,
-          "w": 12,
-          "h": 10
+          "w": 10,
+          "h": 11
         },
         "datasource": {
           "type": "prometheus",
@@ -1318,8 +1257,10 @@
             },
             "expr": "max by (exported_job, worker) ((synora_job_status{exported_job=~\"$job_name\"} == 6 or synora_job_status{exported_job=~\"$job_name\"} == 7 or synora_job_status{exported_job=~\"$job_name\"} == 9 or synora_job_status{exported_job=~\"$job_name\"} == 10))",
             "instant": true,
+            "range": false,
             "format": "table",
-            "exemplar": false
+            "exemplar": false,
+            "hide": false
           },
           {
             "refId": "B",
@@ -1329,8 +1270,10 @@
             },
             "expr": "max by (exported_job, provider) (synora_job_info{exported_job=~\"$job_name\"} and on (exported_job) (synora_job_status{exported_job=~\"$job_name\"} == 6 or synora_job_status{exported_job=~\"$job_name\"} == 7 or synora_job_status{exported_job=~\"$job_name\"} == 9 or synora_job_status{exported_job=~\"$job_name\"} == 10))",
             "instant": true,
+            "range": false,
             "format": "table",
-            "exemplar": false
+            "exemplar": false,
+            "hide": false
           },
           {
             "refId": "C",
@@ -1340,8 +1283,10 @@
             },
             "expr": "max by (exported_job) (last_over_time(synora_job_duration_seconds{exported_job=~\"$job_name\"}[7d]) and on (exported_job) (synora_job_status{exported_job=~\"$job_name\"} == 6 or synora_job_status{exported_job=~\"$job_name\"} == 7 or synora_job_status{exported_job=~\"$job_name\"} == 9 or synora_job_status{exported_job=~\"$job_name\"} == 10))",
             "instant": true,
+            "range": false,
             "format": "table",
-            "exemplar": false
+            "exemplar": false,
+            "hide": false
           },
           {
             "refId": "D",
@@ -1351,17 +1296,13 @@
             },
             "expr": "(max by (exported_job) ((synora_job_last_end_timestamp{exported_job=~\"$job_name\"} > 0) and on (exported_job) (synora_job_status{exported_job=~\"$job_name\"} == 6 or synora_job_status{exported_job=~\"$job_name\"} == 7 or synora_job_status{exported_job=~\"$job_name\"} == 9 or synora_job_status{exported_job=~\"$job_name\"} == 10))) * 1000",
             "instant": true,
+            "range": false,
             "format": "table",
-            "exemplar": false
+            "exemplar": false,
+            "hide": false
           }
         ],
         "transformations": [
-          {
-            "id": "labelsToFields",
-            "options": {
-              "mode": "columns"
-            }
-          },
           {
             "id": "joinByField",
             "options": {
@@ -1390,8 +1331,19 @@
                 "exported_job 1": true,
                 "exported_job 2": true,
                 "exported_job 3": true,
+                "exported_job 4": true,
+                "exported_job 5": true,
+                "exported_job 6": true,
+                "exported_job 7": true,
+                "exported_job 8": true,
+                "exported_job 9": true,
                 "worker 1": true,
-                "provider 1": true
+                "provider 1": true,
+                "Value #B": true,
+                "Value B": true,
+                "Value #B (last)": true,
+                "Value #B (mean)": true,
+                "Value #B (max)": true
               },
               "renameByName": {
                 "exported_job": "任务",
@@ -1410,6 +1362,21 @@
                 "上次结束": 5
               }
             }
+          },
+          {
+            "id": "filterFieldsByName",
+            "options": {
+              "include": {
+                "names": [
+                  "任务",
+                  "Worker",
+                  "状态",
+                  "Provider",
+                  "耗时",
+                  "上次结束"
+                ]
+              }
+            }
           }
         ],
         "options": {
@@ -1420,13 +1387,7 @@
             "reducer": [],
             "countRows": false,
             "fields": ""
-          },
-          "sortBy": [
-            {
-              "displayName": "上次结束",
-              "desc": true
-            }
-          ]
+          }
         },
         "fieldConfig": {
           "defaults": {
@@ -1495,121 +1456,17 @@
                         },
                         "11": {
                           "text": "跳过",
-                          "color": "text"
+                          "color": "dark-purple"
                         }
                       }
                     }
                   ]
                 },
                 {
-                  "id": "custom.cellOptions",
+                  "id": "custom",
                   "value": {
-                    "type": "color-text"
+                    "width": 90
                   }
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "Worker状态"
-              },
-              "properties": [
-                {
-                  "id": "mappings",
-                  "value": [
-                    {
-                      "type": "value",
-                      "options": {
-                        "0": {
-                          "text": "离线",
-                          "color": "red"
-                        },
-                        "1": {
-                          "text": "在线",
-                          "color": "green"
-                        },
-                        "2": {
-                          "text": "停接",
-                          "color": "orange"
-                        },
-                        "3": {
-                          "text": "维护",
-                          "color": "purple"
-                        }
-                      }
-                    }
-                  ]
-                },
-                {
-                  "id": "custom.cellOptions",
-                  "value": {
-                    "type": "color-text"
-                  }
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "仓库大小"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "bytes"
-                },
-                {
-                  "id": "decimals",
-                  "value": 1
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "内存"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "bytes"
-                },
-                {
-                  "id": "decimals",
-                  "value": 1
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "CPU %"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "percent"
-                },
-                {
-                  "id": "decimals",
-                  "value": 1
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "CPU 秒"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "s"
-                },
-                {
-                  "id": "decimals",
-                  "value": 1
                 }
               ]
             },
@@ -1638,158 +1495,6 @@
                 {
                   "id": "unit",
                   "value": "dateTimeAsIso"
-                },
-                {
-                  "id": "mappings",
-                  "value": [
-                    {
-                      "type": "value",
-                      "options": {
-                        "0": {
-                          "text": "—",
-                          "color": "text"
-                        }
-                      }
-                    },
-                    {
-                      "type": "special",
-                      "options": {
-                        "match": "null",
-                        "result": {
-                          "text": "—",
-                          "color": "text"
-                        }
-                      }
-                    },
-                    {
-                      "type": "special",
-                      "options": {
-                        "match": "empty",
-                        "result": {
-                          "text": "—",
-                          "color": "text"
-                        }
-                      }
-                    }
-                  ]
-                },
-                {
-                  "id": "noValue",
-                  "value": "—"
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "上次成功"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "dateTimeAsIso"
-                },
-                {
-                  "id": "mappings",
-                  "value": [
-                    {
-                      "type": "value",
-                      "options": {
-                        "0": {
-                          "text": "—",
-                          "color": "text"
-                        }
-                      }
-                    },
-                    {
-                      "type": "special",
-                      "options": {
-                        "match": "null",
-                        "result": {
-                          "text": "—",
-                          "color": "text"
-                        }
-                      }
-                    },
-                    {
-                      "type": "special",
-                      "options": {
-                        "match": "empty",
-                        "result": {
-                          "text": "—",
-                          "color": "text"
-                        }
-                      }
-                    }
-                  ]
-                },
-                {
-                  "id": "noValue",
-                  "value": "—"
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "24h 失败"
-              },
-              "properties": [
-                {
-                  "id": "decimals",
-                  "value": 0
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "24h 重试"
-              },
-              "properties": [
-                {
-                  "id": "decimals",
-                  "value": 0
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "24h 丢失"
-              },
-              "properties": [
-                {
-                  "id": "decimals",
-                  "value": 0
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "24h 传输"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "bytes"
-                },
-                {
-                  "id": "decimals",
-                  "value": 1
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "正在执行"
-              },
-              "properties": [
-                {
-                  "id": "decimals",
-                  "value": 0
                 }
               ]
             }
@@ -1802,7 +1507,7 @@
         "title": "任务明细",
         "gridPos": {
           "x": 0,
-          "y": 18,
+          "y": 19,
           "w": 24,
           "h": 1
         },
@@ -1815,7 +1520,7 @@
         "title": "全部任务（状态 / Provider / 大小 / 内存 / CPU / 耗时）",
         "gridPos": {
           "x": 0,
-          "y": 19,
+          "y": 20,
           "w": 24,
           "h": 16
         },
@@ -1832,8 +1537,10 @@
             },
             "expr": "max by (exported_job, worker) (synora_job_status{exported_job=~\"$job_name\"})",
             "instant": true,
+            "range": false,
             "format": "table",
-            "exemplar": false
+            "exemplar": false,
+            "hide": false
           },
           {
             "refId": "B",
@@ -1843,8 +1550,10 @@
             },
             "expr": "max by (exported_job, provider) (synora_job_info{exported_job=~\"$job_name\"})",
             "instant": true,
+            "range": false,
             "format": "table",
-            "exemplar": false
+            "exemplar": false,
+            "hide": false
           },
           {
             "refId": "C",
@@ -1854,8 +1563,10 @@
             },
             "expr": "max by (exported_job) (synora_repository_size_bytes{exported_job=~\"$job_name\"})",
             "instant": true,
+            "range": false,
             "format": "table",
-            "exemplar": false
+            "exemplar": false,
+            "hide": false
           },
           {
             "refId": "D",
@@ -1865,8 +1576,10 @@
             },
             "expr": "max by (exported_job) (last_over_time(synora_job_memory_bytes{exported_job=~\"$job_name\"}[7d]))",
             "instant": true,
+            "range": false,
             "format": "table",
-            "exemplar": false
+            "exemplar": false,
+            "hide": false
           },
           {
             "refId": "E",
@@ -1876,8 +1589,10 @@
             },
             "expr": "max by (exported_job) (last_over_time(synora_job_cpu_percent{exported_job=~\"$job_name\"}[7d]))",
             "instant": true,
+            "range": false,
             "format": "table",
-            "exemplar": false
+            "exemplar": false,
+            "hide": false
           },
           {
             "refId": "F",
@@ -1887,8 +1602,10 @@
             },
             "expr": "max by (exported_job) (last_over_time(synora_job_cpu_seconds{exported_job=~\"$job_name\"}[7d]))",
             "instant": true,
+            "range": false,
             "format": "table",
-            "exemplar": false
+            "exemplar": false,
+            "hide": false
           },
           {
             "refId": "G",
@@ -1898,8 +1615,10 @@
             },
             "expr": "max by (exported_job) (last_over_time(synora_job_duration_seconds{exported_job=~\"$job_name\"}[7d]))",
             "instant": true,
+            "range": false,
             "format": "table",
-            "exemplar": false
+            "exemplar": false,
+            "hide": false
           },
           {
             "refId": "H",
@@ -1909,8 +1628,10 @@
             },
             "expr": "(max by (exported_job) (synora_job_last_end_timestamp{exported_job=~\"$job_name\"} > 0)) * 1000",
             "instant": true,
+            "range": false,
             "format": "table",
-            "exemplar": false
+            "exemplar": false,
+            "hide": false
           },
           {
             "refId": "I",
@@ -1920,17 +1641,13 @@
             },
             "expr": "(max by (exported_job) (synora_job_last_success_timestamp{exported_job=~\"$job_name\"} > 0)) * 1000",
             "instant": true,
+            "range": false,
             "format": "table",
-            "exemplar": false
+            "exemplar": false,
+            "hide": false
           }
         ],
         "transformations": [
-          {
-            "id": "labelsToFields",
-            "options": {
-              "mode": "columns"
-            }
-          },
           {
             "id": "joinByField",
             "options": {
@@ -1959,8 +1676,19 @@
                 "exported_job 1": true,
                 "exported_job 2": true,
                 "exported_job 3": true,
+                "exported_job 4": true,
+                "exported_job 5": true,
+                "exported_job 6": true,
+                "exported_job 7": true,
+                "exported_job 8": true,
+                "exported_job 9": true,
                 "worker 1": true,
-                "provider 1": true
+                "provider 1": true,
+                "Value #B": true,
+                "Value B": true,
+                "Value #B (last)": true,
+                "Value #B (mean)": true,
+                "Value #B (max)": true
               },
               "renameByName": {
                 "exported_job": "任务",
@@ -1989,505 +1717,24 @@
                 "上次成功": 10
               }
             }
-          }
-        ],
-        "options": {
-          "showHeader": true,
-          "cellHeight": "sm",
-          "footer": {
-            "show": false,
-            "reducer": [],
-            "countRows": false,
-            "fields": ""
-          },
-          "sortBy": [
-            {
-              "displayName": "状态",
-              "desc": true
-            }
-          ]
-        },
-        "fieldConfig": {
-          "defaults": {
-            "custom": {
-              "align": "auto",
-              "filterable": true,
-              "inspect": false
-            }
-          },
-          "overrides": [
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "状态"
-              },
-              "properties": [
-                {
-                  "id": "mappings",
-                  "value": [
-                    {
-                      "type": "value",
-                      "options": {
-                        "0": {
-                          "text": "待处理",
-                          "color": "text"
-                        },
-                        "1": {
-                          "text": "已调度",
-                          "color": "super-light-blue"
-                        },
-                        "2": {
-                          "text": "排队中",
-                          "color": "blue"
-                        },
-                        "3": {
-                          "text": "同步中",
-                          "color": "orange"
-                        },
-                        "4": {
-                          "text": "同步中",
-                          "color": "yellow"
-                        },
-                        "5": {
-                          "text": "成功",
-                          "color": "green"
-                        },
-                        "6": {
-                          "text": "失败",
-                          "color": "red"
-                        },
-                        "7": {
-                          "text": "重试中",
-                          "color": "orange"
-                        },
-                        "8": {
-                          "text": "取消中",
-                          "color": "purple"
-                        },
-                        "9": {
-                          "text": "已取消",
-                          "color": "purple"
-                        },
-                        "10": {
-                          "text": "丢失",
-                          "color": "dark-red"
-                        },
-                        "11": {
-                          "text": "跳过",
-                          "color": "text"
-                        }
-                      }
-                    }
-                  ]
-                },
-                {
-                  "id": "custom.cellOptions",
-                  "value": {
-                    "type": "color-text"
-                  }
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "Worker状态"
-              },
-              "properties": [
-                {
-                  "id": "mappings",
-                  "value": [
-                    {
-                      "type": "value",
-                      "options": {
-                        "0": {
-                          "text": "离线",
-                          "color": "red"
-                        },
-                        "1": {
-                          "text": "在线",
-                          "color": "green"
-                        },
-                        "2": {
-                          "text": "停接",
-                          "color": "orange"
-                        },
-                        "3": {
-                          "text": "维护",
-                          "color": "purple"
-                        }
-                      }
-                    }
-                  ]
-                },
-                {
-                  "id": "custom.cellOptions",
-                  "value": {
-                    "type": "color-text"
-                  }
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "仓库大小"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "bytes"
-                },
-                {
-                  "id": "decimals",
-                  "value": 1
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "内存"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "bytes"
-                },
-                {
-                  "id": "decimals",
-                  "value": 1
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "CPU %"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "percent"
-                },
-                {
-                  "id": "decimals",
-                  "value": 1
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "CPU 秒"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "s"
-                },
-                {
-                  "id": "decimals",
-                  "value": 1
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "耗时"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "s"
-                },
-                {
-                  "id": "decimals",
-                  "value": 1
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "上次结束"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "dateTimeAsIso"
-                },
-                {
-                  "id": "mappings",
-                  "value": [
-                    {
-                      "type": "value",
-                      "options": {
-                        "0": {
-                          "text": "—",
-                          "color": "text"
-                        }
-                      }
-                    },
-                    {
-                      "type": "special",
-                      "options": {
-                        "match": "null",
-                        "result": {
-                          "text": "—",
-                          "color": "text"
-                        }
-                      }
-                    },
-                    {
-                      "type": "special",
-                      "options": {
-                        "match": "empty",
-                        "result": {
-                          "text": "—",
-                          "color": "text"
-                        }
-                      }
-                    }
-                  ]
-                },
-                {
-                  "id": "noValue",
-                  "value": "—"
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "上次成功"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "dateTimeAsIso"
-                },
-                {
-                  "id": "mappings",
-                  "value": [
-                    {
-                      "type": "value",
-                      "options": {
-                        "0": {
-                          "text": "—",
-                          "color": "text"
-                        }
-                      }
-                    },
-                    {
-                      "type": "special",
-                      "options": {
-                        "match": "null",
-                        "result": {
-                          "text": "—",
-                          "color": "text"
-                        }
-                      }
-                    },
-                    {
-                      "type": "special",
-                      "options": {
-                        "match": "empty",
-                        "result": {
-                          "text": "—",
-                          "color": "text"
-                        }
-                      }
-                    }
-                  ]
-                },
-                {
-                  "id": "noValue",
-                  "value": "—"
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "24h 失败"
-              },
-              "properties": [
-                {
-                  "id": "decimals",
-                  "value": 0
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "24h 重试"
-              },
-              "properties": [
-                {
-                  "id": "decimals",
-                  "value": 0
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "24h 丢失"
-              },
-              "properties": [
-                {
-                  "id": "decimals",
-                  "value": 0
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "24h 传输"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "bytes"
-                },
-                {
-                  "id": "decimals",
-                  "value": 1
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "正在执行"
-              },
-              "properties": [
-                {
-                  "id": "decimals",
-                  "value": 0
-                }
-              ]
-            }
-          ]
-        }
-      },
-      {
-        "id": 4,
-        "type": "row",
-        "title": "仓库大小",
-        "gridPos": {
-          "x": 0,
-          "y": 35,
-          "w": 24,
-          "h": 1
-        },
-        "collapsed": false,
-        "panels": []
-      },
-      {
-        "id": 40,
-        "type": "table",
-        "title": "仓库大小（每个任务一行）",
-        "gridPos": {
-          "x": 0,
-          "y": 36,
-          "w": 16,
-          "h": 14
-        },
-        "datasource": {
-          "type": "prometheus",
-          "uid": "ae4bld7vas268d"
-        },
-        "targets": [
-          {
-            "refId": "A",
-            "datasource": {
-              "type": "prometheus",
-              "uid": "ae4bld7vas268d"
-            },
-            "expr": "max by (exported_job) (synora_repository_size_bytes{exported_job=~\"$job_name\"})",
-            "instant": true,
-            "format": "table",
-            "exemplar": false
           },
           {
-            "refId": "B",
-            "datasource": {
-              "type": "prometheus",
-              "uid": "ae4bld7vas268d"
-            },
-            "expr": "max by (exported_job, provider) (synora_job_info{exported_job=~\"$job_name\"})",
-            "instant": true,
-            "format": "table",
-            "exemplar": false
-          },
-          {
-            "refId": "C",
-            "datasource": {
-              "type": "prometheus",
-              "uid": "ae4bld7vas268d"
-            },
-            "expr": "max by (exported_job, worker) (synora_job_status{exported_job=~\"$job_name\"})",
-            "instant": true,
-            "format": "table",
-            "exemplar": false
-          }
-        ],
-        "transformations": [
-          {
-            "id": "labelsToFields",
+            "id": "filterFieldsByName",
             "options": {
-              "mode": "columns"
-            }
-          },
-          {
-            "id": "joinByField",
-            "options": {
-              "byField": "exported_job",
-              "mode": "outer"
-            }
-          },
-          {
-            "id": "organize",
-            "options": {
-              "excludeByName": {
-                "Time": true,
-                "Time 1": true,
-                "Time 2": true,
-                "Time 3": true,
-                "Time 4": true,
-                "Time 5": true,
-                "Time 6": true,
-                "Time 7": true,
-                "Time 8": true,
-                "Time 9": true,
-                "Time 10": true,
-                "__name__": true,
-                "job": true,
-                "instance": true,
-                "exported_job 1": true,
-                "exported_job 2": true,
-                "exported_job 3": true,
-                "worker 1": true,
-                "provider 1": true
-              },
-              "renameByName": {
-                "exported_job": "任务",
-                "provider": "Provider",
-                "worker": "Worker",
-                "Value #A": "仓库大小",
-                "Value #C": "状态"
-              },
-              "indexByName": {
-                "任务": 0,
-                "Provider": 1,
-                "Worker": 2,
-                "状态": 3,
-                "仓库大小": 4
+              "include": {
+                "names": [
+                  "任务",
+                  "Worker",
+                  "状态",
+                  "Provider",
+                  "仓库大小",
+                  "内存",
+                  "CPU %",
+                  "CPU 秒",
+                  "耗时",
+                  "上次结束",
+                  "上次成功"
+                ]
               }
             }
           }
@@ -2575,56 +1822,16 @@
                         },
                         "11": {
                           "text": "跳过",
-                          "color": "text"
+                          "color": "dark-purple"
                         }
                       }
                     }
                   ]
                 },
                 {
-                  "id": "custom.cellOptions",
+                  "id": "custom",
                   "value": {
-                    "type": "color-text"
-                  }
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "Worker状态"
-              },
-              "properties": [
-                {
-                  "id": "mappings",
-                  "value": [
-                    {
-                      "type": "value",
-                      "options": {
-                        "0": {
-                          "text": "离线",
-                          "color": "red"
-                        },
-                        "1": {
-                          "text": "在线",
-                          "color": "green"
-                        },
-                        "2": {
-                          "text": "停接",
-                          "color": "orange"
-                        },
-                        "3": {
-                          "text": "维护",
-                          "color": "purple"
-                        }
-                      }
-                    }
-                  ]
-                },
-                {
-                  "id": "custom.cellOptions",
-                  "value": {
-                    "type": "color-text"
+                    "width": 90
                   }
                 }
               ]
@@ -2718,44 +1925,6 @@
                 {
                   "id": "unit",
                   "value": "dateTimeAsIso"
-                },
-                {
-                  "id": "mappings",
-                  "value": [
-                    {
-                      "type": "value",
-                      "options": {
-                        "0": {
-                          "text": "—",
-                          "color": "text"
-                        }
-                      }
-                    },
-                    {
-                      "type": "special",
-                      "options": {
-                        "match": "null",
-                        "result": {
-                          "text": "—",
-                          "color": "text"
-                        }
-                      }
-                    },
-                    {
-                      "type": "special",
-                      "options": {
-                        "match": "empty",
-                        "result": {
-                          "text": "—",
-                          "color": "text"
-                        }
-                      }
-                    }
-                  ]
-                },
-                {
-                  "id": "noValue",
-                  "value": "—"
                 }
               ]
             },
@@ -2768,108 +1937,6 @@
                 {
                   "id": "unit",
                   "value": "dateTimeAsIso"
-                },
-                {
-                  "id": "mappings",
-                  "value": [
-                    {
-                      "type": "value",
-                      "options": {
-                        "0": {
-                          "text": "—",
-                          "color": "text"
-                        }
-                      }
-                    },
-                    {
-                      "type": "special",
-                      "options": {
-                        "match": "null",
-                        "result": {
-                          "text": "—",
-                          "color": "text"
-                        }
-                      }
-                    },
-                    {
-                      "type": "special",
-                      "options": {
-                        "match": "empty",
-                        "result": {
-                          "text": "—",
-                          "color": "text"
-                        }
-                      }
-                    }
-                  ]
-                },
-                {
-                  "id": "noValue",
-                  "value": "—"
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "24h 失败"
-              },
-              "properties": [
-                {
-                  "id": "decimals",
-                  "value": 0
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "24h 重试"
-              },
-              "properties": [
-                {
-                  "id": "decimals",
-                  "value": 0
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "24h 丢失"
-              },
-              "properties": [
-                {
-                  "id": "decimals",
-                  "value": 0
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "24h 传输"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "bytes"
-                },
-                {
-                  "id": "decimals",
-                  "value": 1
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "正在执行"
-              },
-              "properties": [
-                {
-                  "id": "decimals",
-                  "value": 0
                 }
               ]
             }
@@ -2877,14 +1944,27 @@
         }
       },
       {
-        "id": 35,
-        "type": "table",
-        "title": "24h 失败 / 重试 / 丢失（按任务）",
+        "id": 4,
+        "type": "row",
+        "title": "仓库大小",
         "gridPos": {
-          "x": 16,
+          "x": 0,
           "y": 36,
-          "w": 8,
-          "h": 14
+          "w": 24,
+          "h": 1
+        },
+        "collapsed": false,
+        "panels": []
+      },
+      {
+        "id": 40,
+        "type": "table",
+        "title": "仓库大小",
+        "gridPos": {
+          "x": 0,
+          "y": 37,
+          "w": 16,
+          "h": 12
         },
         "datasource": {
           "type": "prometheus",
@@ -2897,10 +1977,12 @@
               "type": "prometheus",
               "uid": "ae4bld7vas268d"
             },
-            "expr": "sum by (exported_job) (increase(synora_job_failures_total{exported_job=~\"$job_name\"}[24h]))",
+            "expr": "max by (exported_job) (synora_repository_size_bytes{exported_job=~\"$job_name\"})",
             "instant": true,
+            "range": false,
             "format": "table",
-            "exemplar": false
+            "exemplar": false,
+            "hide": false
           },
           {
             "refId": "B",
@@ -2908,10 +1990,12 @@
               "type": "prometheus",
               "uid": "ae4bld7vas268d"
             },
-            "expr": "sum by (exported_job) (increase(synora_job_retries_total{exported_job=~\"$job_name\"}[24h]))",
+            "expr": "max by (exported_job, provider) (synora_job_info{exported_job=~\"$job_name\"})",
             "instant": true,
+            "range": false,
             "format": "table",
-            "exemplar": false
+            "exemplar": false,
+            "hide": false
           },
           {
             "refId": "C",
@@ -2919,19 +2003,15 @@
               "type": "prometheus",
               "uid": "ae4bld7vas268d"
             },
-            "expr": "sum by (exported_job) (increase(synora_job_lost_total{exported_job=~\"$job_name\"}[24h]))",
+            "expr": "max by (exported_job, worker) (synora_job_status{exported_job=~\"$job_name\"})",
             "instant": true,
+            "range": false,
             "format": "table",
-            "exemplar": false
+            "exemplar": false,
+            "hide": false
           }
         ],
         "transformations": [
-          {
-            "id": "labelsToFields",
-            "options": {
-              "mode": "columns"
-            }
-          },
           {
             "id": "joinByField",
             "options": {
@@ -2960,20 +2040,47 @@
                 "exported_job 1": true,
                 "exported_job 2": true,
                 "exported_job 3": true,
+                "exported_job 4": true,
+                "exported_job 5": true,
+                "exported_job 6": true,
+                "exported_job 7": true,
+                "exported_job 8": true,
+                "exported_job 9": true,
                 "worker 1": true,
-                "provider 1": true
+                "provider 1": true,
+                "Value #B": true,
+                "Value B": true,
+                "Value #B (last)": true,
+                "Value #B (mean)": true,
+                "Value #B (max)": true
               },
               "renameByName": {
                 "exported_job": "任务",
-                "Value #A": "24h 失败",
-                "Value #B": "24h 重试",
-                "Value #C": "24h 丢失"
+                "provider": "Provider",
+                "worker": "Worker",
+                "Value #A": "仓库大小",
+                "Value #C": "状态"
               },
               "indexByName": {
                 "任务": 0,
-                "24h 失败": 1,
-                "24h 重试": 2,
-                "24h 丢失": 3
+                "Provider": 1,
+                "Worker": 2,
+                "状态": 3,
+                "仓库大小": 4
+              }
+            }
+          },
+          {
+            "id": "filterFieldsByName",
+            "options": {
+              "include": {
+                "names": [
+                  "任务",
+                  "Provider",
+                  "Worker",
+                  "状态",
+                  "仓库大小"
+                ]
               }
             }
           }
@@ -2989,7 +2096,7 @@
           },
           "sortBy": [
             {
-              "displayName": "24h 失败",
+              "displayName": "仓库大小",
               "desc": true
             }
           ]
@@ -3061,56 +2168,16 @@
                         },
                         "11": {
                           "text": "跳过",
-                          "color": "text"
+                          "color": "dark-purple"
                         }
                       }
                     }
                   ]
                 },
                 {
-                  "id": "custom.cellOptions",
+                  "id": "custom",
                   "value": {
-                    "type": "color-text"
-                  }
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "Worker状态"
-              },
-              "properties": [
-                {
-                  "id": "mappings",
-                  "value": [
-                    {
-                      "type": "value",
-                      "options": {
-                        "0": {
-                          "text": "离线",
-                          "color": "red"
-                        },
-                        "1": {
-                          "text": "在线",
-                          "color": "green"
-                        },
-                        "2": {
-                          "text": "停接",
-                          "color": "orange"
-                        },
-                        "3": {
-                          "text": "维护",
-                          "color": "purple"
-                        }
-                      }
-                    }
-                  ]
-                },
-                {
-                  "id": "custom.cellOptions",
-                  "value": {
-                    "type": "color-text"
+                    "width": 90
                   }
                 }
               ]
@@ -3130,521 +2197,19 @@
                   "value": 1
                 }
               ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "内存"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "bytes"
-                },
-                {
-                  "id": "decimals",
-                  "value": 1
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "CPU %"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "percent"
-                },
-                {
-                  "id": "decimals",
-                  "value": 1
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "CPU 秒"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "s"
-                },
-                {
-                  "id": "decimals",
-                  "value": 1
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "耗时"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "s"
-                },
-                {
-                  "id": "decimals",
-                  "value": 1
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "上次结束"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "dateTimeAsIso"
-                },
-                {
-                  "id": "mappings",
-                  "value": [
-                    {
-                      "type": "value",
-                      "options": {
-                        "0": {
-                          "text": "—",
-                          "color": "text"
-                        }
-                      }
-                    },
-                    {
-                      "type": "special",
-                      "options": {
-                        "match": "null",
-                        "result": {
-                          "text": "—",
-                          "color": "text"
-                        }
-                      }
-                    },
-                    {
-                      "type": "special",
-                      "options": {
-                        "match": "empty",
-                        "result": {
-                          "text": "—",
-                          "color": "text"
-                        }
-                      }
-                    }
-                  ]
-                },
-                {
-                  "id": "noValue",
-                  "value": "—"
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "上次成功"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "dateTimeAsIso"
-                },
-                {
-                  "id": "mappings",
-                  "value": [
-                    {
-                      "type": "value",
-                      "options": {
-                        "0": {
-                          "text": "—",
-                          "color": "text"
-                        }
-                      }
-                    },
-                    {
-                      "type": "special",
-                      "options": {
-                        "match": "null",
-                        "result": {
-                          "text": "—",
-                          "color": "text"
-                        }
-                      }
-                    },
-                    {
-                      "type": "special",
-                      "options": {
-                        "match": "empty",
-                        "result": {
-                          "text": "—",
-                          "color": "text"
-                        }
-                      }
-                    }
-                  ]
-                },
-                {
-                  "id": "noValue",
-                  "value": "—"
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "24h 失败"
-              },
-              "properties": [
-                {
-                  "id": "decimals",
-                  "value": 0
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "24h 重试"
-              },
-              "properties": [
-                {
-                  "id": "decimals",
-                  "value": 0
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "24h 丢失"
-              },
-              "properties": [
-                {
-                  "id": "decimals",
-                  "value": 0
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "24h 传输"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "bytes"
-                },
-                {
-                  "id": "decimals",
-                  "value": 1
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "正在执行"
-              },
-              "properties": [
-                {
-                  "id": "decimals",
-                  "value": 0
-                }
-              ]
             }
           ]
         }
       },
       {
-        "id": 5,
-        "type": "row",
-        "title": "资源曲线",
-        "gridPos": {
-          "x": 0,
-          "y": 50,
-          "w": 24,
-          "h": 1
-        },
-        "collapsed": false,
-        "panels": []
-      },
-      {
-        "id": 41,
-        "type": "timeseries",
-        "title": "任务内存",
-        "gridPos": {
-          "x": 0,
-          "y": 51,
-          "w": 12,
-          "h": 8
-        },
-        "datasource": {
-          "type": "prometheus",
-          "uid": "ae4bld7vas268d"
-        },
-        "targets": [
-          {
-            "refId": "A",
-            "datasource": {
-              "type": "prometheus",
-              "uid": "ae4bld7vas268d"
-            },
-            "expr": "max by (exported_job) (synora_job_memory_bytes{exported_job=~\"$job_name\"})",
-            "instant": false,
-            "format": "time_series",
-            "exemplar": false,
-            "legendFormat": "{{exported_job}}"
-          }
-        ],
-        "options": {
-          "legend": {
-            "displayMode": "list",
-            "placement": "bottom",
-            "showLegend": true,
-            "calcs": [
-              "lastNotNull"
-            ]
-          },
-          "tooltip": {
-            "mode": "multi",
-            "sort": "desc"
-          }
-        },
-        "fieldConfig": {
-          "defaults": {
-            "color": {
-              "mode": "palette-classic"
-            },
-            "custom": {
-              "drawStyle": "line",
-              "lineInterpolation": "smooth",
-              "lineWidth": 2,
-              "fillOpacity": 10,
-              "showPoints": "never",
-              "spanNulls": true,
-              "axisBorderShow": false,
-              "gradientMode": "opacity"
-            },
-            "unit": "bytes"
-          },
-          "overrides": []
-        }
-      },
-      {
-        "id": 42,
-        "type": "timeseries",
-        "title": "任务 CPU %",
-        "gridPos": {
-          "x": 12,
-          "y": 51,
-          "w": 12,
-          "h": 8
-        },
-        "datasource": {
-          "type": "prometheus",
-          "uid": "ae4bld7vas268d"
-        },
-        "targets": [
-          {
-            "refId": "A",
-            "datasource": {
-              "type": "prometheus",
-              "uid": "ae4bld7vas268d"
-            },
-            "expr": "max by (exported_job) (synora_job_cpu_percent{exported_job=~\"$job_name\"})",
-            "instant": false,
-            "format": "time_series",
-            "exemplar": false,
-            "legendFormat": "{{exported_job}}"
-          }
-        ],
-        "options": {
-          "legend": {
-            "displayMode": "list",
-            "placement": "bottom",
-            "showLegend": true,
-            "calcs": [
-              "lastNotNull"
-            ]
-          },
-          "tooltip": {
-            "mode": "multi",
-            "sort": "desc"
-          }
-        },
-        "fieldConfig": {
-          "defaults": {
-            "color": {
-              "mode": "palette-classic"
-            },
-            "custom": {
-              "drawStyle": "line",
-              "lineInterpolation": "smooth",
-              "lineWidth": 2,
-              "fillOpacity": 10,
-              "showPoints": "never",
-              "spanNulls": true,
-              "axisBorderShow": false,
-              "gradientMode": "opacity"
-            },
-            "unit": "percent"
-          },
-          "overrides": []
-        }
-      },
-      {
-        "id": 6,
-        "type": "row",
-        "title": "吞吐 / 失败趋势",
-        "gridPos": {
-          "x": 0,
-          "y": 59,
-          "w": 24,
-          "h": 1
-        },
-        "collapsed": false,
-        "panels": []
-      },
-      {
-        "id": 31,
-        "type": "timeseries",
-        "title": "传输吞吐",
-        "gridPos": {
-          "x": 0,
-          "y": 60,
-          "w": 8,
-          "h": 8
-        },
-        "datasource": {
-          "type": "prometheus",
-          "uid": "ae4bld7vas268d"
-        },
-        "targets": [
-          {
-            "refId": "A",
-            "datasource": {
-              "type": "prometheus",
-              "uid": "ae4bld7vas268d"
-            },
-            "expr": "sum by (exported_job) (rate(synora_job_bytes_transferred_total{exported_job=~\"$job_name\"}[5m]))",
-            "instant": false,
-            "format": "time_series",
-            "exemplar": false,
-            "legendFormat": "{{exported_job}}"
-          }
-        ],
-        "options": {
-          "legend": {
-            "displayMode": "list",
-            "placement": "bottom",
-            "showLegend": true,
-            "calcs": [
-              "lastNotNull"
-            ]
-          },
-          "tooltip": {
-            "mode": "multi",
-            "sort": "desc"
-          }
-        },
-        "fieldConfig": {
-          "defaults": {
-            "color": {
-              "mode": "palette-classic"
-            },
-            "custom": {
-              "drawStyle": "line",
-              "lineInterpolation": "smooth",
-              "lineWidth": 2,
-              "fillOpacity": 10,
-              "showPoints": "never",
-              "spanNulls": true,
-              "axisBorderShow": false,
-              "gradientMode": "opacity"
-            },
-            "unit": "Bps"
-          },
-          "overrides": []
-        }
-      },
-      {
-        "id": 33,
-        "type": "timeseries",
-        "title": "最近一次同步耗时",
-        "gridPos": {
-          "x": 8,
-          "y": 60,
-          "w": 8,
-          "h": 8
-        },
-        "datasource": {
-          "type": "prometheus",
-          "uid": "ae4bld7vas268d"
-        },
-        "targets": [
-          {
-            "refId": "A",
-            "datasource": {
-              "type": "prometheus",
-              "uid": "ae4bld7vas268d"
-            },
-            "expr": "max by (exported_job) (synora_job_duration_seconds{exported_job=~\"$job_name\"})",
-            "instant": false,
-            "format": "time_series",
-            "exemplar": false,
-            "legendFormat": "{{exported_job}}"
-          }
-        ],
-        "options": {
-          "legend": {
-            "displayMode": "list",
-            "placement": "bottom",
-            "showLegend": true,
-            "calcs": [
-              "lastNotNull"
-            ]
-          },
-          "tooltip": {
-            "mode": "multi",
-            "sort": "desc"
-          }
-        },
-        "fieldConfig": {
-          "defaults": {
-            "color": {
-              "mode": "palette-classic"
-            },
-            "custom": {
-              "drawStyle": "line",
-              "lineInterpolation": "smooth",
-              "lineWidth": 2,
-              "fillOpacity": 10,
-              "showPoints": "never",
-              "spanNulls": true,
-              "axisBorderShow": false,
-              "gradientMode": "opacity"
-            },
-            "unit": "s"
-          },
-          "overrides": []
-        }
-      },
-      {
-        "id": 34,
-        "type": "timeseries",
-        "title": "失败 / 重试 / 丢失（5m）",
+        "id": 35,
+        "type": "table",
+        "title": "24h 失败 / 重试 / 丢失（按任务）",
         "gridPos": {
           "x": 16,
-          "y": 60,
+          "y": 37,
           "w": 8,
-          "h": 8
+          "h": 12
         },
         "datasource": {
           "type": "prometheus",
@@ -3657,11 +2222,12 @@
               "type": "prometheus",
               "uid": "ae4bld7vas268d"
             },
-            "expr": "sum(rate(synora_job_failures_total[5m]))",
-            "instant": false,
-            "format": "time_series",
+            "expr": "sum by (exported_job) (increase(synora_job_failures_total{exported_job=~\"$job_name\"}[24h]))",
+            "instant": true,
+            "range": false,
+            "format": "table",
             "exemplar": false,
-            "legendFormat": "失败"
+            "hide": false
           },
           {
             "refId": "B",
@@ -3669,11 +2235,12 @@
               "type": "prometheus",
               "uid": "ae4bld7vas268d"
             },
-            "expr": "sum(rate(synora_job_retries_total[5m]))",
-            "instant": false,
-            "format": "time_series",
+            "expr": "sum by (exported_job) (increase(synora_job_retries_total{exported_job=~\"$job_name\"}[24h]))",
+            "instant": true,
+            "range": false,
+            "format": "table",
             "exemplar": false,
-            "legendFormat": "重试"
+            "hide": false
           },
           {
             "refId": "C",
@@ -3681,109 +2248,19 @@
               "type": "prometheus",
               "uid": "ae4bld7vas268d"
             },
-            "expr": "sum(rate(synora_job_lost_total[5m]))",
-            "instant": false,
-            "format": "time_series",
+            "expr": "sum by (exported_job) (increase(synora_job_lost_total{exported_job=~\"$job_name\"}[24h]))",
+            "instant": true,
+            "range": false,
+            "format": "table",
             "exemplar": false,
-            "legendFormat": "丢失"
-          }
-        ],
-        "options": {
-          "legend": {
-            "displayMode": "list",
-            "placement": "bottom",
-            "showLegend": true,
-            "calcs": [
-              "lastNotNull"
-            ]
-          },
-          "tooltip": {
-            "mode": "multi",
-            "sort": "desc"
-          }
-        },
-        "fieldConfig": {
-          "defaults": {
-            "color": {
-              "mode": "palette-classic"
-            },
-            "custom": {
-              "drawStyle": "line",
-              "lineInterpolation": "smooth",
-              "lineWidth": 2,
-              "fillOpacity": 10,
-              "showPoints": "never",
-              "spanNulls": true,
-              "axisBorderShow": false,
-              "gradientMode": "opacity"
-            },
-            "unit": "short"
-          },
-          "overrides": []
-        }
-      },
-      {
-        "id": 7,
-        "type": "row",
-        "title": "Worker",
-        "gridPos": {
-          "x": 0,
-          "y": 68,
-          "w": 24,
-          "h": 1
-        },
-        "collapsed": false,
-        "panels": []
-      },
-      {
-        "id": 60,
-        "type": "table",
-        "title": "Worker 状态",
-        "gridPos": {
-          "x": 0,
-          "y": 69,
-          "w": 12,
-          "h": 8
-        },
-        "datasource": {
-          "type": "prometheus",
-          "uid": "ae4bld7vas268d"
-        },
-        "targets": [
-          {
-            "refId": "A",
-            "datasource": {
-              "type": "prometheus",
-              "uid": "ae4bld7vas268d"
-            },
-            "expr": "max by (worker) (synora_worker_status)",
-            "instant": true,
-            "format": "table",
-            "exemplar": false
-          },
-          {
-            "refId": "B",
-            "datasource": {
-              "type": "prometheus",
-              "uid": "ae4bld7vas268d"
-            },
-            "expr": "max by (worker) (synora_worker_jobs_running)",
-            "instant": true,
-            "format": "table",
-            "exemplar": false
+            "hide": false
           }
         ],
         "transformations": [
           {
-            "id": "labelsToFields",
-            "options": {
-              "mode": "columns"
-            }
-          },
-          {
             "id": "joinByField",
             "options": {
-              "byField": "worker",
+              "byField": "exported_job",
               "mode": "outer"
             }
           },
@@ -3808,18 +2285,536 @@
                 "exported_job 1": true,
                 "exported_job 2": true,
                 "exported_job 3": true,
+                "exported_job 4": true,
+                "exported_job 5": true,
+                "exported_job 6": true,
+                "exported_job 7": true,
+                "exported_job 8": true,
+                "exported_job 9": true,
                 "worker 1": true,
                 "provider 1": true
               },
               "renameByName": {
+                "exported_job": "任务",
+                "Value #A": "失败",
+                "Value #B": "重试",
+                "Value #C": "丢失"
+              },
+              "indexByName": {
+                "任务": 0,
+                "失败": 1,
+                "重试": 2,
+                "丢失": 3
+              }
+            }
+          },
+          {
+            "id": "filterFieldsByName",
+            "options": {
+              "include": {
+                "names": [
+                  "任务",
+                  "失败",
+                  "重试",
+                  "丢失"
+                ]
+              }
+            }
+          }
+        ],
+        "options": {
+          "showHeader": true,
+          "cellHeight": "sm",
+          "footer": {
+            "show": false,
+            "reducer": [],
+            "countRows": false,
+            "fields": ""
+          },
+          "sortBy": [
+            {
+              "displayName": "失败",
+              "desc": true
+            }
+          ]
+        },
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "align": "auto",
+              "filterable": true,
+              "inspect": false
+            }
+          },
+          "overrides": [
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "失败"
+              },
+              "properties": [
+                {
+                  "id": "decimals",
+                  "value": 0
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "重试"
+              },
+              "properties": [
+                {
+                  "id": "decimals",
+                  "value": 0
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "丢失"
+              },
+              "properties": [
+                {
+                  "id": "decimals",
+                  "value": 0
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "id": 5,
+        "type": "row",
+        "title": "资源曲线",
+        "gridPos": {
+          "x": 0,
+          "y": 49,
+          "w": 24,
+          "h": 1
+        },
+        "collapsed": false,
+        "panels": []
+      },
+      {
+        "id": 41,
+        "type": "timeseries",
+        "title": "任务内存",
+        "gridPos": {
+          "x": 0,
+          "y": 50,
+          "w": 12,
+          "h": 8
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "ae4bld7vas268d"
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ae4bld7vas268d"
+            },
+            "expr": "max by (exported_job) (synora_job_memory_bytes{exported_job=~\"$job_name\"})",
+            "legendFormat": "{{exported_job}}",
+            "instant": false,
+            "range": true,
+            "exemplar": false
+          }
+        ],
+        "options": {
+          "legend": {
+            "displayMode": "list",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "mode": "multi",
+            "sort": "desc"
+          }
+        },
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "drawStyle": "line",
+              "lineInterpolation": "smooth",
+              "lineWidth": 2,
+              "fillOpacity": 10,
+              "showPoints": "never",
+              "spanNulls": true
+            },
+            "unit": "bytes"
+          },
+          "overrides": []
+        }
+      },
+      {
+        "id": 42,
+        "type": "timeseries",
+        "title": "任务 CPU %",
+        "gridPos": {
+          "x": 12,
+          "y": 50,
+          "w": 12,
+          "h": 8
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "ae4bld7vas268d"
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ae4bld7vas268d"
+            },
+            "expr": "max by (exported_job) (synora_job_cpu_percent{exported_job=~\"$job_name\"})",
+            "legendFormat": "{{exported_job}}",
+            "instant": false,
+            "range": true,
+            "exemplar": false
+          }
+        ],
+        "options": {
+          "legend": {
+            "displayMode": "list",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "mode": "multi",
+            "sort": "desc"
+          }
+        },
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "drawStyle": "line",
+              "lineInterpolation": "smooth",
+              "lineWidth": 2,
+              "fillOpacity": 10,
+              "showPoints": "never",
+              "spanNulls": true
+            },
+            "unit": "percent"
+          },
+          "overrides": []
+        }
+      },
+      {
+        "id": 6,
+        "type": "row",
+        "title": "吞吐 / 失败趋势",
+        "gridPos": {
+          "x": 0,
+          "y": 58,
+          "w": 24,
+          "h": 1
+        },
+        "collapsed": false,
+        "panels": []
+      },
+      {
+        "id": 31,
+        "type": "timeseries",
+        "title": "传输吞吐",
+        "gridPos": {
+          "x": 0,
+          "y": 59,
+          "w": 8,
+          "h": 8
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "ae4bld7vas268d"
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ae4bld7vas268d"
+            },
+            "expr": "sum by (exported_job) (rate(synora_job_bytes_transferred_total{exported_job=~\"$job_name\"}[5m]))",
+            "legendFormat": "{{exported_job}}",
+            "instant": false,
+            "range": true,
+            "exemplar": false
+          }
+        ],
+        "options": {
+          "legend": {
+            "displayMode": "list",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "mode": "multi",
+            "sort": "desc"
+          }
+        },
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "drawStyle": "line",
+              "lineInterpolation": "smooth",
+              "lineWidth": 2,
+              "fillOpacity": 10,
+              "showPoints": "never",
+              "spanNulls": true
+            },
+            "unit": "Bps"
+          },
+          "overrides": []
+        }
+      },
+      {
+        "id": 33,
+        "type": "timeseries",
+        "title": "最近一次同步耗时",
+        "gridPos": {
+          "x": 8,
+          "y": 59,
+          "w": 8,
+          "h": 8
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "ae4bld7vas268d"
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ae4bld7vas268d"
+            },
+            "expr": "max by (exported_job) (synora_job_duration_seconds{exported_job=~\"$job_name\"})",
+            "legendFormat": "{{exported_job}}",
+            "instant": false,
+            "range": true,
+            "exemplar": false
+          }
+        ],
+        "options": {
+          "legend": {
+            "displayMode": "list",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "mode": "multi",
+            "sort": "desc"
+          }
+        },
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "drawStyle": "line",
+              "lineInterpolation": "smooth",
+              "lineWidth": 2,
+              "fillOpacity": 10,
+              "showPoints": "never",
+              "spanNulls": true
+            },
+            "unit": "s"
+          },
+          "overrides": []
+        }
+      },
+      {
+        "id": 34,
+        "type": "timeseries",
+        "title": "失败 / 重试 / 丢失（5m）",
+        "gridPos": {
+          "x": 16,
+          "y": 59,
+          "w": 8,
+          "h": 8
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "ae4bld7vas268d"
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ae4bld7vas268d"
+            },
+            "expr": "sum(rate(synora_job_failures_total[5m]))",
+            "legendFormat": "失败",
+            "instant": false,
+            "range": true,
+            "exemplar": false
+          },
+          {
+            "refId": "B",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ae4bld7vas268d"
+            },
+            "expr": "sum(rate(synora_job_retries_total[5m]))",
+            "legendFormat": "重试",
+            "instant": false,
+            "range": true,
+            "exemplar": false
+          },
+          {
+            "refId": "C",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ae4bld7vas268d"
+            },
+            "expr": "sum(rate(synora_job_lost_total[5m]))",
+            "legendFormat": "丢失",
+            "instant": false,
+            "range": true,
+            "exemplar": false
+          }
+        ],
+        "options": {
+          "legend": {
+            "displayMode": "list",
+            "placement": "bottom",
+            "showLegend": true
+          },
+          "tooltip": {
+            "mode": "multi",
+            "sort": "desc"
+          }
+        },
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "drawStyle": "line",
+              "lineInterpolation": "smooth",
+              "lineWidth": 2,
+              "fillOpacity": 10,
+              "showPoints": "never",
+              "spanNulls": true
+            },
+            "unit": "none"
+          },
+          "overrides": []
+        }
+      },
+      {
+        "id": 7,
+        "type": "row",
+        "title": "Worker",
+        "gridPos": {
+          "x": 0,
+          "y": 67,
+          "w": 24,
+          "h": 1
+        },
+        "collapsed": false,
+        "panels": []
+      },
+      {
+        "id": 60,
+        "type": "table",
+        "title": "Worker 状态 / 占用 / 上限",
+        "gridPos": {
+          "x": 0,
+          "y": 68,
+          "w": 12,
+          "h": 8
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "ae4bld7vas268d"
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ae4bld7vas268d"
+            },
+            "expr": "max by (worker) (synora_worker_status{worker!=\"local\"})",
+            "instant": true,
+            "range": false,
+            "format": "table"
+          },
+          {
+            "refId": "B",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ae4bld7vas268d"
+            },
+            "expr": "max by (worker) (synora_worker_jobs_running{worker!=\"local\"})",
+            "instant": true,
+            "range": false,
+            "format": "table"
+          },
+          {
+            "refId": "C",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ae4bld7vas268d"
+            },
+            "expr": "max by (worker) (synora_worker_max_concurrency{worker!=\"local\"})",
+            "instant": true,
+            "range": false,
+            "format": "table"
+          }
+        ],
+        "transformations": [
+          {
+            "id": "joinByField",
+            "options": {
+              "byField": "worker",
+              "mode": "outer"
+            }
+          },
+          {
+            "id": "organize",
+            "options": {
+              "excludeByName": {
+                "Time": true,
+                "Time 1": true,
+                "Time 2": true,
+                "Time 3": true,
+                "Time 4": true,
+                "__name__": true,
+                "job": true,
+                "instance": true,
+                "worker 1": true,
+                "worker 2": true
+              },
+              "renameByName": {
                 "worker": "Worker",
                 "Value #A": "Worker状态",
-                "Value #B": "正在执行"
+                "Value #B": "正在执行",
+                "Value #C": "上限"
               },
               "indexByName": {
                 "Worker": 0,
                 "Worker状态": 1,
-                "正在执行": 2
+                "正在执行": 2,
+                "上限": 3
+              }
+            }
+          },
+          {
+            "id": "filterFieldsByName",
+            "options": {
+              "include": {
+                "names": [
+                  "Worker",
+                  "Worker状态",
+                  "正在执行",
+                  "上限"
+                ]
               }
             }
           }
@@ -3846,78 +2841,6 @@
             {
               "matcher": {
                 "id": "byName",
-                "options": "状态"
-              },
-              "properties": [
-                {
-                  "id": "mappings",
-                  "value": [
-                    {
-                      "type": "value",
-                      "options": {
-                        "0": {
-                          "text": "待处理",
-                          "color": "text"
-                        },
-                        "1": {
-                          "text": "已调度",
-                          "color": "super-light-blue"
-                        },
-                        "2": {
-                          "text": "排队中",
-                          "color": "blue"
-                        },
-                        "3": {
-                          "text": "同步中",
-                          "color": "orange"
-                        },
-                        "4": {
-                          "text": "同步中",
-                          "color": "yellow"
-                        },
-                        "5": {
-                          "text": "成功",
-                          "color": "green"
-                        },
-                        "6": {
-                          "text": "失败",
-                          "color": "red"
-                        },
-                        "7": {
-                          "text": "重试中",
-                          "color": "orange"
-                        },
-                        "8": {
-                          "text": "取消中",
-                          "color": "purple"
-                        },
-                        "9": {
-                          "text": "已取消",
-                          "color": "purple"
-                        },
-                        "10": {
-                          "text": "丢失",
-                          "color": "dark-red"
-                        },
-                        "11": {
-                          "text": "跳过",
-                          "color": "text"
-                        }
-                      }
-                    }
-                  ]
-                },
-                {
-                  "id": "custom.cellOptions",
-                  "value": {
-                    "type": "color-text"
-                  }
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
                 "options": "Worker状态"
               },
               "properties": [
@@ -3929,14 +2852,14 @@
                       "options": {
                         "0": {
                           "text": "离线",
-                          "color": "red"
+                          "color": "dark-red"
                         },
                         "1": {
                           "text": "在线",
                           "color": "green"
                         },
                         "2": {
-                          "text": "停接",
+                          "text": "退役",
                           "color": "orange"
                         },
                         "3": {
@@ -3946,244 +2869,6 @@
                       }
                     }
                   ]
-                },
-                {
-                  "id": "custom.cellOptions",
-                  "value": {
-                    "type": "color-text"
-                  }
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "仓库大小"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "bytes"
-                },
-                {
-                  "id": "decimals",
-                  "value": 1
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "内存"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "bytes"
-                },
-                {
-                  "id": "decimals",
-                  "value": 1
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "CPU %"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "percent"
-                },
-                {
-                  "id": "decimals",
-                  "value": 1
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "CPU 秒"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "s"
-                },
-                {
-                  "id": "decimals",
-                  "value": 1
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "耗时"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "s"
-                },
-                {
-                  "id": "decimals",
-                  "value": 1
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "上次结束"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "dateTimeAsIso"
-                },
-                {
-                  "id": "mappings",
-                  "value": [
-                    {
-                      "type": "value",
-                      "options": {
-                        "0": {
-                          "text": "—",
-                          "color": "text"
-                        }
-                      }
-                    },
-                    {
-                      "type": "special",
-                      "options": {
-                        "match": "null",
-                        "result": {
-                          "text": "—",
-                          "color": "text"
-                        }
-                      }
-                    },
-                    {
-                      "type": "special",
-                      "options": {
-                        "match": "empty",
-                        "result": {
-                          "text": "—",
-                          "color": "text"
-                        }
-                      }
-                    }
-                  ]
-                },
-                {
-                  "id": "noValue",
-                  "value": "—"
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "上次成功"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "dateTimeAsIso"
-                },
-                {
-                  "id": "mappings",
-                  "value": [
-                    {
-                      "type": "value",
-                      "options": {
-                        "0": {
-                          "text": "—",
-                          "color": "text"
-                        }
-                      }
-                    },
-                    {
-                      "type": "special",
-                      "options": {
-                        "match": "null",
-                        "result": {
-                          "text": "—",
-                          "color": "text"
-                        }
-                      }
-                    },
-                    {
-                      "type": "special",
-                      "options": {
-                        "match": "empty",
-                        "result": {
-                          "text": "—",
-                          "color": "text"
-                        }
-                      }
-                    }
-                  ]
-                },
-                {
-                  "id": "noValue",
-                  "value": "—"
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "24h 失败"
-              },
-              "properties": [
-                {
-                  "id": "decimals",
-                  "value": 0
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "24h 重试"
-              },
-              "properties": [
-                {
-                  "id": "decimals",
-                  "value": 0
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "24h 丢失"
-              },
-              "properties": [
-                {
-                  "id": "decimals",
-                  "value": 0
-                }
-              ]
-            },
-            {
-              "matcher": {
-                "id": "byName",
-                "options": "24h 传输"
-              },
-              "properties": [
-                {
-                  "id": "unit",
-                  "value": "bytes"
-                },
-                {
-                  "id": "decimals",
-                  "value": 1
                 }
               ]
             },
@@ -4198,6 +2883,18 @@
                   "value": 0
                 }
               ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "上限"
+              },
+              "properties": [
+                {
+                  "id": "decimals",
+                  "value": 0
+                }
+              ]
             }
           ]
         }
@@ -4205,10 +2902,10 @@
       {
         "id": 61,
         "type": "timeseries",
-        "title": "Worker 正在执行的任务数",
+        "title": "Worker 正在执行 vs 上限",
         "gridPos": {
           "x": 12,
-          "y": 69,
+          "y": 68,
           "w": 12,
           "h": 8
         },
@@ -4223,21 +2920,30 @@
               "type": "prometheus",
               "uid": "ae4bld7vas268d"
             },
-            "expr": "max by (worker) (synora_worker_jobs_running)",
+            "expr": "max by (worker) (synora_worker_jobs_running{worker!=\"local\"})",
+            "legendFormat": "{{worker}} 正在执行",
             "instant": false,
-            "format": "time_series",
-            "exemplar": false,
-            "legendFormat": "{{worker}}"
+            "range": true,
+            "exemplar": false
+          },
+          {
+            "refId": "B",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ae4bld7vas268d"
+            },
+            "expr": "max by (worker) (synora_worker_max_concurrency{worker!=\"local\"} and on(worker) (synora_worker_status{worker!=\"local\"} == 1))",
+            "legendFormat": "{{worker}} 上限",
+            "instant": false,
+            "range": true,
+            "exemplar": false
           }
         ],
         "options": {
           "legend": {
             "displayMode": "list",
             "placement": "bottom",
-            "showLegend": true,
-            "calcs": [
-              "lastNotNull"
-            ]
+            "showLegend": true
           },
           "tooltip": {
             "mode": "multi",
@@ -4246,25 +2952,23 @@
         },
         "fieldConfig": {
           "defaults": {
-            "color": {
-              "mode": "palette-classic"
-            },
             "custom": {
               "drawStyle": "line",
               "lineInterpolation": "smooth",
               "lineWidth": 2,
               "fillOpacity": 10,
               "showPoints": "never",
-              "spanNulls": true,
-              "axisBorderShow": false,
-              "gradientMode": "opacity"
+              "spanNulls": true
             },
-            "unit": "short"
+            "unit": "none"
           },
           "overrides": []
         }
       }
     ],
+    "annotations": {
+      "list": []
+    },
     "links": []
   }
 }
