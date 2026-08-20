@@ -354,7 +354,7 @@ impl Client {
     }
 
     pub async fn stop_run(&self, job: &str) -> Result<(), ApiError> {
-        self.json(
+        self.send_ok(
             reqwest::Method::POST,
             &format!("{API_V1}/jobs/{job}/stop"),
             None::<&()>,

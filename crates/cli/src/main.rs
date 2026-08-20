@@ -220,7 +220,7 @@ async fn run(cli: Cli) -> Result<(), String> {
         return cmd_run_group(group, config).await;
     }
     if let Some(job) = cli.stop {
-        return cmd_stop(job, config);
+        return cmd_stop(job, config).await;
     }
     if let Some(job) = cli.logs {
         return cmd_logs(job, cli.lines, config);
@@ -246,20 +246,20 @@ async fn run(cli: Cli) -> Result<(), String> {
             JobCmd::Run { job } => cmd_run(job, config).await?,
             JobCmd::Start { job, force } => {
                 if force {
-                    let _ = cmd_stop(job.clone(), config.clone());
+                    cmd_stop(job.clone(), config.clone()).await?;
                 }
                 cmd_run(job, config).await?
             }
             JobCmd::Restart { job } => {
-                let _ = cmd_stop(job.clone(), config.clone());
+                cmd_stop(job.clone(), config.clone()).await?;
                 cmd_run(job, config).await?
             }
-            JobCmd::Stop { job } => cmd_stop(job, config)?,
+            JobCmd::Stop { job } => cmd_stop(job, config).await?,
             JobCmd::Logs { job, lines } => cmd_logs(job, lines, config)?,
             JobCmd::Delete { job } => cmd_delete_job(job, config).await?,
         },
         Command::Logs { job, lines } => cmd_logs(job, lines, config)?,
-        Command::Stop { job } => cmd_stop(job, config)?,
+        Command::Stop { job } => cmd_stop(job, config).await?,
         Command::Reload {} => cmd_reload(config)?,
         Command::ProxyDelete { name } => cmd_delete_proxy(name, config)?,
         Command::Tui { manager, token } => tui::run(config, manager, token)?,
@@ -416,6 +416,18 @@ async fn metrics_handler(
 }
 
 async fn cmd_run(job: String, config: Option<PathBuf>) -> Result<(), String> {
+    if let Ok((url, token)) = manager_creds(config.clone(), None, None) {
+        let client = api::Client::new(&url, &token).map_err(|e| e.to_string())?;
+        match client.trigger_run(&job).await {
+            Ok(run_id) => {
+                println!("{job}: queued as {run_id}");
+                return Ok(());
+            }
+            Err(e) => {
+                return Err(format!("manager at {url} rejected run `{job}`: {e}"));
+            }
+        }
+    }
     let (cfg, _) = load_config(config, None)?;
     let engine = Engine::new(cfg, &PathBuf::from("migrations"), true).await?;
     let status = engine.clone().run_once(&job).await?;
@@ -582,11 +594,23 @@ fn valid_job_name(job: &str) -> bool {
 }
 
 /// `synora stop`: drop a control file the daemon's tick picks up.
-fn cmd_stop(job: String, config: Option<PathBuf>) -> Result<(), String> {
-    let (cfg, _) = load_config(config, None)?;
+async fn cmd_stop(job: String, config: Option<PathBuf>) -> Result<(), String> {
     if !valid_job_name(&job) {
         return Err(format!("invalid job name `{job}`"));
     }
+    if let Ok((url, token)) = manager_creds(config.clone(), None, None) {
+        let client = api::Client::new(&url, &token).map_err(|e| e.to_string())?;
+        match client.stop_run(&job).await {
+            Ok(()) => {
+                println!("cancel requested for `{job}` via manager");
+                return Ok(());
+            }
+            Err(e) => {
+                return Err(format!("manager at {url} rejected stop `{job}`: {e}"));
+            }
+        }
+    }
+    let (cfg, _) = load_config(config, None)?;
     let control = cfg.daemon.log_dir.join("control");
     std::fs::create_dir_all(&control).map_err(|e| e.to_string())?;
     std::fs::write(control.join(format!("stop-{job}")), b"").map_err(|e| e.to_string())?;
@@ -653,6 +677,20 @@ fn cmd_snapshot_rollback(
     Ok(())
 }
 
+fn manager_url_from_listen(listen: impl std::fmt::Display) -> String {
+    // `api.listen = 0.0.0.0:9290` is a bind address, not a client URL.
+    let listen = listen.to_string();
+    let rewritten = listen
+        .replacen("0.0.0.0:", "127.0.0.1:", 1)
+        .replacen("[::]:", "127.0.0.1:", 1)
+        .replacen(":::", "127.0.0.1:", 1);
+    if rewritten.starts_with("http://") || rewritten.starts_with("https://") {
+        rewritten
+    } else {
+        format!("http://{rewritten}")
+    }
+}
+
 /// Resolve manager URL + token from flags or the config's api section.
 fn manager_creds(
     config: Option<PathBuf>,
@@ -665,7 +703,7 @@ fn manager_creds(
             let (cfg, _) = load_config(config, None)?;
             let url = match manager {
                 Some(u) => u,
-                None => format!("http://{}", cfg.api.listen),
+                None => manager_url_from_listen(&cfg.api.listen),
             };
             let token =
                 match token {
@@ -805,4 +843,25 @@ async fn wait_sighup() {
 #[cfg(not(unix))]
 async fn wait_sighup() {
     std::future::pending::<()>().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::manager_url_from_listen;
+
+    #[test]
+    fn manager_url_from_listen_rewrites_wildcard() {
+        assert_eq!(
+            manager_url_from_listen("0.0.0.0:9290"),
+            "http://127.0.0.1:9290"
+        );
+        assert_eq!(
+            manager_url_from_listen("[::]:9290"),
+            "http://127.0.0.1:9290"
+        );
+        assert_eq!(
+            manager_url_from_listen("127.0.0.1:9290"),
+            "http://127.0.0.1:9290"
+        );
+    }
 }

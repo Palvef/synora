@@ -669,7 +669,8 @@ impl Store {
     /// `RUNNING` (Grafana and the TUI both render this as syncing).
     pub async fn mark_jobs_running(&self, worker: &str, jobs: &[String]) -> DbResult<()> {
         for job in jobs {
-            self.db
+            let n = self
+                .db
                 .execute(
                     "UPDATE job_runs SET status = 'RUNNING'
                      WHERE worker_id = ? AND job_id = ?
@@ -677,7 +678,11 @@ impl Store {
                     &[worker.into(), job.as_str().into()],
                 )
                 .await?;
-            self.set_job_status(job, JobStatus::Running).await?;
+            // Never overwrite RETRYING/FAILED with RUNNING. A heartbeat can
+            // still list a job for one tick after complete_run scheduled a retry.
+            if n > 0 {
+                self.set_job_status(job, JobStatus::Running).await?;
+            }
         }
         Ok(())
     }
@@ -759,7 +764,7 @@ impl Store {
                 &[next_retry_at.into(), (retry_count as i64).into(), id.into()],
             )
             .await?;
-        Ok(())
+        self.set_job_status_for_run(id, JobStatus::Retrying).await
     }
 
     /// Retries whose wait elapsed: back to the queue.
@@ -1130,11 +1135,18 @@ impl Store {
                      ORDER BY jr.created_at DESC LIMIT 1
                  ), 'PENDING')
                  WHERE status IN ('QUEUED','STARTING','SYNCING','RUNNING','CANCELLING')
-                   AND NOT EXISTS (
-                     SELECT 1 FROM job_runs jr
-                     WHERE jr.job_id = jobs.name
-                       AND jr.status IN ('QUEUED','STARTING','SYNCING','RUNNING','RETRYING','CANCELLING')
-                 )",
+                   AND (
+                     EXISTS (
+                       SELECT 1 FROM job_runs jr
+                       WHERE jr.job_id = jobs.name
+                         AND jr.status = 'RETRYING'
+                     )
+                     OR NOT EXISTS (
+                       SELECT 1 FROM job_runs jr
+                       WHERE jr.job_id = jobs.name
+                         AND jr.status IN ('QUEUED','STARTING','SYNCING','RUNNING','RETRYING','CANCELLING')
+                     )
+                   )",
                 &[],
             )
             .await

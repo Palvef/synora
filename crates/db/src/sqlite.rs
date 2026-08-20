@@ -110,6 +110,15 @@ impl SqliteDb {
             }
         }
         let conn = rusqlite::Connection::open(path).map_err(|e| DbError::Sql(e.to_string()))?;
+        // CLI/TUI/manager share this file. WAL lets readers proceed while the
+        // daemon writes; busy_timeout retries instead of returning
+        // "database is locked" on the first conflict.
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(|e| DbError::Sql(e.to_string()))?;
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .map_err(|e| DbError::Sql(e.to_string()))?;
+        conn.pragma_update(None, "synchronous", "NORMAL")
+            .map_err(|e| DbError::Sql(e.to_string()))?;
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(|e| DbError::Sql(e.to_string()))?;
         Ok(SqliteDb {
