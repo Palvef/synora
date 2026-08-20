@@ -470,3 +470,44 @@ fn tls_requires_both_cert_and_key() {
     );
     assert!(load(&dir).unwrap_err().to_string().contains("both"));
 }
+
+#[test]
+fn socks5h_defaults_http_connect_expose() {
+    let dir = temp_dir("warp-expose");
+    write(
+        &dir,
+        "synora.toml",
+        r#"
+[proxy.cf-warp]
+type = "socks5h"
+url = "socks5h://127.0.0.1:40000"
+"#,
+    );
+    let cfg = load(&dir).unwrap();
+    let proxy = cfg.proxies.get("cf-warp").expect("cf-warp");
+    assert_eq!(proxy.expose.as_deref(), Some("0.0.0.0:14000"));
+}
+
+#[test]
+fn default_worker_binds_jobs_without_worker() {
+    let dir = temp_dir("default-worker");
+    write(
+        &dir,
+        "synora.toml",
+        r#"
+[daemon]
+default_worker = "mirror-zfs"
+
+[[jobs]]
+name = "ubuntu"
+schedule = "interval"
+every = "6h"
+provider = "rsync"
+upstream = "rsync://example/ubuntu/"
+storage = "/srv/ubuntu"
+"#,
+    );
+    let cfg = load(&dir).unwrap();
+    assert_eq!(cfg.daemon.default_worker.as_deref(), Some("mirror-zfs"));
+    assert_eq!(cfg.jobs[0].worker.as_deref(), Some("mirror-zfs"));
+}

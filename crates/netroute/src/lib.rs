@@ -487,12 +487,49 @@ pub fn proxy_hostport(url: &str) -> String {
         .to_string()
 }
 
+/// Default HTTP CONNECT bind for manager-local SOCKS (cf-warp / WARP).
+/// Workers cannot reach `socks5h://127.0.0.1` on the manager host.
+pub const DEFAULT_WARP_EXPOSE: &str = "0.0.0.0:14000";
+
+fn is_socks_url(url: &str) -> bool {
+    let lower = url.to_ascii_lowercase();
+    lower.starts_with("socks5h://") || lower.starts_with("socks5://")
+}
+
+fn is_loopback_host(url: &str) -> bool {
+    let rest = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let hostport = rest.rsplit_once('@').map(|(_, host)| host).unwrap_or(rest);
+    let host = hostport
+        .rsplit_once(':')
+        .map(|(host, _)| host)
+        .unwrap_or(hostport)
+        .trim_matches(['[', ']']);
+    matches!(host, "127.0.0.1" | "localhost" | "0.0.0.0" | "::1")
+}
+
+fn http_connect_from_expose(expose: &str, auth: &str) -> String {
+    let host = if let Some(lan) = lan_ipv4() {
+        expose
+            .replace("127.0.0.1", &lan)
+            .replace("0.0.0.0", &lan)
+            .replace("localhost", &lan)
+    } else {
+        expose.to_string()
+    };
+    if auth.contains(':') {
+        format!("http://{auth}@{host}")
+    } else {
+        format!("http://{host}")
+    }
+}
+
 /// The environment a worker should receive for a proxy (user requirement:
 /// workers always get the MANAGER's resolved proxy settings). When the
 /// proxy has an `expose` address, the worker gets that address as an
 /// HTTP CONNECT URL (the manager listens there and tunnels to the local
-/// upstream, e.g. WARP SOCKS). A proxy without expose keeps the upstream
-/// URL as-is. Exposed HTTP CONNECT (cf-warp) is `http://host:port`.
+/// upstream, e.g. WARP SOCKS). Manager-local SOCKS without expose is
+/// rewritten to the default HTTP CONNECT port. Exposed HTTP CONNECT
+/// (cf-warp) is `http://host:port`.
 pub fn dispatch_proxy_env(
     proxy: Option<&ProxyConfig>,
     selection: &Selection,
@@ -500,27 +537,15 @@ pub fn dispatch_proxy_env(
     let Selection::Forward { url, env, .. } = selection else {
         return Vec::new();
     };
-    let remote = match proxy.and_then(|p| p.expose.as_ref()) {
-        Some(expose) => {
-            let host = if let Some(lan) = lan_ipv4() {
-                expose
-                    .replace("127.0.0.1", &lan)
-                    .replace("0.0.0.0", &lan)
-                    .replace("localhost", &lan)
-            } else {
-                expose.clone()
-            };
-            let auth = proxy.and_then(|p| p.expose_auth.as_deref()).unwrap_or("");
-            // Expose is always HTTP CONNECT, even when the manager-local
-            // upstream is socks5h (cf-warp / WARP). Workers must not be
-            // given `socks5h://` on the expose port.
-            if auth.contains(':') {
-                format!("http://{auth}@{host}")
-            } else {
-                format!("http://{host}")
-            }
-        }
-        None => url.clone(),
+    let auth = proxy.and_then(|p| p.expose_auth.as_deref()).unwrap_or("");
+    let remote = if let Some(expose) = proxy.and_then(|p| p.expose.as_ref()) {
+        http_connect_from_expose(expose, auth)
+    } else if is_socks_url(url) && is_loopback_host(url) {
+        // Never send socks5h://127.0.0.1 to a worker; reqwest and Docker
+        // cannot use the manager's local WARP port.
+        http_connect_from_expose(DEFAULT_WARP_EXPOSE, auth)
+    } else {
+        url.clone()
     };
     let rsync = proxy_hostport(&remote);
     let mut out = vec![
@@ -1502,6 +1527,33 @@ mod tests {
         assert_eq!(map.get("https_proxy"), Some(&"http://172.17.0.1:5354"));
         assert_eq!(map.get("RSYNC_PROXY"), Some(&"172.17.0.1:5354"));
         assert!(dispatch_proxy_env(None, &Selection::Direct).is_empty());
+    }
+
+    #[test]
+    fn dispatch_socks_loopback_without_expose_uses_http_connect() {
+        let sel = Selection::Forward {
+            name: "cf-warp".into(),
+            url: "socks5h://127.0.0.1:40000".into(),
+            env: vec![],
+        };
+        let cfg = ProxyConfig {
+            kind: fwd("socks5h://127.0.0.1:40000"),
+            healthcheck: None,
+            timeout: 5,
+            expose: None,
+            expose_auth: None,
+        };
+        let env = dispatch_proxy_env(Some(&cfg), &sel);
+        let map: HashMap<&str, &str> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let all = *map.get("ALL_PROXY").expect("ALL_PROXY");
+        assert!(all.starts_with("http://"), "{all}");
+        assert!(all.ends_with(":14000"), "{all}");
+        assert!(!all.contains("socks"), "{all}");
+        assert_eq!(map.get("HTTP_PROXY").copied(), Some(all));
+        assert!(!map
+            .get("RSYNC_PROXY")
+            .expect("RSYNC_PROXY")
+            .contains("socks"));
     }
 
     #[test]

@@ -697,10 +697,33 @@ fn detect_local_socks() -> Vec<u16> {
     }
 }
 
+fn toml_section_field(section: &str, key: &str) -> Option<String> {
+    for line in section.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix(key) else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let Some(rest) = rest.strip_prefix('=') else {
+            continue;
+        };
+        let value = rest.trim();
+        let value = value
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+            .unwrap_or(value);
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
 /// Append/refresh a `[proxy.<name>]` table in the config file.
-/// `expose` also generates `expose_auth` credentials (user requirement:
-/// the exposed port must be authenticated; the worker serves the
-/// Basic-auth CONNECT proxy on it).
+/// SOCKS (cf-warp) defaults to an HTTP CONNECT expose so workers do not
+/// receive `socks5h://127.0.0.1`. Existing expose/auth lines are kept
+/// when the caller does not pass a new expose; auth is never generated
+/// automatically because rsync `RSYNC_PROXY=host:port` cannot send it.
 fn upsert_proxy_section(
     path: &PathBuf,
     name: &str,
@@ -710,13 +733,39 @@ fn upsert_proxy_section(
 ) -> Result<(), String> {
     let text =
         std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let header = format!("[proxy.{name}]");
+    let old_section = text.find(&header).map(|start| {
+        let end = text[start..]
+            .find("\n[")
+            .map(|i| start + i)
+            .unwrap_or(text.len());
+        text[start..end].to_string()
+    });
+    let expose = expose
+        .map(str::to_string)
+        .or_else(|| {
+            old_section
+                .as_deref()
+                .and_then(|section| toml_section_field(section, "expose"))
+        })
+        .or_else(|| {
+            if kind == "socks5h" {
+                Some("0.0.0.0:14000".into())
+            } else {
+                None
+            }
+        });
+    let expose_auth = old_section
+        .as_deref()
+        .and_then(|section| toml_section_field(section, "expose_auth"));
     let mut section = format!("\n[proxy.{name}]\ntype = \"{kind}\"\nurl = \"{url}\"\n");
     if let Some(e) = expose {
-        section.push_str(&format!(
-            "expose = \"{e}\"\nexpose_auth = \"synora:{}\"\n",
-            netroute::random_credential()
-        ));
+        section.push_str(&format!("expose = \"{e}\"\n"));
     }
+    if let Some(a) = expose_auth {
+        section.push_str(&format!("expose_auth = \"{a}\"\n"));
+    }
+
     let new_text = if let Some(start) = text.find(&format!("[proxy.{name}]")) {
         // Replace the existing section: from its header to the next
         // `[section]` header (keep that newline) or EOF. The leading
@@ -2293,6 +2342,8 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("[proxy.cf-warp]"));
         assert!(text.contains("socks5h://127.0.0.1:40000"));
+        assert!(text.contains("expose = \"0.0.0.0:14000\""));
+        assert!(!text.contains("expose_auth"));
 
         // Replace it (re-register with a different port + expose).
         upsert_proxy_section(

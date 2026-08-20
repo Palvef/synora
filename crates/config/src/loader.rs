@@ -134,6 +134,7 @@ pub struct DaemonConfig {
     pub db: DbConfig,
     pub log_dir: PathBuf,
     pub default_proxy: Option<String>,
+    pub default_worker: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -629,6 +630,13 @@ fn resolve(root: &RootDoc, jobs: Vec<JobEntry>) -> Result<ResolvedConfig, Config
         db,
         log_dir: PathBuf::from(&root.daemon.log_dir),
         default_proxy: root.daemon.default_proxy.clone(),
+        default_worker: root
+            .daemon
+            .default_worker
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
     };
     // api
     let listen: SocketAddr = root.api.listen.parse().map_err(|_| {
@@ -728,7 +736,16 @@ fn resolve(root: &RootDoc, jobs: Vec<JobEntry>) -> Result<ResolvedConfig, Config
                 ),
             ));
         }
-        let spec = resolve_job(&entry.doc, &entry.file, entry.line)?;
+        let mut spec = resolve_job(&entry.doc, &entry.file, entry.line)?;
+        if spec
+            .worker
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .is_empty()
+        {
+            spec.worker = daemon.default_worker.clone();
+        }
         seen.insert(spec.name.clone(), (entry.file.clone(), entry.line));
         resolved.push(spec);
     }
@@ -823,6 +840,22 @@ fn parse_proxies(root: &RootDoc) -> Result<(ProxyMap, ProxyGroupMap), ConfigErro
                     ))
                 }
             };
+            let mut expose = t.get("expose").and_then(|v| v.as_str()).map(String::from);
+            if expose.is_none() {
+                if let ProxyKind::Forward { url, .. } = &kind {
+                    let lower = url.to_ascii_lowercase();
+                    if (lower.starts_with("socks5h://") || lower.starts_with("socks5://"))
+                        && (lower.contains("127.0.0.1")
+                            || lower.contains("localhost")
+                            || lower.contains("[::1]")
+                            || lower.contains("0.0.0.0"))
+                    {
+                        // Workers cannot use manager-local SOCKS. Default an
+                        // HTTP CONNECT expose the manager will serve.
+                        expose = Some("0.0.0.0:14000".into());
+                    }
+                }
+            }
             proxies.insert(
                 name.clone(),
                 ProxyConfig {
@@ -831,7 +864,7 @@ fn parse_proxies(root: &RootDoc) -> Result<(ProxyMap, ProxyGroupMap), ConfigErro
                         .get("healthcheck")
                         .and_then(|v| v.as_str())
                         .map(String::from),
-                    expose: t.get("expose").and_then(|v| v.as_str()).map(String::from),
+                    expose,
                     expose_auth: t
                         .get("expose_auth")
                         .and_then(|v| v.as_str())

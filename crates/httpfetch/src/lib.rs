@@ -132,6 +132,11 @@ impl Fetcher {
             .redirect(reqwest::redirect::Policy::limited(10))
             .timeout(REQUEST_TIMEOUT);
         builder = match proxy {
+            Some(url) if url.to_ascii_lowercase().starts_with("socks") => {
+                return Err(FetchError::Http(
+                    "SOCKS proxies are not supported by the HTTP provider; the manager must dispatch the HTTP CONNECT expose (cf-warp)".into(),
+                ));
+            }
             Some(url) => builder
                 .proxy(reqwest::Proxy::all(url).map_err(|e| FetchError::Http(e.to_string()))?),
             None => builder.no_proxy(),
@@ -916,6 +921,17 @@ mod tests {
     }
 
     // --- tests --------------------------------------------------------
+
+    #[test]
+    fn with_proxy_rejects_socks() {
+        let err = match Fetcher::with_proxy(Some("socks5h://127.0.0.1:40000")) {
+            Ok(_) => panic!("expected SOCKS proxy to be rejected"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("SOCKS"), "{msg}");
+        assert!(msg.contains("HTTP CONNECT"), "{msg}");
+    }
 
     #[test]
     fn listing_error_classifies_proxy_blips() {

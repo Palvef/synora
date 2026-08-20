@@ -66,6 +66,10 @@ pub struct DaemonDoc {
     /// egress). Mirror sync itself stays direct unless a job opts in.
     #[serde(default)]
     pub default_proxy: Option<String>,
+    /// Jobs without `worker` bind to this worker id (production: the
+    /// dedicated mirror host).
+    #[serde(default)]
+    pub default_worker: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

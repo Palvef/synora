@@ -78,10 +78,17 @@ pub(crate) fn docker_proxy_env(proxy_env: &[(String, String)]) -> Vec<(String, S
     }
 }
 
-/// Loopback proxy URLs are the manager host, not the container. Rewrite to
-/// the docker bridge gateway so in-container traffic can reach a host
-/// proxy. Production cf-warp is a LAN address and is left unchanged.
+/// Loopback HTTP CONNECT URLs are the manager/worker host, not the
+/// container. Rewrite those to the docker bridge gateway. SOCKS URLs are
+/// left unchanged: rewriting `socks5h://127.0.0.1:40000` to
+/// `172.17.0.1:40000` points the container at docker0, not the manager
+/// expose. Production cf-warp is a LAN HTTP CONNECT address and is left
+/// unchanged.
 fn rewrite_loopback_proxy(value: &str) -> String {
+    let lower = value.to_ascii_lowercase();
+    if lower.contains("socks5") {
+        return value.to_string();
+    }
     const GW: &str = "172.17.0.1";
     value
         .replace("@127.0.0.1", &format!("@{GW}"))
@@ -194,10 +201,15 @@ impl DockerProvider {
             );
         }
         // Docker must not inherit HTTP(S)_PROXY. Inject ALL_PROXY/all_proxy
-        // only (HTTP CONNECT expose or SOCKS).
+        // only (HTTP CONNECT expose or SOCKS). Clear HTTP(S)_PROXY so an
+        // image or script cannot keep a leftover SOCKS URL.
+        for k in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
+            cmd.arg("-e").arg(format!("{k}="));
+        }
         for (k, v) in docker_proxy_env(&ctx.proxy_env) {
             cmd.arg("-e").arg(format!("{k}={v}"));
         }
+        cmd.arg("-e").arg("PYTHONUNBUFFERED=1");
         // SYNORA_* env for scripts inside the container.
         cmd.arg("-e").arg(format!("SYNORA_JOB={}", ctx.job_name));
         if let Some(up) = &ctx.upstream {
@@ -380,8 +392,16 @@ mod tests {
             "http://172.17.0.1:5354"
         );
         assert_eq!(
-            rewrite_loopback_proxy("socks5h://synora:pass@127.0.0.1:14000"),
-            "socks5h://synora:pass@172.17.0.1:14000"
+            rewrite_loopback_proxy("http://127.0.0.1:14000"),
+            "http://172.17.0.1:14000"
+        );
+        assert_eq!(
+            rewrite_loopback_proxy("socks5h://synora:pass@127.0.0.1:40000"),
+            "socks5h://synora:pass@127.0.0.1:40000"
+        );
+        assert_eq!(
+            rewrite_loopback_proxy("http://172.31.33.205:14000"),
+            "http://172.31.33.205:14000"
         );
     }
 
