@@ -323,6 +323,76 @@ impl Provider {
     }
 }
 
+/// Parse tunasync-style size lines from script output:
+/// `Total size is 1.6G`, `size-sum: 12G`, `total size: 12 GiB`, `SYNORA_SIZE=123`.
+pub fn parse_script_size(text: &str) -> Option<u64> {
+    let mut last = None;
+    for line in text.lines() {
+        let raw = line.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        if let Some(rest) = raw.strip_prefix("SYNORA_SIZE=") {
+            if let Ok(v) = rest.trim().parse::<u64>() {
+                last = Some(v);
+            }
+            continue;
+        }
+        let lower = raw.to_ascii_lowercase();
+        for prefix in ["total size is", "size-sum:", "total size:"] {
+            if let Some(rest) = lower.strip_prefix(prefix) {
+                if let Some(v) = parse_iec_size(rest.trim()) {
+                    last = Some(v);
+                }
+            }
+        }
+    }
+    last
+}
+
+fn parse_iec_size(s: &str) -> Option<u64> {
+    let s = s.trim().to_ascii_lowercase();
+    let mut parts = s.split_whitespace();
+    let first = parts.next()?.trim();
+    let tok = match parts.next() {
+        Some(unit) => format!("{}{}", first, unit),
+        None => first.to_string(),
+    };
+    let tok = tok.trim_end_matches("ib").trim_end_matches('b').to_string();
+    if tok.is_empty() {
+        return None;
+    }
+    let (num, mult) = match tok.chars().last()? {
+        'k' => (&tok[..tok.len() - 1], 1024f64),
+        'm' => (&tok[..tok.len() - 1], 1024f64 * 1024.0),
+        'g' => (&tok[..tok.len() - 1], 1024f64 * 1024.0 * 1024.0),
+        't' => (&tok[..tok.len() - 1], 1024f64 * 1024.0 * 1024.0 * 1024.0),
+        'p' => (
+            &tok[..tok.len() - 1],
+            1024f64 * 1024.0 * 1024.0 * 1024.0 * 1024.0,
+        ),
+        _ => (tok.as_str(), 1.0),
+    };
+    let v: f64 = num.parse().ok()?;
+    Some((v * mult).round() as u64)
+}
+
+/// Phrases tunasync scripts print when the run actually failed, even if the
+/// process later exited 0 (yum-sync.py used to do this).
+pub fn script_reported_failure(text: &str) -> Option<&'static str> {
+    const NEEDLES: &[&str] = &[
+        "Failed YUM repos:",
+        "==== SYNC yum FAILED",
+        "==== SYNC docker-ce FAILED",
+        "==== SYNC rustup FAILED",
+        "git update failed with rc=",
+        "SYNORA_STATUS=failure",
+        "SYNORA_STATUS=failed",
+        "local official proxy failed",
+    ];
+    NEEDLES.iter().copied().find(|n| text.contains(n))
+}
+
 /// Build the provider for a job.
 pub fn build_provider(job: &JobSpec) -> Result<Provider, ProviderError> {
     match &job.provider {
@@ -342,12 +412,14 @@ pub fn build_provider(job: &JobSpec) -> Result<Provider, ProviderError> {
             env,
             volumes,
             keep_container,
+            network,
             command,
         } => Ok(Provider::Docker(docker::DockerProvider {
             image: image.clone(),
             env: env.clone(),
             volumes: volumes.clone(),
             keep_container: *keep_container,
+            network: network.clone(),
             command: command.clone(),
         })),
         synora_core::ProviderConfig::Git { branch } => Ok(Provider::Git(git::GitProvider {

@@ -171,6 +171,8 @@ pub struct JobDoc {
     pub volumes: Vec<String>,
     #[serde(default = "no")]
     pub keep_container: bool,
+    /// docker run --network (e.g. "host" when bridge NAT breaks WARP TLS).
+    pub docker_network: Option<String>,
     /// docker run command argv (empty = image entrypoint).
     #[serde(default)]
     pub docker_command: Vec<String>,

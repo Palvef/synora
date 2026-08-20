@@ -121,6 +121,9 @@ pub enum ProviderConfig {
         /// Keep the container after exit for debugging (spec §18).
         #[serde(default)]
         keep_container: bool,
+        /// docker run --network. None/empty = daemon default (bridge).
+        #[serde(default)]
+        network: Option<String>,
         /// Command to run inside the container (argv). Empty = the image's
         /// own entrypoint (tunasync-scripts style).
         #[serde(default)]

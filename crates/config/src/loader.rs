@@ -1531,6 +1531,7 @@ fn resolve_provider(
                 env: doc.env.clone(),
                 volumes: doc.volumes.clone(),
                 keep_container: doc.keep_container,
+                network: doc.docker_network.clone(),
                 command: doc.docker_command.clone(),
             })
         }

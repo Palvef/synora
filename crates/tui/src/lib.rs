@@ -1000,6 +1000,7 @@ fn spec_to_editor(json: &serde_json::Value) -> serde_json::Value {
         "cpu_limit",
         "image",
         "keep_container",
+        "docker_network",
         "parser",
         "delete",
         "threads",
@@ -1475,6 +1476,11 @@ fn pick_options_for_field(field: &str, snap: &Snapshot) -> Option<Vec<(String, S
         "keep_container" | "delete" => Some(vec![
             ("true".into(), "true".into()),
             ("false".into(), "false".into()),
+        ]),
+        "docker_network" => Some(vec![
+            ("bridge".into(), "bridge".into()),
+            ("host".into(), "host".into()),
+            ("none".into(), "none".into()),
         ]),
         _ => None,
     }

@@ -14,6 +14,7 @@ pub struct DockerProvider {
     pub env: Vec<String>,
     pub volumes: Vec<String>,
     pub keep_container: bool,
+    pub network: Option<String>,
     pub command: Vec<String>,
 }
 
@@ -53,29 +54,44 @@ fn needs_shell(s: &str) -> bool {
     })
 }
 
-/// Container proxy env: never HTTP(S)_PROXY. Every container gets
-/// ALL_PROXY/all_proxy from the manager-assigned URL (HTTP CONNECT
-/// expose or SOCKS). Tools inside the image then honor all_proxy.
+/// Container proxy env, matching tunasync `worker.conf` `[mirrors.env]`:
+/// HTTP CONNECT gets ALL_PROXY + HTTP(S)_PROXY so yum/dnf/curl/git work;
+/// SOCKS stays on ALL_PROXY only. Never emit empty values (reqwest treats
+/// empty HTTPS_PROXY as "no proxy" and then ignores ALL_PROXY).
 pub(crate) fn docker_proxy_env(proxy_env: &[(String, String)]) -> Vec<(String, String)> {
     let mut url = None;
     for (k, v) in proxy_env {
-        if k.eq_ignore_ascii_case("all_proxy") {
+        if k.eq_ignore_ascii_case("all_proxy") && !v.trim().is_empty() {
             url = Some(rewrite_loopback_proxy(v));
             break;
         }
     }
     if url.is_none() {
         for (k, v) in proxy_env {
-            if k.eq_ignore_ascii_case("http_proxy") || k.eq_ignore_ascii_case("https_proxy") {
+            if (k.eq_ignore_ascii_case("http_proxy") || k.eq_ignore_ascii_case("https_proxy"))
+                && !v.trim().is_empty()
+            {
                 url = Some(rewrite_loopback_proxy(v));
                 break;
             }
         }
     }
-    match url {
-        Some(url) => vec![("ALL_PROXY".into(), url.clone()), ("all_proxy".into(), url)],
-        None => Vec::new(),
+    let Some(url) = url.filter(|u| !u.trim().is_empty()) else {
+        return Vec::new();
+    };
+    let mut out = vec![
+        ("ALL_PROXY".into(), url.clone()),
+        ("all_proxy".into(), url.clone()),
+    ];
+    if !url.to_ascii_lowercase().contains("socks") {
+        out.extend([
+            ("HTTP_PROXY".into(), url.clone()),
+            ("HTTPS_PROXY".into(), url.clone()),
+            ("http_proxy".into(), url.clone()),
+            ("https_proxy".into(), url.clone()),
+        ]);
     }
+    out
 }
 
 /// Loopback HTTP CONNECT URLs are the manager/worker host, not the
@@ -158,6 +174,14 @@ impl DockerProvider {
             .status()
             .await;
         cmd.arg("--name").arg(&cname);
+        if let Some(net) = self
+            .network
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            cmd.arg("--network").arg(net);
+        }
         if !self.keep_container {
             cmd.arg("--rm");
         }
@@ -200,12 +224,8 @@ impl DockerProvider {
                 ctx.job.proxy.as_deref().unwrap_or("")
             );
         }
-        // Docker must not inherit HTTP(S)_PROXY. Inject ALL_PROXY/all_proxy
-        // only (HTTP CONNECT expose or SOCKS). Clear HTTP(S)_PROXY so an
-        // image or script cannot keep a leftover SOCKS URL.
-        for k in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
-            cmd.arg("-e").arg(format!("{k}="));
-        }
+        // Inject manager-assigned proxy the same way tunasync did:
+        // HTTP CONNECT → ALL_PROXY + HTTP(S)_PROXY; SOCKS → ALL_PROXY only.
         for (k, v) in docker_proxy_env(&ctx.proxy_env) {
             cmd.arg("-e").arg(format!("{k}={v}"));
         }
@@ -323,12 +343,25 @@ impl DockerProvider {
         };
         cancelled_after_wait(ctx, &mut child).await?;
         let code = status.code().unwrap_or(-1);
+        let combined = format!(
+            "{}
+{}",
+            String::from_utf8_lossy(&stdout),
+            String::from_utf8_lossy(&stderr)
+        );
+        let size_hint = crate::parse_script_size(&combined);
         let result = SyncResult {
             exit_code: Some(code),
             stdout,
             stderr,
+            size_hint,
             ..Default::default()
         };
+        if let Some(reason) = crate::script_reported_failure(&combined) {
+            return Err(ProviderError::Other(format!(
+                "script reported failure: {reason}"
+            )));
+        }
         if code == 0 {
             Ok(result)
         } else {
@@ -406,7 +439,7 @@ mod tests {
     }
 
     #[test]
-    fn docker_http_connect_as_all_proxy_only() {
+    fn docker_http_connect_sets_http_and_all_proxy() {
         let env = docker_proxy_env(&[
             ("HTTP_PROXY".into(), "http://172.31.33.205:14000".into()),
             ("HTTPS_PROXY".into(), "http://172.31.33.205:14000".into()),
@@ -414,16 +447,36 @@ mod tests {
             ("http_proxy".into(), "http://172.31.33.205:14000".into()),
         ]);
         let map: std::collections::HashMap<_, _> = env.into_iter().collect();
-        assert!(!map.contains_key("HTTP_PROXY"));
-        assert!(!map.contains_key("HTTPS_PROXY"));
         assert_eq!(
             map.get("ALL_PROXY").map(String::as_str),
             Some("http://172.31.33.205:14000")
         );
         assert_eq!(
-            map.get("all_proxy").map(String::as_str),
+            map.get("HTTP_PROXY").map(String::as_str),
             Some("http://172.31.33.205:14000")
         );
+        assert_eq!(
+            map.get("HTTPS_PROXY").map(String::as_str),
+            Some("http://172.31.33.205:14000")
+        );
+        assert_eq!(
+            map.get("http_proxy").map(String::as_str),
+            Some("http://172.31.33.205:14000")
+        );
+    }
+
+    #[test]
+    fn tunasync_size_patterns() {
+        assert_eq!(
+            crate::parse_script_size("Total size is 1.6G\n"),
+            Some((1.6f64 * 1024.0 * 1024.0 * 1024.0).round() as u64)
+        );
+        assert_eq!(
+            crate::parse_script_size("size-sum: 12G"),
+            Some(12 * 1024u64 * 1024 * 1024)
+        );
+        assert_eq!(crate::parse_script_size("SYNORA_SIZE=42"), Some(42));
+        assert!(crate::script_reported_failure("Failed YUM repos: [('rpm', 'x86_64')]").is_some());
     }
 
     #[test]

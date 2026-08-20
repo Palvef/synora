@@ -123,6 +123,7 @@
 | `env` | `string[]` | `"K=V"` 环境变量 |
 | `volumes` | `string[]` | `"host:container"` 挂载（storage 默认挂到 `/data`；用户显式挂 `/data` 时不重复挂） |
 | `keep_container` | `bool` | `false` 默认 `--rm` |
+| `docker_network` | `string` | docker `--network`; `host` 用于绕过 docker0 NAT |
 
 ### git provider
 
