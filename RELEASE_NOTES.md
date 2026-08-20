@@ -1,22 +1,13 @@
-# Synora 0.1.3
+# Synora 0.1.4
 
 ## Fixes
 
-- HTTP listings that fail, truncate, or hit depth/entry caps no longer delete local files
-- HTTP `size_hint` is the remote repository size, not just this run's downloads
-- Unchanged HTTP files are compared by size first; mtime is only a fallback
-- Worker re-register re-queues lost runs when `on_worker_lost = retry`
-- A live worker heartbeat keeps its runs from being marked lost
-- HTTP directory listings retry transient proxy/connection errors
-- Workers retry `complete_run` so a manager restart does not drop the outcome
-- Grafana success rate uses live counters so it no longer sticks at 0 after restart
-- Workers poll every 2s while under their concurrency cap so slots fill promptly
+- HTTP CONNECT expose copies both directions so TLS through WARP is not dropped
+- Docker jobs inject ALL_PROXY and HTTP(S)_PROXY for HTTP CONNECT, matching tunasync; SOCKS still uses ALL_PROXY only
+- Empty HTTP(S)_PROXY is no longer injected (reqwest treated that as "no proxy")
+- Docker runs fail on tunasync script reports such as `Failed YUM repos` even if the process exited 0
+- Docker `size_hint` reads `Total size is` / `size-sum:` / `SYNORA_SIZE=` from script output
 
 ## Improvements
 
-- Grafana dashboard rewritten: per-job CPU/memory, repository sizes, and clearer status tables
-- All providers report CPU and memory samples
-- Docker jobs inject `ALL_PROXY`/`all_proxy` and no longer inherit host `http_proxy`
-- Deleting a job removes its leftover rows from the database
-- `retire` replaces `drain` for stopping a worker from taking new runs (`drain` remains an alias)
-
+- `docker_network` job field (`host`, `bridge`, `none`) for `docker run --network`
