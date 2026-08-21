@@ -116,17 +116,25 @@ fn rewrite_loopback_proxy(value: &str) -> String {
 }
 
 /// One-shot `docker stats` for a named container: (memory_bytes, cpu_percent).
+///
+/// Bound the CLI wait and kill the child on timeout/cancel. A hung
+/// `docker stats` used to stall the job task, stop draining pipes, and
+/// freeze the container on a full stdout pipe.
 pub async fn container_stats(name: &str) -> Option<(u64, f64)> {
-    let out = tokio::process::Command::new("docker")
-        .args([
-            "stats",
-            "--no-stream",
-            "--format",
-            "{{.MemUsage}}\t{{.CPUPerc}}",
-            name,
-        ])
-        .output()
+    let mut cmd = tokio::process::Command::new("docker");
+    cmd.args([
+        "stats",
+        "--no-stream",
+        "--format",
+        "{{.MemUsage}}\t{{.CPUPerc}}",
+        name,
+    ])
+    .kill_on_drop(true)
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null());
+    let out = tokio::time::timeout(std::time::Duration::from_secs(2), cmd.output())
         .await
+        .ok()?
         .ok()?;
     if !out.status.success() {
         return None;
@@ -300,40 +308,16 @@ impl DockerProvider {
             (out, err)
         };
         tokio::pin!(read_fut);
-        let stdout: Vec<u8>;
-        let stderr: Vec<u8>;
-        let usage = ctx.usage.clone();
-        let stats_name = cname.clone();
-        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(2));
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut peak_mem: u64 = 0;
-        let mut cpu_acc = 0.0f64;
-        loop {
-            tokio::select! {
-                _ = ctx.cancel.cancelled() => {
-                    kill_group(&mut child).await;
-                    return Err(ProviderError::Cancelled);
-                }
-                _ = ticker.tick() => {
-                    if let Some((mem, pct)) = container_stats(&stats_name).await {
-                        peak_mem = peak_mem.max(mem);
-                        cpu_acc += (pct / 100.0) * 2.0;
-                        if let Some(u) = &usage {
-                            u.lock().unwrap().record(peak_mem, cpu_acc, Some(pct));
-                        }
-                    }
-                }
-                r = &mut read_fut => {
-                    (stdout, stderr) = r;
-                    break;
-                }
+        // Resource samples live in the executor background task. Do not
+        // await `docker stats` on this task: a hung CLI call stops pipe
+        // draining and the container blocks on a full stdout pipe.
+        let (stdout, stderr) = tokio::select! {
+            _ = ctx.cancel.cancelled() => {
+                kill_group(&mut child).await;
+                return Err(ProviderError::Cancelled);
             }
-        }
-        if let Some(u) = &usage {
-            if peak_mem > 0 {
-                u.lock().unwrap().record(peak_mem, cpu_acc, None);
-            }
-        }
+            r = &mut read_fut => r,
+        };
         let status = tokio::select! {
             _ = ctx.cancel.cancelled() => {
                 kill_group(&mut child).await;

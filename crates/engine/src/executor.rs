@@ -300,10 +300,9 @@ pub async fn run_once(
         }
     };
 
-    // Live resource sampler for every provider. Docker jobs are sampled
-    // inside the docker provider (`docker stats`). Everything else uses
-    // the cgroup scope, then /proc/self so HTTP / in-process work still
-    // reports CPU and memory.
+    // Live resource sampler for every provider. Docker jobs use a bounded
+    // `docker stats` call; everything else uses the cgroup scope, then
+    // /proc so HTTP / in-process work still reports CPU and memory.
     if let Some(usage) = ctx.usage.clone() {
         let cancel = cancel.clone();
         let is_docker = matches!(job.provider, synora_core::ProviderConfig::Docker { .. });
