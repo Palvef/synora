@@ -14,6 +14,10 @@ SIDECAR_ALL_PROXY="${ALL_PROXY:-${all_proxy:-${HTTPS_PROXY:-${HTTP_PROXY:-}}}}"
 OFFICIAL="${SYNORA_UPSTREAM:-https://static.rust-lang.org/}"
 BASE_URL=${MIRROR_BASE_URL:-${SYNORA_MIRROR_BASE_URL:-}}
 GC=${RUSTUP_GC:-"30"}
+# rustc Tier 1 with host tools, minus unused 32-bit i686.
+# rustup-mirror defaults to every rustc target. Override with RUSTUP_TARGETS.
+TIER1_TARGETS=${RUSTUP_TARGETS:-"aarch64-apple-darwin,aarch64-pc-windows-msvc,aarch64-unknown-linux-gnu,x86_64-pc-windows-gnu,x86_64-pc-windows-msvc,x86_64-unknown-linux-gnu"}
+KEEP=${RUSTUP_KEEP:-"xz"}
 if [ -z "$BASE_URL" ]; then
   echo "MIRROR_BASE_URL is required (public URL written into rustup manifests)" >&2
   echo "==== SYNC rustup FAILED ====" >&2
@@ -47,7 +51,10 @@ export RUSTUP_PROXY_PORTFILE="$portfile"
 
 echo "official upstream: ${OFFICIAL}"
 echo "manifest public url (-u): ${BASE_URL}"
+echo "targets (-t): ${TIER1_TARGETS}"
+echo "keep (--keep): ${KEEP}"
 echo "sidecar ALL_PROXY: ${SIDECAR_ALL_PROXY:-none}"
+"$MIRROR_BIN" -V || true
 
 PROXY_PY=/usr/lib/synora/scripts/rustup-official-proxy.py
 if [ ! -f "$PROXY_PY" ]; then
@@ -119,7 +126,7 @@ if grep -qi 'mirrors.tuna.tsinghua.edu.cn' /tmp/rustup-probe.toml; then
   exit 1
 fi
 
-"$MIRROR_BIN" -u "${BASE_URL}" -U "http://127.0.0.1:${PORT}/" -m "${SYNORA_STORAGE}" --gc "${GC}"
+"$MIRROR_BIN" -u "${BASE_URL}" -U "http://127.0.0.1:${PORT}/" -m "${SYNORA_STORAGE}" --gc "${GC}" -t "${TIER1_TARGETS}" --keep "${KEEP}"
 echo "==== SYNC rustup DONE ===="
 echo "SYNORA_STATUS=success"
 echo "finished"

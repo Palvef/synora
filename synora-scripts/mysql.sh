@@ -4,7 +4,7 @@ set -e
 set -o pipefail
 
 _here=`dirname $(realpath $0)`
-apt_sync="${_here}/apt-sync.py" 
+apt_sync="${_here}/apt-sync.py"
 yum_sync="${_here}/yum-sync.py"
 
 BASE_PATH="${SYNORA_STORAGE}"
@@ -16,11 +16,25 @@ APT_PATH="${BASE_PATH}/apt"
 UBUNTU_PATH="${APT_PATH}/ubuntu"
 DEBIAN_PATH="${APT_PATH}/debian"
 
-# =================== APT repos ===============================
-MYSQL_APT_REPOS="mysql-tools,mysql-8.0,mysql-8.4-lts"
-"$apt_sync" --delete "${BASE_URL}/apt/ubuntu" @ubuntu-lts $MYSQL_APT_REPOS amd64,i386 "${UBUNTU_PATH}"
+# MySQL APT is not a uniform distro/arch matrix.
+# jammy/noble still ship mysql-8.0; resolute dropped it.
+# Debian bullseye/bookworm still ship mysql-8.0 and i386.
+# Debian trixie is amd64-only and has no mysql-8.0.
+# Colon lists in apt-sync.py are per-codename, in os_version order.
+"$apt_sync" --delete \
+    "${BASE_URL}/apt/ubuntu" \
+    jammy,noble,resolute \
+    mysql-tools,mysql-8.0,mysql-8.4-lts:mysql-tools,mysql-8.0,mysql-8.4-lts:mysql-tools,mysql-8.4-lts \
+    amd64,i386 \
+    "${UBUNTU_PATH}"
 echo "Ubuntu finished"
-"$apt_sync" --delete "${BASE_URL}/apt/debian" @debian-current $MYSQL_APT_REPOS amd64,i386 "${DEBIAN_PATH}"
+
+"$apt_sync" --delete \
+    "${BASE_URL}/apt/debian" \
+    bullseye,bookworm,trixie \
+    mysql-tools,mysql-8.0,mysql-8.4-lts:mysql-tools,mysql-8.0,mysql-8.4-lts:mysql-tools,mysql-8.4-lts \
+    amd64,i386:amd64,i386:amd64 \
+    "${DEBIAN_PATH}"
 echo "Debian finished"
 
 # =================== YUM/DNF repos ==========================

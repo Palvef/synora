@@ -1,6 +1,8 @@
 #!/bin/bash
 set -e
 
+. /usr/lib/synora/scripts/helpers/git_mirror.sh
+
 function repo_init() {
 	UPSTREAM=$1
 	WORKING_DIR=$2
@@ -14,7 +16,7 @@ function update_cocoapods_git() {
 	echo "==== SYNC $repo_dir START ===="
 	git remote set-url origin "$UPSTREAM"
 	set +e
-	/usr/bin/timeout -s INT 3600 git remote -v update -p
+	/usr/bin/timeout -s INT 3600 git remote update --prune
 	local ret=$?
 	set -e
 	if [[ $ret -ne 0 ]]; then
@@ -27,7 +29,7 @@ function update_cocoapods_git() {
 	[[ -n "$head" ]] && echo "ref: refs/heads/$head" > HEAD
 	echo "counting loose objects..."
 	local loose
-	loose=$(find objects -type f ! -path 'objects/pack/*' | wc -l)
+	loose=$(git count-objects -v | awk '/^count:/{print $2}')
 	echo "loose objects: $loose"
 	if [[ "$loose" -gt 50 ]]; then
 		echo "repacking loose objects..."

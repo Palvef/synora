@@ -1,12 +1,29 @@
-# Synora git/script runtime. Scripts come from the repo-root synora-scripts/
-# directory and are installed at /usr/lib/synora/scripts. Job configs stay
-# provider = "git" / "script". HTTP directory mirrors use the native http
-# provider (former tsumugu).
-FROM debian:trixie-slim
+# synora-scripts runtime for git/script/docker jobs.
+#
+#   docker build -t synora-scripts:latest synora-scripts
+#   scripts/build-synora-scripts-image.sh [--proxy URL]
+#
+# rustup-mirror is built from https://github.com/jiegec/rustup-mirror so the
+# binary is not stored in git. HTTP directory mirrors use the native http
+# provider (former tsumugu). FETCH_HTTPS_PROXY is only for HTTPS fetches
+# (git/cargo/gem/pip/curl). Do not set HTTP_PROXY: manager CONNECT expose
+# answers GET with 405 and that breaks apt.
 
-# Used only for HTTPS fetches (git clone / gem / pip / repo). Do not set
-# HTTP_PROXY here: the manager CONNECT expose answers GET with 405, which
-# breaks apt's http://deb.debian.org requests.
+FROM rust:1-bookworm AS rustup-mirror
+ARG FETCH_HTTPS_PROXY
+WORKDIR /src
+RUN set -e; \
+    if [ -n "$FETCH_HTTPS_PROXY" ]; then \
+      export HTTPS_PROXY="$FETCH_HTTPS_PROXY" \
+             https_proxy="$FETCH_HTTPS_PROXY" \
+             ALL_PROXY="$FETCH_HTTPS_PROXY" \
+             all_proxy="$FETCH_HTTPS_PROXY"; \
+    fi; \
+    git clone --depth 1 https://github.com/jiegec/rustup-mirror.git .; \
+    cargo build --release --locked; \
+    install -m0755 target/release/rustup-mirror /rustup-mirror
+
+FROM debian:trixie-slim
 ARG FETCH_HTTPS_PROXY
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -61,7 +78,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ruby \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /var/log/ftpsync \
-    && chmod 0777 /var/log/ftpsync
+    && chmod 0777 /var/log/ftpsync \
+    && printf '#!/bin/sh\nexit 0\n' > /usr/sbin/sendmail \
+    && chmod 0755 /usr/sbin/sendmail
 
 RUN set -e; \
     if [ -n "$FETCH_HTTPS_PROXY" ]; then \
@@ -78,16 +97,18 @@ RUN set -e; \
     ln -sfn /usr/local/bin/repo /usr/local/bin/aosp-repo; \
     pip3 install --break-system-packages --no-cache-dir minio
 
-COPY scripts /usr/lib/synora/scripts
-COPY rustup-mirror /usr/local/cargo/bin/rustup-mirror
+COPY --from=rustup-mirror /rustup-mirror /usr/local/cargo/bin/rustup-mirror
+COPY . /usr/lib/synora/scripts
 
 RUN chmod 0755 /usr/local/cargo/bin/rustup-mirror \
     && find /usr/lib/synora/scripts -type f \( -name '*.sh' -o -name '*.py' \) -exec chmod 0755 {} + \
     && ln -sfn /usr/lib/synora/scripts /home/tunasync-scripts \
     && ln -sfn /usr/local/cargo/bin/rustup-mirror /usr/lib/synora/scripts/rustup-mirror \
     && git config --system --add safe.directory '*' \
-    && git config --system user.email "mirrors@synora" \
-    && git config --system user.name "synora mirrors"
+    && git config --system user.email "mirrors@hernet" \
+    && git config --system user.name "hernet mirrors"
 
 WORKDIR /data
+# No ENTRYPOINT. The worker runs `docker --init --entrypoint <script>` so
+# git/repo children are reaped and proxy env is injected by Synora.
 CMD ["/bin/bash"]

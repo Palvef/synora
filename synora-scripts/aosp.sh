@@ -5,8 +5,8 @@ REPO=${REPO:-"/usr/local/bin/repo"}
 USE_BITMAP_INDEX=${USE_BITMAP_INDEX:-"0"}
 UPSTREAM=${SYNORA_UPSTREAM:-"https://android.googlesource.com/mirror/manifest"}
 
-git config --global user.email "mirrors@tuna"
-git config --global user.name "tuna mirrors"
+git config --global user.email "mirrors@hernet"
+git config --global user.name "hernet mirrors"
 
 repo_sync_rc=0
 
@@ -33,8 +33,8 @@ function git_repack() {
 		cd $repo
 		size=$(du -sk .|cut -f1)
 		total_size=$(($total_size+1024*$size))
-		objs=$(find objects -type f | wc -l)
-		if [[ "$objs" -gt 8 && "$size" -gt "100000" ]]; then
+		loose=$(git count-objects -v | awk '/^count:/{print $2}')
+		if [[ "${loose:-0}" -gt 50 && "$size" -gt "100000" ]]; then
 			git repack -a -b -d
 		fi
 	done < <(find $SYNORA_STORAGE -type d -not -path "*/.repo/*" -name "*.git")

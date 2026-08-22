@@ -44,7 +44,7 @@ function git_repack() {
 		cd $repo
 		size=$(du -sk .|cut -f1)
 		total_size=$(($total_size+1024*$size))
-		objs=$(find objects -type f  | wc -l)
+		loose=$(git count-objects -v | awk '/^count:/{print $2}')
 		if [[ "$objs" -gt 8 && "$size" -gt "100000" ]]; then
 			git repack -a -b -d
 		fi

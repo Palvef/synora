@@ -88,15 +88,12 @@ impl ScriptProvider {
             cmd.env("SYNORA_EGRESS_ADDRESS", addr);
         }
         cmd.env("SYNORA_FAMILY", &ctx.family);
-        // tunasync-scripts compatibility (alignment decision).
-        cmd.env("PYTHONUNBUFFERED", "1");
-        cmd.env("TUNASYNC_MIRROR_NAME", &ctx.job_name);
-        if let Some(up) = &ctx.upstream {
-            cmd.env("TUNASYNC_UPSTREAM_URL", up);
+        if let Some(api) = ctx.manager_url.as_deref().filter(|s| !s.trim().is_empty()) {
+            cmd.env("SYNORA_API", api);
         }
-        cmd.env("TUNASYNC_WORKING_DIR", ctx.storage.display().to_string());
+        cmd.env("PYTHONUNBUFFERED", "1");
         cmd.env(
-            "TUNASYNC_LOG_DIR",
+            "SYNORA_LOG_DIR",
             format!("{}/.synora-log", ctx.storage.display()),
         );
         for e in &self.env {

@@ -8,6 +8,7 @@ import lzma
 import os
 import re
 import shutil
+import sys
 import socket
 import time
 import traceback
@@ -16,6 +17,15 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 import requests
+
+_HELPERS = Path(__file__).resolve().parent / "helpers"
+if str(_HELPERS) not in sys.path:
+    sys.path.insert(0, str(_HELPERS))
+try:
+    import http_connect
+    http_connect.enable()
+except Exception:
+    pass
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -192,6 +202,7 @@ def apt_mirror(
     with open(release_file, "r") as fd:
         pkgidx_content = None
         cnt_start = False
+        listed_pkgidx = False
         for line in fd:
             if cnt_start:
                 fields = line.split()
@@ -205,6 +216,8 @@ def apt_mirror(
                     or filename.startswith(f"{repo}/Contents-{arch}")
                     or filename.startswith(f"Contents-{arch}")
                 ):
+                    if Path(filename).stem == "Packages":
+                        listed_pkgidx = True
                     fn = Path(filename)
                     if len(fn.parts) <= 3:
                         # Contents-amd64.gz
@@ -285,6 +298,11 @@ def apt_mirror(
         return 0
 
     if pkgidx_content is None:
+        if not listed_pkgidx:
+            logger.warning(
+                f"upstream does not provide {dist}/{repo}/{arch}, skip"
+            )
+            return 0
         logger.error("index is empty, failed")
         if len(list(pkgidx_dir.glob("Packages*"))) == 0:
             logger.warning(
@@ -429,7 +447,7 @@ def main():
                     failed.append((os, comp, arch))
     if len(failed) > 0:
         logger.error(f"Failed APT repos of {args.base_url}: {failed}")
-        return
+        sys.exit(1)
     if args.delete or args.delete_dry_run:
         apt_delete_old_debs(args.working_dir, deb_set, args.delete_dry_run)
 

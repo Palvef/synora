@@ -9,7 +9,7 @@ function update_repo_git() {
 	cd $SYNORA_STORAGE
 	echo "==== SYNC repo.git START ===="
 	git remote set-url origin "$UPSTREAM"
-	/usr/bin/timeout -s INT 3600 git remote -v update -p
+	/usr/bin/timeout -s INT 3600 git remote update --prune
 	head=$(git remote show origin | awk '/HEAD branch:/ {print $NF}')
 	[[ -n "$head" ]] && echo "ref: refs/heads/$head" > HEAD
 	git repack -a -b -d

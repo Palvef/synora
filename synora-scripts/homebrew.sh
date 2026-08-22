@@ -1,36 +1,21 @@
 #!/bin/bash
-function repo_init() {
-	UPSTREAM=$1
-	WORKING_DIR=$2
-	git clone --mirror $UPSTREAM $WORKING_DIR
-}
+set -e
 
-function update_homebrew_git() {
-	UPSTREAM="$1"
-	repo_dir="$2"
-	cd $repo_dir
-	echo "==== SYNC $repo_dir START ===="
-	git remote set-url origin "$UPSTREAM"
-	/usr/bin/timeout -s INT 3600 git remote -v update -p
-	head=$(git remote show origin | awk '/HEAD branch:/ {print $NF}')
-	[[ -n "$head" ]] && echo "ref: refs/heads/$head" > HEAD
-	objs=$(find objects/ -type f | wc -l)
-	[[ "$objs" -gt 8 ]] && git repack -a -b -d
-	sz=$(git count-objects -v|grep -Po '(?<=size-pack: )\d+')
-	total_size=$(($total_size+1024*$sz))
-	echo "==== SYNC $repo_dir DONE ===="
-}
+. /usr/lib/synora/scripts/helpers/git_mirror.sh
 
 UPSTREAM_BASE=${SYNORA_UPSTREAM:-"https://github.com/Homebrew"}
 brews=("brew" "homebrew-core" "homebrew-cask" "install" "homebrew-command-not-found" "homebrew-services")
 total_size=0
 
 for brew in ${brews[@]}; do
-	if [[ ! -d "$SYNORA_STORAGE/${brew}.git" ]]; then
+	repo="$SYNORA_STORAGE/${brew}.git"
+	if [[ ! -d "$repo" ]]; then
 		echo "Initializing ${brew}.git"
-		repo_init "${UPSTREAM_BASE}/${brew}.git" "$SYNORA_STORAGE/${brew}.git"
+		git_mirror_init "${UPSTREAM_BASE}/${brew}.git" "$repo"
 	fi
-	update_homebrew_git "${UPSTREAM_BASE}/${brew}.git" "$SYNORA_STORAGE/${brew}.git"
+	git_mirror_update "${UPSTREAM_BASE}/${brew}.git" "$repo"
+	total_size=$((total_size + GIT_MIRROR_BYTES))
 done
 
-echo "Total size is" $(numfmt --to=iec $total_size)
+echo "Total size is" "$(numfmt --to=iec $total_size)"
+echo "SYNORA_SIZE=$total_size"

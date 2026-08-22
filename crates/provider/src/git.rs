@@ -130,40 +130,12 @@ async fn refresh_head(dest: &str) {
     let _ = tokio::fs::write(format!("{dest}/HEAD"), format!("ref: refs/heads/{head}\n")).await;
 }
 
-pub(crate) fn git_container_args(
-    branch: Option<&str>,
-    is_repo: bool,
-    url: &str,
-    dest: &str,
-) -> Vec<String> {
-    match (branch, is_repo) {
-        (Some(branch), false) => vec![
-            "git".into(),
-            "clone".into(),
-            "--single-branch".into(),
-            "--branch".into(),
-            branch.to_string(),
-            url.to_string(),
-            dest.to_string(),
-        ],
-        (None, false) => vec![
-            "git".into(),
-            "clone".into(),
-            "--mirror".into(),
-            url.to_string(),
-            dest.to_string(),
-        ],
-        (Some(_branch), true) => crate::docker::docker_exec_args(&[
+pub(crate) fn git_container_args(branch: Option<&str>) -> Vec<String> {
+    match branch {
+        Some(_) => crate::docker::docker_exec_args(&[
             r#"git -C "$DEST" fetch origin "$BRANCH" && git -C "$DEST" reset --hard "origin/$BRANCH""#.into(),
         ]),
-        (None, true) => vec![
-            "git".into(),
-            "-C".into(),
-            dest.to_string(),
-            "remote".into(),
-            "update".into(),
-            "--prune".into(),
-        ],
+        None => vec!["/usr/lib/synora/scripts/git.sh".into()],
     }
 }
 
@@ -176,15 +148,12 @@ impl GitProvider {
             .storage
             .to_str()
             .ok_or_else(|| ProviderError::Config("storage path is not UTF-8".into()))?;
-        // Valid repo (or a bare clone we could repair) is updated in place.
-        // Anything else that already occupies dest is quarantined so clone
-        // can write to an empty path — never clone onto leftovers.
-        let is_repo = prepare_existing_repo(dest).await;
-        if !is_repo {
-            quarantine_invalid_dest(dest).await?;
-        }
 
         if let Some(image) = crate::docker::scripts_image_name(ctx.scripts_image.as_deref()) {
+            // git.sh (or the branch fetch) runs in the scripts image. Do not
+            // walk the repo with host git first: that is extra CPU and can
+            // quarantine a valid dest when the worker has no git binary.
+            let is_repo = Path::new(dest).join("HEAD").is_file();
             let mut extra_env = Vec::new();
             if let Some(branch) = &self.branch {
                 extra_env.push(format!("DEST={dest}"));
@@ -193,7 +162,7 @@ impl GitProvider {
             let result = crate::docker::run_named_container(
                 crate::docker::DockerRunSpec {
                     image: image.to_string(),
-                    command: git_container_args(self.branch.as_deref(), is_repo, url, dest),
+                    command: git_container_args(self.branch.as_deref()),
                     extra_env,
                     extra_volumes: Vec::new(),
                     keep_container: false,
@@ -202,10 +171,6 @@ impl GitProvider {
                 ctx,
             )
             .await?;
-            if self.branch.is_none() {
-                refresh_head(dest).await;
-                maybe_repack(dest).await;
-            }
             let size_hint = match result.size_hint {
                 Some(s) => Some(s),
                 None => repo_size_bytes(dest).await,
@@ -219,6 +184,11 @@ impl GitProvider {
                 }),
                 ..result
             });
+        }
+
+        let is_repo = prepare_existing_repo(dest).await;
+        if !is_repo {
+            quarantine_invalid_dest(dest).await?;
         }
 
         let mut cmd = Command::new("git");
@@ -342,45 +312,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn mirror_update_stays_argv() {
-        let args = git_container_args(None, true, "https://example.com/repo.git", "/data/repo.git");
+    fn mirror_jobs_run_git_sh() {
         assert_eq!(
-            args,
-            vec!["git", "-C", "/data/repo.git", "remote", "update", "--prune"]
+            git_container_args(None),
+            vec!["/usr/lib/synora/scripts/git.sh"]
         );
     }
 
     #[test]
     fn branch_update_uses_shell_and_env_placeholders() {
-        let args = git_container_args(
-            Some("main"),
-            true,
-            "https://example.com/repo.git",
-            "/data/repo",
-        );
+        let args = git_container_args(Some("main"));
         assert_eq!(args[0], "/bin/sh");
         assert_eq!(args[1], "-c");
         assert!(args[2].contains("fetch origin"));
         assert!(args[2].contains("reset --hard"));
-    }
-
-    #[test]
-    fn fresh_mirror_clone_is_argv() {
-        let args = git_container_args(
-            None,
-            false,
-            "https://example.com/repo.git",
-            "/data/repo.git",
-        );
-        assert_eq!(
-            args,
-            vec![
-                "git",
-                "clone",
-                "--mirror",
-                "https://example.com/repo.git",
-                "/data/repo.git"
-            ]
-        );
     }
 }

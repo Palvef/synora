@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-git_option="git -c user.email=non-existence@tuna.tsinghua.edu.cn -c user.name=Noname"
+git_cmd=(git -c user.email=mirrors@hernet -c user.name="hernet mirrors")
 
 function repo_init() {
         UPSTREAM="$1"
@@ -15,11 +15,11 @@ function update_git() {
         cd "$repo_dir"
         echo "==== SYNC $repo_dir START ===="
         git remote set-url origin "$UPSTREAM"
-        timeout -s INT 3600 git remote -v update -p
+        timeout -s INT 3600 git remote update --prune
         head=$(git remote show origin | awk '/HEAD branch:/ {print $NF}')
         [[ -n "$head" ]] && echo "ref: refs/heads/$head" > HEAD
-        objs=$(find objects -type f | wc -l)
-        [[ "$objs" -gt 8 ]] && git repack -a -b -d
+        loose=$(git count-objects -v | awk '/^count:/{print $2}')
+        [[ "${loose:-0}" -gt 50 ]] && git repack -a -b -d
         sz=$(git count-objects -v|grep -Po '(?<=size-pack: )\d+')
         total_size=$(($total_size+1024*$sz))
         echo "==== SYNC $repo_dir DONE ===="
@@ -31,10 +31,10 @@ function checkout_branch() {
         branch="$3"
         echo "Checkout branch $branch to $work_tree"
         if [[ ! -d "$2" ]]; then
-                $git_option clone "$repo_dir" --branch "$branch" --single-branch "$work_tree"
+                "${git_cmd[@]}" clone "$repo_dir" --branch "$branch" --single-branch "$work_tree"
         else
                 cd "$work_tree"
-                $git_option checkout -B "$branch" "origin/$branch"
+                "${git_cmd[@]}" checkout -B "$branch" "origin/$branch"
         fi
 }
 

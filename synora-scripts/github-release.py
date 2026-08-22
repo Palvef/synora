@@ -8,8 +8,19 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
+import sys
+
 import requests
 import requests.utils
+
+_HELPERS = Path(__file__).resolve().parent / "helpers"
+if str(_HELPERS) not in sys.path:
+    sys.path.insert(0, str(_HELPERS))
+try:
+    import http_connect
+    http_connect.enable()
+except Exception:
+    pass
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -23,9 +34,13 @@ logger.addHandler(handler)
 
 BASE_URL = os.getenv("SYNORA_UPSTREAM", "https://api.github.com/repos/")
 WORKING_DIR = os.getenv("SYNORA_STORAGE")
-CONFIG = os.getenv("GITHUB_RELEASE_CONFIG", "github-release.json")
+# Job CWD is the storage root; default next to this script.
+CONFIG = os.getenv(
+    "GITHUB_RELEASE_CONFIG",
+    str(Path(__file__).resolve().with_name("github-release.json")),
+)
 REPOS = []
-UA = "tuna-github-release-mirror/0.0 (+https://github.com/tuna/tunasync-scripts)"
+UA = "hernet-github-release-mirror/0.0"
 
 # connect and read timeout value
 TIMEOUT_OPTION = (30, 60)
@@ -220,6 +235,7 @@ def main():
             pass
 
     total_size = 0
+    meta_failed = False
 
     for cfg in REPOS:
         if isinstance(cfg, str):
@@ -339,19 +355,23 @@ def main():
                         break
             if n_downloaded == 0:
                 logger.error(f"No release version found for {repo}")
+                meta_failed = True
                 continue
         except Exception:
+            meta_failed = True
             logger.exception(f"Failed to process releases for {repo}")
-    else:
+    if not meta_failed:
         cleaning = True
 
-    # 等待所有下载任务完成
     results, _ = concurrent.futures.wait(futures)
     executor.shutdown()
-    all_success = all([r.result() for r in results])
+    all_success = (not results) or all(r.result() for r in results)
+    if meta_failed:
+        all_success = False
 
-    # XXX: this does not work because `cleaning` is always False when `REPO`` is not empty
-    if cleaning:
+    # Only delete extras after every repo's metadata was fetched and every
+    # queued download succeeded. An empty remote list would wipe the mirror.
+    if cleaning and all_success and remote_filelist:
         local_filelist: list[Path] = []
         for local_file in working_dir.glob("**/*"):
             if local_file.is_file():
@@ -363,18 +383,22 @@ def main():
             old_file.unlink()
 
         for local_dir in working_dir.glob("*/*/*"):
-            # remove empty dirs only
             if local_dir.is_dir():
                 try:
                     local_dir.rmdir()
                     logger.info(f"Removing empty directory {local_dir}")
                 except Exception:
                     pass
+    elif meta_failed:
+        logger.error("Skipping cleanup because some GitHub metadata requests failed")
 
     logger.info(f"Total size is {sizeof_fmt(total_size, suffix='')}")
+    print(f"SYNORA_SIZE={total_size}", flush=True)
     if not all_success:
         logger.error("Some files failed to download")
-        exit(1)
+        print("SYNORA_STATUS=failed", flush=True)
+        raise SystemExit(1)
+    print("SYNORA_STATUS=success", flush=True)
 
 if __name__ == "__main__":
     main()

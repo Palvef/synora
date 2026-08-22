@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import shutil
+import sys
 import sqlite3
 import subprocess as sp
 import tempfile
@@ -17,6 +18,15 @@ from pathlib import Path
 from typing import Dict, List
 
 import requests
+
+_HELPERS = Path(__file__).resolve().parent / "helpers"
+if str(_HELPERS) not in sys.path:
+    sys.path.insert(0, str(_HELPERS))
+try:
+    import http_connect
+    http_connect.enable()
+except Exception:
+    pass
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -260,6 +270,7 @@ def main():
             """
 [main]
 keepcache=0
+skip_if_unavailable=1
 """
         )
         for name, url in combination_os_comp(arch):
@@ -271,6 +282,7 @@ baseurl={url}
 repo_gpgcheck=0
 gpgcheck=0
 enabled=1
+skip_if_unavailable=1
 """
             )
             dst = (args.working_dir / name).absolute()
@@ -324,11 +336,11 @@ enabled=1
 
     if len(failed) > 0:
         logger.error(f"Failed YUM repos: {failed}")
-    else:
-        if len(REPO_SIZE_FILE) > 0:
-            with open(REPO_SIZE_FILE, "a") as fd:
-                total_size = sum([r[0] for r in REPO_STAT.values()])
-                fd.write(f"+{total_size}")
+        sys.exit(1)
+    if len(REPO_SIZE_FILE) > 0:
+        with open(REPO_SIZE_FILE, "a") as fd:
+            total_size = sum([r[0] for r in REPO_STAT.values()])
+            fd.write(f"+{total_size}")
 
 
 if __name__ == "__main__":

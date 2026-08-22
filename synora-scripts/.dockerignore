@@ -1,0 +1,10 @@
+**/.git
+**/*.pyc
+**/__pycache__
+**/.codesight
+Dockerfile
+.dockerignore
+check.sh
+rustup-mirror
+rustup-tuna-proxy.py
+*tuna-proxy*
