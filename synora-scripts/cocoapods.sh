@@ -13,6 +13,7 @@ function update_cocoapods_git() {
 	UPSTREAM="$1"
 	repo_dir="$2"
 	cd "$repo_dir"
+	git_mirror_clean_pack_tmp "$repo_dir"
 	echo "==== SYNC $repo_dir START ===="
 	git remote set-url origin "$UPSTREAM"
 	set +e

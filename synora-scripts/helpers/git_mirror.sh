@@ -2,6 +2,24 @@
 # ref listing or `find objects` walks that pin CPU and never look "done").
 # shellcheck shell=bash
 
+git_mirror_clean_pack_tmp() {
+	local repo_dir="$1"
+	local pack="$repo_dir/objects/pack"
+	if [[ -d "$repo_dir/.git/objects/pack" ]]; then
+		pack="$repo_dir/.git/objects/pack"
+	fi
+	if [[ ! -d "$pack" ]]; then
+		return 0
+	fi
+	find "$pack" -maxdepth 1 -type f \( \
+		-name 'tmp_pack_*' -o \
+		-name 'tmp_idx_*' -o \
+		-name 'tmp_obj_*' -o \
+		-name 'tmp_bitmap_*' -o \
+		-name '.tmp-*' \
+	\) -delete 2>/dev/null || true
+}
+
 git_mirror_init() {
 	local upstream="$1"
 	local repo_dir="$2"
@@ -12,6 +30,7 @@ git_mirror_update() {
 	local upstream="$1"
 	local repo_dir="$2"
 	cd "$repo_dir" || return 1
+	git_mirror_clean_pack_tmp "$repo_dir"
 	echo "==== SYNC $repo_dir START ===="
 	git remote set-url origin "$upstream"
 	local ret=0
