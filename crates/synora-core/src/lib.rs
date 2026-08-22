@@ -14,5 +14,5 @@ pub use job::{
 };
 pub use metrics::Metrics;
 pub use schedule::{parse_cron_expr, parse_duration_human, Schedule, ScheduleKind};
-pub use size::human_size;
+pub use size::{human_size, tunasync_size};
 pub use state::{retry_decision, transition, RetryDecision, RunEvent, StateError};

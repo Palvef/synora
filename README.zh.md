@@ -7,7 +7,7 @@ Synora 是一个用 Rust 编写的**镜像同步引擎**：统一管理「什么
 [tsumugu](https://github.com/taoky/tsumugu)，并采用了它们在生产环境中的成熟做法：
 
 - **tunasync**：Manager + Worker 架构、rsync 参数约定（`success_exit_codes` 23/24、
-  `--safe-links --timeout=120` 等）、脚本环境变量兼容（`TUNASYNC_*`）、
+  `--safe-links --timeout=120` 等）、脚本环境变量（`SYNORA_*`）、
   manager/worker 之间明文或证书加密、`mirror_subdir`、tunasync.json 兼容输出、
   感谢 TUNA 的 tunasync / tunasync-scripts
 - **Yuki**：SQLite 存储、`yukictl reload` 式热重载、每仓库 cron 调度

@@ -201,6 +201,10 @@ storage = "/datas/debian-security"   # = mountpoint + 镜像目录名
   回滚用 `synora snapshot rollback <job> <快照名>`。
 - 多个镜像可共用一个 dataset（都在 mountpoint 下各自建目录），也可以
   每镜像一个 dataset（为每个镜像单独配一个 `[storage.xxx]` 段）。
+- 多 Worker 时每个节点用不同的 `[storage.<name>]`。ZFS HDD 节点用
+  `[storage.mirror]`（`/datas`），NVMe/web 节点用 `[storage.nvme]`
+  （`/data`）。Job 里写 `storage_name = "nvme"` 并 `worker = "worker-nvme"`，
+  避免两个节点都叫 `mirror` 时任务写到错误的池。
 
 ## 8. 监控
 

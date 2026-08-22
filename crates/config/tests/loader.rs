@@ -354,7 +354,7 @@ fn bad_values_rejected() {
 
 #[test]
 fn http_threads_none_zero_and_some() {
-    // threads = missing/0/5: missing -> None (provider defaults to 8),
+    // threads = missing/0/5: missing -> None (provider defaults to 5),
     // 0 and 5 flow through verbatim.
     let dir = temp_dir("httpthreads");
     write(&dir, "synora.toml", "include = [\"jobs/*.toml\"]\n");
@@ -510,4 +510,48 @@ storage = "/srv/ubuntu"
     let cfg = load(&dir).unwrap();
     assert_eq!(cfg.daemon.default_worker.as_deref(), Some("mirror-zfs"));
     assert_eq!(cfg.jobs[0].worker.as_deref(), Some("mirror-zfs"));
+}
+
+#[test]
+fn storage_kind_alias_parses_zfs() {
+    let dir = temp_dir("storage-kind");
+    write(
+        &dir,
+        "synora.toml",
+        r#"
+[storage.mirror]
+kind = "zfs"
+pool = "datas"
+dataset = "mirror"
+mountpoint = "/datas"
+auto_create = false
+zfs_options = "-o recordsize=1M -o atime=off"
+
+[storage.nvme]
+type = "zfs"
+pool = "data"
+mountpoint = "/data"
+"#,
+    );
+    let cfg = load(&dir).unwrap();
+    match &cfg.storages.get("mirror").expect("mirror").kind {
+        config::StorageKind::Zfs {
+            pool,
+            dataset,
+            options,
+        } => {
+            assert_eq!(pool, "datas");
+            assert_eq!(dataset, "mirror");
+            assert!(options.iter().any(|(k, v)| k == "recordsize" && v == "1M"));
+            assert!(options.iter().any(|(k, v)| k == "atime" && v == "off"));
+        }
+        other => panic!("expected zfs, got {other:?}"),
+    }
+    match &cfg.storages.get("nvme").expect("nvme").kind {
+        config::StorageKind::Zfs { pool, dataset, .. } => {
+            assert_eq!(pool, "data");
+            assert_eq!(dataset, "");
+        }
+        other => panic!("expected zfs, got {other:?}"),
+    }
 }

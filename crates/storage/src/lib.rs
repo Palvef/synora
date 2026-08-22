@@ -69,7 +69,7 @@ impl StorageManager {
                 dataset,
                 options,
             } => {
-                let ds = format!("{pool}/{dataset}");
+                let ds = zfs_dataset_id(pool, dataset);
                 let mount = cfg
                     .mountpoint
                     .clone()
@@ -89,7 +89,11 @@ impl StorageManager {
                         let mountpoint = format!("mountpoint={}", to_arg(&mount));
                         run_cli("zfs", &["set", mountpoint.as_str(), ds.as_str()]).await?;
                     }
-                    Err(_) => return Err(StorageError::NotFound),
+                    Err(_) => {
+                        return Err(StorageError::Command(format!(
+                            "zfs dataset `{ds}` not found"
+                        )));
+                    }
                 }
                 tokio::fs::create_dir_all(&mount).await.map_err(|e| {
                     StorageError::Command(format!("mkdir -p {}: {e}", mount.display()))
@@ -200,6 +204,17 @@ async fn run_cli(cmd: &str, args: &[&str]) -> Result<String, StorageError> {
         )));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+fn zfs_dataset_id(pool: &str, dataset: &str) -> String {
+    let dataset = dataset.trim();
+    if dataset.is_empty() {
+        pool.to_string()
+    } else if dataset.contains('/') {
+        dataset.to_string()
+    } else {
+        format!("{pool}/{dataset}")
+    }
 }
 
 fn to_arg(p: &Path) -> String {
@@ -354,5 +369,13 @@ mod tests {
             m.ensure("b").await,
             Err(StorageError::Unsupported(_))
         ));
+    }
+
+    #[test]
+    fn zfs_dataset_id_pool_root_when_empty() {
+        assert_eq!(zfs_dataset_id("datas", ""), "datas");
+        assert_eq!(zfs_dataset_id("datas", "  "), "datas");
+        assert_eq!(zfs_dataset_id("datas", "mirror"), "datas/mirror");
+        assert_eq!(zfs_dataset_id("datas", "datas/GXDE"), "datas/GXDE");
     }
 }

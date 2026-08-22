@@ -9,9 +9,10 @@ Mapping:
   provider "rsync"            -> provider = "rsync" (+ options from rsync_options,
                                  success_exit_codes from rsync_success_exit_codes /
                                  success_exit_codes)
-  provider "command"          -> provider = "script", command = <command>
-                                 (env vars SYNORA_* are injected by Synora at
-                                 run time — scripts keep working unchanged)
+  provider "command"          -> provider = "docker" when docker_image is set
+                                 (synora-scripts:latest + docker_command),
+                                 else provider = "script"
+                                 git.sh stays provider = "git"
   interval (minutes)          -> schedule = "interval", every = "<N>m"
                                  (Synora is anchor-based/no-drift, unlike tunasync's
                                  completion+interval)
@@ -30,6 +31,7 @@ Only the Python standard library. Offline-safe.
 """
 
 import argparse
+import shlex
 import re
 import configparser
 import glob
@@ -134,8 +136,21 @@ def render_job(m, log_dir, storage_dir, global_docker_volumes, global_interval):
             "/home/tunasync-scripts/git.sh",
             "git.sh",
         ):
+            # Native git still runs inside scripts_image.
             lines.append('provider = "git"')
             lines.append(f"upstream = {toml_str(m.get('upstream', ''))}")
+        elif m.get("docker_image"):
+            # tunasync command+docker_image jobs stay docker in Synora.
+            args = shlex.split(command) if command.strip() else []
+            lines.append('provider = "docker"')
+            lines.append('image = "synora-scripts:latest"')
+            if args:
+                lines.append(f"docker_command = {toml_list(args)}")
+            lines.append(f"upstream = {toml_str(m.get('upstream', ''))}")
+            if env:
+                lines.append(f"env = {toml_list(env)}")
+            if m.get("fail_on_match"):
+                lines.append(f"fail_on_match = {toml_str(m['fail_on_match'])}")
         else:
             lines.append('provider = "script"')
             lines.append(f"command = {toml_str(command)}")

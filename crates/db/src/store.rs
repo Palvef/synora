@@ -465,7 +465,7 @@ impl Store {
     /// per-job concurrency gate at dispatch time.
     pub async fn inflight_runs_of_job(&self, job: &str) -> DbResult<Vec<RunRow>> {
         self.runs_where(
-            "job_id = ? AND status IN ('QUEUED','STARTING','SYNCING','RUNNING')",
+            "job_id = ? AND status IN ('QUEUED','STARTING','SYNCING','RUNNING','RETRYING','CANCELLING')",
             &[job.into()],
         )
         .await
@@ -484,6 +484,55 @@ impl Store {
             .and_then(|r| cell(r, "n"))
             .and_then(|v| v.as_i64())
             .unwrap_or(0))
+    }
+
+    /// QUEUED runs that are actually waiting for a worker. Extra queued rows
+    /// left behind a STARTING/SYNCING/RUNNING sibling are not waiting work.
+    pub async fn count_waiting_runs(&self) -> DbResult<i64> {
+        let rows = self
+            .db
+            .query(
+                "SELECT COUNT(*) AS n FROM job_runs
+                 WHERE status = 'QUEUED'
+                   AND job_id NOT IN (
+                       SELECT job_id FROM (
+                           SELECT job_id FROM job_runs
+                           WHERE status IN ('STARTING','SYNCING','RUNNING','CANCELLING')
+                       )
+                   )",
+                &[],
+            )
+            .await?;
+        Ok(rows
+            .first()
+            .and_then(|r| cell(r, "n"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0))
+    }
+
+    /// Drop leftover QUEUED/RETRYING/CANCELLING rows once another run of the
+    /// same job is already executing. Those leftovers flip `jobs.status` back
+    /// to queued and inflate Grafana's queue count.
+    pub async fn drop_superseded_runs(&self) -> DbResult<usize> {
+        self.db
+            .execute(
+                "UPDATE job_runs
+                 SET status = 'CANCELLED', finished_at = ?, message = 'superseded by an active run'
+                 WHERE id IN (
+                     SELECT id FROM (
+                         SELECT q.id FROM job_runs q
+                         WHERE q.status IN ('QUEUED','RETRYING','CANCELLING')
+                           AND EXISTS (
+                               SELECT 1 FROM job_runs a
+                               WHERE a.job_id = q.job_id
+                                 AND a.id != q.id
+                                 AND a.status IN ('STARTING','SYNCING','RUNNING')
+                           )
+                     )
+                 )",
+                &[unix_now().into()],
+            )
+            .await
     }
 
     /// Atomically assign an unassigned QUEUED run to a worker. Returns true
@@ -578,7 +627,7 @@ impl Store {
                        SELECT 1 FROM (
                            SELECT 1 FROM job_runs jr
                            WHERE jr.job_id = job_runs.job_id
-                             AND jr.status IN ('QUEUED','STARTING','SYNCING','RUNNING')
+                             AND jr.status IN ('QUEUED','STARTING','SYNCING','RUNNING','RETRYING','CANCELLING')
                        )
                    )",
                 &[
@@ -622,7 +671,14 @@ impl Store {
                 ],
             )
             .await?;
-        self.set_job_status(job_name, status).await?;
+        if matches!(status, JobStatus::Queued) {
+            let active = self.active_runs_of_job(job_name).await?;
+            if active.is_empty() {
+                self.set_job_status(job_name, status).await?;
+            }
+        } else {
+            self.set_job_status(job_name, status).await?;
+        }
         Ok(())
     }
 
@@ -681,6 +737,23 @@ impl Store {
             // Never overwrite RETRYING/FAILED with RUNNING. A heartbeat can
             // still list a job for one tick after complete_run scheduled a retry.
             if n > 0 {
+                self.set_job_status(job, JobStatus::Running).await?;
+                continue;
+            }
+            // Run already RUNNING: still refresh jobs.status. A later
+            // create_run/retry can otherwise leave the job row on QUEUED
+            // while the worker is still executing.
+            let rows = self
+                .db
+                .query(
+                    "SELECT 1 AS n FROM job_runs
+                     WHERE worker_id = ? AND job_id = ?
+                       AND status IN ('STARTING','SYNCING','RUNNING')
+                     LIMIT 1",
+                    &[worker.into(), job.as_str().into()],
+                )
+                .await?;
+            if !rows.is_empty() {
                 self.set_job_status(job, JobStatus::Running).await?;
             }
         }
@@ -1124,29 +1197,28 @@ impl Store {
         Ok(())
     }
 
-    /// If `jobs.status` is still SYNCING/RUNNING/QUEUED but no inflight run
-    /// exists, copy the latest run status so Grafana/TUI stop showing ghosts.
+    /// Keep `jobs.status` aligned with executing runs. Leftover QUEUED rows
+    /// used to win because they were newer than the live RUNNING row.
     pub async fn reconcile_stale_job_status(&self) -> DbResult<usize> {
         self.db
             .execute(
-                "UPDATE jobs SET status = COALESCE((
-                     SELECT jr.status FROM job_runs jr
-                     WHERE jr.job_id = jobs.name
-                     ORDER BY jr.created_at DESC LIMIT 1
-                 ), 'PENDING')
-                 WHERE status IN ('QUEUED','STARTING','SYNCING','RUNNING','CANCELLING')
-                   AND (
-                     EXISTS (
-                       SELECT 1 FROM job_runs jr
+                "UPDATE jobs SET status = COALESCE(
+                     (SELECT 'RUNNING' FROM job_runs jr
+                       WHERE jr.job_id = jobs.name AND jr.status = 'RUNNING' LIMIT 1),
+                     (SELECT 'SYNCING' FROM job_runs jr
+                       WHERE jr.job_id = jobs.name AND jr.status IN ('STARTING','SYNCING') LIMIT 1),
+                     (SELECT 'CANCELLING' FROM job_runs jr
+                       WHERE jr.job_id = jobs.name AND jr.status = 'CANCELLING' LIMIT 1),
+                     (SELECT 'QUEUED' FROM job_runs jr
+                       WHERE jr.job_id = jobs.name AND jr.status = 'QUEUED' LIMIT 1),
+                     (SELECT 'RETRYING' FROM job_runs jr
+                       WHERE jr.job_id = jobs.name AND jr.status = 'RETRYING' LIMIT 1),
+                     (SELECT jr.status FROM job_runs jr
                        WHERE jr.job_id = jobs.name
-                         AND jr.status = 'RETRYING'
-                     )
-                     OR NOT EXISTS (
-                       SELECT 1 FROM job_runs jr
-                       WHERE jr.job_id = jobs.name
-                         AND jr.status IN ('QUEUED','STARTING','SYNCING','RUNNING','RETRYING','CANCELLING')
-                     )
-                   )",
+                       ORDER BY COALESCE(jr.finished_at, jr.created_at) DESC, jr.created_at DESC
+                       LIMIT 1),
+                     status
+                 )",
                 &[],
             )
             .await

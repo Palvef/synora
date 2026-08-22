@@ -1,12 +1,12 @@
 {
   "overwrite": true,
   "folderId": 0,
-  "message": "Drop leftover Value #B columns; hide local worker; keep running table title as 正在运行",
+  "message": "Fix duplicate PromQL labelset on bandwidth panels",
   "dashboard": {
-    "id": null,
+    "id": 3810830095704064,
     "uid": "synora-mirror",
     "title": "Synora 镜像同步",
-    "description": "镜像同步总览：任务状态、仓库大小、CPU/内存、Worker 占用与上限。启动中与运行中统一显示为同步中。24h 指标使用 increase()，成功率使用 live counter。",
+    "description": "镜像同步总览：任务状态时间轴、每任务带宽、仓库大小、CPU/内存、Worker 占用与上限。启动中与运行中统一显示为同步中。24h 指标使用 increase()。",
     "tags": [
       "synora",
       "mirror"
@@ -17,7 +17,7 @@
     "graphTooltip": 1,
     "editable": true,
     "time": {
-      "from": "now-6h",
+      "from": "now-12h",
       "to": "now"
     },
     "templating": {
@@ -41,6 +41,57 @@
           },
           "sort": 1,
           "hide": 0
+        },
+        {
+          "name": "timeline_page",
+          "type": "custom",
+          "label": "时间轴分页",
+          "hide": 0,
+          "multi": false,
+          "includeAll": false,
+          "query": "A-D : (?i)^[a-d].*,E-H : (?i)^[e-h].*,I-L : (?i)^[i-l].*,M-P : (?i)^[m-p].*,Q-T : (?i)^[q-t].*,U-Z : (?i)^[u-z].*,其他 : (?i)^[^a-z].*",
+          "options": [
+            {
+              "text": "A-D",
+              "value": "(?i)^[a-d].*",
+              "selected": true
+            },
+            {
+              "text": "E-H",
+              "value": "(?i)^[e-h].*",
+              "selected": false
+            },
+            {
+              "text": "I-L",
+              "value": "(?i)^[i-l].*",
+              "selected": false
+            },
+            {
+              "text": "M-P",
+              "value": "(?i)^[m-p].*",
+              "selected": false
+            },
+            {
+              "text": "Q-T",
+              "value": "(?i)^[q-t].*",
+              "selected": false
+            },
+            {
+              "text": "U-Z",
+              "value": "(?i)^[u-z].*",
+              "selected": false
+            },
+            {
+              "text": "其他",
+              "value": "(?i)^[^a-z].*",
+              "selected": false
+            }
+          ],
+          "current": {
+            "text": "A-D",
+            "value": "(?i)^[a-d].*"
+          },
+          "skipUrlSync": false
         }
       ]
     },
@@ -881,12 +932,247 @@
         }
       },
       {
+        "id": 8,
+        "type": "row",
+        "title": "任务时间轴",
+        "gridPos": {
+          "x": 0,
+          "y": 7,
+          "w": 24,
+          "h": 1
+        },
+        "collapsed": false
+      },
+      {
+        "id": 70,
+        "type": "state-timeline",
+        "title": "任务时间轴（分页，一行一个任务）",
+        "description": "用顶部「时间轴分页」切换任务组。橙/黄=同步中，蓝=队列中，绿=等待下次同步。",
+        "gridPos": {
+          "x": 0,
+          "y": 8,
+          "w": 24,
+          "h": 22
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "ae4bld7vas268d"
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ae4bld7vas268d"
+            },
+            "expr": "max by (exported_job) (synora_job_status{exported_job=~\"$job_name\", exported_job=~\"$timeline_page\"})",
+            "instant": false,
+            "range": true,
+            "exemplar": false,
+            "hide": false,
+            "legendFormat": "{{exported_job}}"
+          }
+        ],
+        "options": {
+          "mergeValues": true,
+          "showValue": "auto",
+          "alignValue": "left",
+          "rowHeight": 0.9,
+          "legend": {
+            "displayMode": "list",
+            "placement": "bottom",
+            "showLegend": false
+          },
+          "tooltip": {
+            "mode": "single",
+            "sort": "none"
+          }
+        },
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "fillOpacity": 80,
+              "lineWidth": 0,
+              "spanNulls": false
+            },
+            "color": {
+              "mode": "thresholds"
+            },
+            "mappings": [
+              {
+                "type": "value",
+                "options": {
+                  "0": {
+                    "text": "等待下次同步",
+                    "color": "super-light-green"
+                  },
+                  "1": {
+                    "text": "等待下次同步",
+                    "color": "super-light-green"
+                  },
+                  "2": {
+                    "text": "队列中",
+                    "color": "blue"
+                  },
+                  "3": {
+                    "text": "同步中",
+                    "color": "orange"
+                  },
+                  "4": {
+                    "text": "同步中",
+                    "color": "yellow"
+                  },
+                  "5": {
+                    "text": "等待下次同步",
+                    "color": "green"
+                  },
+                  "6": {
+                    "text": "失败",
+                    "color": "red"
+                  },
+                  "7": {
+                    "text": "重试中",
+                    "color": "orange"
+                  },
+                  "8": {
+                    "text": "取消中",
+                    "color": "purple"
+                  },
+                  "9": {
+                    "text": "已取消",
+                    "color": "purple"
+                  },
+                  "10": {
+                    "text": "丢失",
+                    "color": "dark-red"
+                  },
+                  "11": {
+                    "text": "等待下次同步",
+                    "color": "dark-purple"
+                  }
+                }
+              }
+            ],
+            "thresholds": {
+              "mode": "absolute",
+              "steps": [
+                {
+                  "color": "super-light-green",
+                  "value": null
+                },
+                {
+                  "color": "blue",
+                  "value": 2
+                },
+                {
+                  "color": "orange",
+                  "value": 3
+                },
+                {
+                  "color": "yellow",
+                  "value": 4
+                },
+                {
+                  "color": "green",
+                  "value": 5
+                },
+                {
+                  "color": "red",
+                  "value": 6
+                },
+                {
+                  "color": "orange",
+                  "value": 7
+                },
+                {
+                  "color": "purple",
+                  "value": 8
+                },
+                {
+                  "color": "dark-red",
+                  "value": 10
+                }
+              ]
+            }
+          },
+          "overrides": []
+        }
+      },
+      {
+        "id": 71,
+        "type": "timeseries",
+        "title": "每个任务同步带宽",
+        "description": "Live network bandwidth per job (bytes/sec). Docker NetIO only; rsync/git/script use socket bytes from /proc; HTTP uses download counters. Disk IO is excluded.",
+        "gridPos": {
+          "x": 0,
+          "y": 30,
+          "w": 24,
+          "h": 8
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "ae4bld7vas268d"
+        },
+        "targets": [
+          {
+            "refId": "A",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ae4bld7vas268d"
+            },
+            "expr": "max by (exported_job) (synora_job_bandwidth_bytes{exported_job=~\"$job_name\"})",
+            "instant": false,
+            "range": true,
+            "exemplar": false,
+            "hide": false,
+            "legendFormat": "{{exported_job}}"
+          }
+        ],
+        "options": {
+          "legend": {
+            "displayMode": "table",
+            "placement": "right",
+            "showLegend": true,
+            "calcs": [
+              "mean",
+              "max"
+            ],
+            "sortBy": "Max",
+            "sortDesc": true
+          },
+          "tooltip": {
+            "mode": "multi",
+            "sort": "desc"
+          }
+        },
+        "fieldConfig": {
+          "defaults": {
+            "custom": {
+              "drawStyle": "bars",
+              "barAlignment": 0,
+              "lineInterpolation": "smooth",
+              "lineWidth": 1,
+              "fillOpacity": 60,
+              "showPoints": "never",
+              "spanNulls": true,
+              "stacking": {
+                "mode": "none",
+                "group": "A"
+              }
+            },
+            "unit": "Bps",
+            "min": 0
+          },
+          "overrides": []
+        }
+      },
+      {
         "id": 2,
         "type": "row",
         "title": "运行中 / 告警",
         "gridPos": {
           "x": 0,
-          "y": 7,
+          "y": 38,
           "w": 24,
           "h": 1
         },
@@ -899,7 +1185,7 @@
         "title": "正在运行",
         "gridPos": {
           "x": 0,
-          "y": 8,
+          "y": 39,
           "w": 14,
           "h": 11
         },
@@ -985,6 +1271,19 @@
             "format": "table",
             "exemplar": false,
             "hide": false
+          },
+          {
+            "refId": "G",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ae4bld7vas268d"
+            },
+            "expr": "max by (exported_job) (synora_job_bandwidth_bytes{exported_job=~\"$job_name\"} and on (exported_job) (synora_job_status{exported_job=~\"$job_name\"} == 3 or synora_job_status{exported_job=~\"$job_name\"} == 4))",
+            "instant": true,
+            "range": false,
+            "exemplar": false,
+            "hide": false,
+            "format": "table"
           }
         ],
         "transformations": [
@@ -1038,17 +1337,19 @@
                 "Value #C": "内存",
                 "Value #D": "CPU %",
                 "Value #E": "CPU 秒",
-                "Value #F": "耗时"
+                "Value #F": "耗时",
+                "Value #G": "带宽"
               },
               "indexByName": {
                 "任务": 0,
                 "Worker": 1,
                 "Provider": 2,
                 "状态": 3,
-                "内存": 4,
-                "CPU %": 5,
-                "CPU 秒": 6,
-                "耗时": 7
+                "带宽": 4,
+                "内存": 5,
+                "CPU %": 6,
+                "CPU 秒": 7,
+                "耗时": 8
               }
             }
           },
@@ -1061,6 +1362,7 @@
                   "Worker",
                   "状态",
                   "Provider",
+                  "带宽",
                   "内存",
                   "CPU %",
                   "CPU 秒",
@@ -1230,6 +1532,22 @@
                   "value": 1
                 }
               ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "带宽"
+              },
+              "properties": [
+                {
+                  "id": "unit",
+                  "value": "Bps"
+                },
+                {
+                  "id": "decimals",
+                  "value": 1
+                }
+              ]
             }
           ]
         }
@@ -1240,7 +1558,7 @@
         "title": "当前失败 / 丢失 / 重试 / 取消",
         "gridPos": {
           "x": 14,
-          "y": 8,
+          "y": 39,
           "w": 10,
           "h": 11
         },
@@ -1507,7 +1825,7 @@
         "title": "任务明细",
         "gridPos": {
           "x": 0,
-          "y": 19,
+          "y": 50,
           "w": 24,
           "h": 1
         },
@@ -1517,10 +1835,10 @@
       {
         "id": 50,
         "type": "table",
-        "title": "全部任务（状态 / Provider / 大小 / 内存 / CPU / 耗时）",
+        "title": "全部任务（状态 / Provider / 大小 / 带宽 / 内存 / CPU / 耗时）",
         "gridPos": {
           "x": 0,
-          "y": 20,
+          "y": 51,
           "w": 24,
           "h": 16
         },
@@ -1645,6 +1963,19 @@
             "format": "table",
             "exemplar": false,
             "hide": false
+          },
+          {
+            "refId": "J",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ae4bld7vas268d"
+            },
+            "expr": "max by (exported_job) (last_over_time(synora_job_bandwidth_bytes{exported_job=~\"$job_name\"}[15m]))",
+            "instant": true,
+            "range": false,
+            "exemplar": false,
+            "hide": false,
+            "format": "table"
           }
         ],
         "transformations": [
@@ -1701,7 +2032,8 @@
                 "Value #F": "CPU 秒",
                 "Value #G": "耗时",
                 "Value #H": "上次结束",
-                "Value #I": "上次成功"
+                "Value #I": "上次成功",
+                "Value #J": "带宽"
               },
               "indexByName": {
                 "任务": 0,
@@ -1709,12 +2041,13 @@
                 "状态": 2,
                 "Provider": 3,
                 "仓库大小": 4,
-                "内存": 5,
-                "CPU %": 6,
-                "CPU 秒": 7,
-                "耗时": 8,
-                "上次结束": 9,
-                "上次成功": 10
+                "带宽": 5,
+                "内存": 6,
+                "CPU %": 7,
+                "CPU 秒": 8,
+                "耗时": 9,
+                "上次结束": 10,
+                "上次成功": 11
               }
             }
           },
@@ -1728,6 +2061,7 @@
                   "状态",
                   "Provider",
                   "仓库大小",
+                  "带宽",
                   "内存",
                   "CPU %",
                   "CPU 秒",
@@ -1939,6 +2273,22 @@
                   "value": "dateTimeAsIso"
                 }
               ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "带宽"
+              },
+              "properties": [
+                {
+                  "id": "unit",
+                  "value": "Bps"
+                },
+                {
+                  "id": "decimals",
+                  "value": 1
+                }
+              ]
             }
           ]
         }
@@ -1949,7 +2299,7 @@
         "title": "仓库大小",
         "gridPos": {
           "x": 0,
-          "y": 36,
+          "y": 67,
           "w": 24,
           "h": 1
         },
@@ -1962,7 +2312,7 @@
         "title": "仓库大小",
         "gridPos": {
           "x": 0,
-          "y": 37,
+          "y": 68,
           "w": 16,
           "h": 12
         },
@@ -2207,7 +2557,7 @@
         "title": "24h 失败 / 重试 / 丢失（按任务）",
         "gridPos": {
           "x": 16,
-          "y": 37,
+          "y": 68,
           "w": 8,
           "h": 12
         },
@@ -2392,7 +2742,7 @@
         "title": "资源曲线",
         "gridPos": {
           "x": 0,
-          "y": 49,
+          "y": 80,
           "w": 24,
           "h": 1
         },
@@ -2405,7 +2755,7 @@
         "title": "任务内存",
         "gridPos": {
           "x": 0,
-          "y": 50,
+          "y": 81,
           "w": 12,
           "h": 8
         },
@@ -2459,7 +2809,7 @@
         "title": "任务 CPU %",
         "gridPos": {
           "x": 12,
-          "y": 50,
+          "y": 81,
           "w": 12,
           "h": 8
         },
@@ -2513,7 +2863,7 @@
         "title": "吞吐 / 失败趋势",
         "gridPos": {
           "x": 0,
-          "y": 58,
+          "y": 89,
           "w": 24,
           "h": 1
         },
@@ -2523,11 +2873,11 @@
       {
         "id": 31,
         "type": "timeseries",
-        "title": "传输吞吐",
+        "title": "传输吞吐（完成量）",
         "gridPos": {
           "x": 0,
-          "y": 59,
-          "w": 8,
+          "y": 90,
+          "w": 12,
           "h": 8
         },
         "datasource": {
@@ -2579,9 +2929,9 @@
         "type": "timeseries",
         "title": "最近一次同步耗时",
         "gridPos": {
-          "x": 8,
-          "y": 59,
-          "w": 8,
+          "x": 12,
+          "y": 90,
+          "w": 6,
           "h": 8
         },
         "datasource": {
@@ -2633,9 +2983,9 @@
         "type": "timeseries",
         "title": "失败 / 重试 / 丢失（5m）",
         "gridPos": {
-          "x": 16,
-          "y": 59,
-          "w": 8,
+          "x": 18,
+          "y": 90,
+          "w": 6,
           "h": 8
         },
         "datasource": {
@@ -2712,7 +3062,7 @@
         "title": "Worker",
         "gridPos": {
           "x": 0,
-          "y": 67,
+          "y": 98,
           "w": 24,
           "h": 1
         },
@@ -2725,7 +3075,7 @@
         "title": "Worker 状态 / 占用 / 上限",
         "gridPos": {
           "x": 0,
-          "y": 68,
+          "y": 99,
           "w": 12,
           "h": 8
         },
@@ -2905,7 +3255,7 @@
         "title": "Worker 正在执行 vs 上限",
         "gridPos": {
           "x": 12,
-          "y": 68,
+          "y": 99,
           "w": 12,
           "h": 8
         },
@@ -2969,6 +3319,7 @@
     "annotations": {
       "list": []
     },
-    "links": []
+    "links": [],
+    "version": 34
   }
 }

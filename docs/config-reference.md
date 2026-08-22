@@ -110,11 +110,11 @@
 
 ### script provider
 
-Worker 上始终在 `synora-scripts` 容器内执行（`[worker] scripts_image`，默认 `synora-scripts:latest`）。配置仍是 `provider = "script"`。脚本读 `SYNORA_JOB` / `SYNORA_UPSTREAM` / `SYNORA_STORAGE`。
+Worker 上始终在 `synora-scripts` 容器内执行（`[worker] scripts_image`，默认 `synora-scripts:latest`）。配置仍是 `provider = "script"`。脚本读 `SYNORA_JOB` / `SYNORA_UPSTREAM` / `SYNORA_STORAGE` / `SYNORA_API`。需要固定镜像 argv 的任务（如 `github-release`、`rubygems`）改用 `provider = "docker"` + `docker_command`。
 
 | 配置项 | 类型 | 说明 |
 |---|---|---|
-| `command` | `string` | 脚本/命令路径。注入 `SYNORA_JOB/UPSTREAM/STORAGE/RUN_ID` + 兼容 `TUNASYNC_MIRROR_NAME/UPSTREAM_URL/WORKING_DIR`；输出 `SYNORA_SIZE=123`（字节）、`SYNORA_STATUS=success`、`SYNORA_MESSAGE=…` |
+| `command` | `string` | 脚本/命令路径。注入 `SYNORA_JOB/UPSTREAM/STORAGE/LOG_DIR/RUN_ID/API`；输出 `SYNORA_SIZE=123`（字节）、`SYNORA_STATUS=success`、`SYNORA_MESSAGE=…` |
 
 ### docker provider
 
@@ -141,7 +141,7 @@ Worker 上始终与 script 共用 `synora-scripts` 容器。配置仍是 `provid
 |---|---|---|
 | `parser` | `"nginx"`/`"apache"`/`"caddy"`/`"s3"`/`"directory-listing"`/`"fallback"` | 目录列表解析器 |
 | `delete` | `bool` | 上游消失的本地文件是否删除 |
-| `threads` | `int` | 下载并发数（tunasync `TUNASYNC_TSUMUGU_THREADS`；默认 8，0 视为 1） |
+| `threads` | `int` | 下载并发数（tunasync `TUNASYNC_TSUMUGU_THREADS`；默认 5，0 视为 1） |
 
 行为：按大小+时间判断是否下载、**单文件失败/超时跳过不退出**、**本地软链接不覆盖不写穿**
 （tsumugu 语义：同步时忽略软链接）、fancyindex `@` 后缀标记的软链接条目镜像为本地软链接

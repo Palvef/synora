@@ -106,14 +106,33 @@ pub struct JobResourceSample {
     pub memory_bytes: Option<u64>,
     pub cpu_seconds: Option<f64>,
     pub cpu_percent: Option<f64>,
+    #[serde(default)]
+    pub bandwidth_bytes: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HeartbeatResponse {
     pub assignment: Option<RunAssignment>,
+    /// Additional queued runs the worker may claim in this beat, up to free
+    /// slots. Older workers ignore this and still use `assignment`.
+    #[serde(default)]
+    pub assignments: Vec<RunAssignment>,
     /// Manager asks the worker to cancel this running run.
     pub cancel_run: Option<String>,
     pub offline_grace_secs: u64,
+}
+
+impl HeartbeatResponse {
+    /// Assignments offered this beat, de-duplicated, `assignment` first.
+    pub fn offered_assignments(self) -> Vec<RunAssignment> {
+        let mut out = self.assignments;
+        if let Some(first) = self.assignment {
+            if !out.iter().any(|a| a.run_id == first.run_id) {
+                out.insert(0, first);
+            }
+        }
+        out
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

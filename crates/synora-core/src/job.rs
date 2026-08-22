@@ -158,7 +158,7 @@ pub enum ProviderConfig {
         #[serde(default)]
         delete: bool,
         /// Max concurrent downloads (tunasync `TUNASYNC_TSUMUGU_THREADS`);
-        /// `None` = the httpfetch default (8). `0` is clamped to 1.
+        /// `None` = the httpfetch default (5). `0` is clamped to 1.
         #[serde(default)]
         threads: Option<u32>,
     },

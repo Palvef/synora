@@ -191,24 +191,39 @@ async fn tunasync_json(State(state): State<AppState>) -> axum::Json<serde_json::
         entries
             .into_iter()
             .map(|e| {
+                let size = e
+                    .get("size_bytes")
+                    .and_then(json_u64)
+                    .map(synora_core::tunasync_size)
+                    .unwrap_or_default();
                 serde_json::json!({
                     "name": e.get("name"),
-                    "status": e.get("status"),
-                    "upstream": e.get("upstream"),
-                    "size": e.get("size_human"),
-                    "last_started_ts": e.get("last_started"),
-                    "last_started": e.get("last_started_human"),
-                    "last_ended_ts": e.get("last_finished"),
-                    "last_ended": e.get("last_finished_human"),
-                    "last_update_ts": e.get("last_finished"),
-                    "last_update": e.get("last_finished_human"),
-                    "next_schedule_ts": e.get("next_run"),
-                    "next_schedule": e.get("next_run_human"),
                     "is_master": true,
+                    "status": e.get("status"),
+                    "last_update": e.get("last_finished").and_then(json_i64).map(fmt_tunasync),
+                    "last_update_ts": e.get("last_finished"),
+                    "last_started": e.get("last_started").and_then(json_i64).map(fmt_tunasync),
+                    "last_started_ts": e.get("last_started"),
+                    "last_ended": e.get("last_finished").and_then(json_i64).map(fmt_tunasync),
+                    "last_ended_ts": e.get("last_finished"),
+                    "next_schedule": e.get("next_run").and_then(json_i64).map(fmt_tunasync),
+                    "next_schedule_ts": e.get("next_run"),
+                    "upstream": e.get("upstream"),
+                    "size": size,
                 })
             })
             .collect(),
     ))
+}
+
+fn json_i64(v: &serde_json::Value) -> Option<i64> {
+    v.as_i64()
+        .or_else(|| v.as_u64().and_then(|n| i64::try_from(n).ok()))
+}
+
+fn json_u64(v: &serde_json::Value) -> Option<u64> {
+    v.as_u64()
+        .or_else(|| v.as_i64().and_then(|n| u64::try_from(n).ok()))
 }
 
 /// Strip userinfo from a URL (rsync/git upstreams embed credentials).
@@ -275,17 +290,61 @@ async fn status_entries(state: &AppState) -> Vec<serde_json::Value> {
     out
 }
 
+fn local_datetime(ts: i64) -> Option<time::OffsetDateTime> {
+    time::OffsetDateTime::from_unix_timestamp(ts).ok().map(|t| {
+        t.to_offset(time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC))
+    })
+}
+
 fn fmt_local(ts: i64) -> String {
-    time::OffsetDateTime::from_unix_timestamp(ts)
-        .map(|t| {
-            t.to_offset(time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC))
-        })
-        .ok()
+    local_datetime(ts)
         .and_then(|t| {
             t.format(&time::format_description::well_known::Rfc3339)
                 .ok()
         })
         .unwrap_or_else(|| "-".into())
+}
+
+/// tunasync.json timestamps: `2026-08-22 07:13:00 +0800`.
+fn fmt_tunasync(ts: i64) -> String {
+    const FMT: &[time::format_description::FormatItem<'_>] = time::macros::format_description!(
+        "[year]-[month]-[day] [hour]:[minute]:[second] [offset_hour sign:mandatory padding:zero][offset_minute]"
+    );
+    local_datetime(ts)
+        .and_then(|t| t.format(&FMT).ok())
+        .unwrap_or_else(|| "-".into())
+}
+
+fn proxy_env_for(state: &AppState, job: &synora_core::job::JobSpec) -> Vec<(String, String)> {
+    state
+        .engine
+        .netroute
+        .read()
+        .ok()
+        .and_then(|g| {
+            g.as_ref().map(|nr| {
+                let sel = nr.select_proxy(job.proxy.as_deref());
+                let cfg = match &sel {
+                    netroute::Selection::Forward { name, .. } => nr.proxy_configs().get(name),
+                    _ => None,
+                };
+                netroute::dispatch_proxy_env(cfg, &sel)
+            })
+        })
+        .unwrap_or_default()
+}
+
+fn run_assignment(
+    state: &AppState,
+    run_id: String,
+    job: synora_core::job::JobSpec,
+) -> RunAssignment {
+    let proxy_env = proxy_env_for(state, &job);
+    RunAssignment {
+        run_id,
+        job,
+        proxy_env,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -513,6 +572,16 @@ async fn heartbeat(
                 pct,
             );
         }
+        if let Some(bps) = sample.bandwidth_bytes {
+            if bps.is_finite() && (0.0..=20_000_000_000.0).contains(&bps) {
+                state.engine.metrics.set_job_gauge(
+                    "synora_job_bandwidth_bytes",
+                    &sample.job,
+                    &[("job", sample.job.as_str()), ("worker", worker_id.as_str())],
+                    bps,
+                );
+            }
+        }
     }
     apply_repository_sizes(&state, &body.repository_sizes).await;
     if !body.active_jobs.is_empty() {
@@ -529,39 +598,22 @@ async fn heartbeat(
 
     let mut response = HeartbeatResponse {
         assignment: None,
+        assignments: Vec::new(),
         cancel_run: None,
         offline_grace_secs: 45,
     };
-    // Offer one queued run assigned to this worker.
+    // Offer enough queued runs to fill free slots in one beat (old workers
+    // still claim `assignment` only).
     if let Ok(runs) = state.engine.store.assigned_runs(&worker_id).await {
-        if let Some(run) = runs.first() {
-            if let Some(job) = state.engine.job(&run.job_id) {
-                // The manager resolves the proxy here and ships the concrete
-                // settings with the assignment (worker never re-resolves).
-                let proxy_env = state
-                    .engine
-                    .netroute
-                    .read()
-                    .ok()
-                    .and_then(|g| {
-                        g.as_ref().map(|nr| {
-                            let sel = nr.select_proxy(job.proxy.as_deref());
-                            let cfg = match &sel {
-                                netroute::Selection::Forward { name, .. } => {
-                                    nr.proxy_configs().get(name)
-                                }
-                                _ => None,
-                            };
-                            netroute::dispatch_proxy_env(cfg, &sel)
-                        })
-                    })
-                    .unwrap_or_default();
-                response.assignment = Some(RunAssignment {
-                    run_id: run.id.clone(),
-                    job,
-                    proxy_env,
-                });
+        for run in runs.into_iter().take(32) {
+            let Some(job) = state.engine.job(&run.job_id) else {
+                continue;
+            };
+            let offered = run_assignment(&state, run.id.clone(), job);
+            if response.assignment.is_none() {
+                response.assignment = Some(offered.clone());
             }
+            response.assignments.push(offered);
         }
     }
     // Ask the worker to cancel any CANCELLING runs it holds.
@@ -617,22 +669,7 @@ async fn claim(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
     let job = state.engine.job(&run.job_id).ok_or(StatusCode::NOT_FOUND)?;
-    let proxy_env = state
-        .engine
-        .netroute
-        .read()
-        .ok()
-        .and_then(|g| {
-            g.as_ref().map(|nr| {
-                let sel = nr.select_proxy(job.proxy.as_deref());
-                let cfg = match &sel {
-                    netroute::Selection::Forward { name, .. } => nr.proxy_configs().get(name),
-                    _ => None,
-                };
-                netroute::dispatch_proxy_env(cfg, &sel)
-            })
-        })
-        .unwrap_or_default();
+    let proxy_env = proxy_env_for(&state, &job);
     state
         .engine
         .metrics
@@ -852,6 +889,14 @@ async fn complete(
             cpu,
         );
     }
+    state.engine.metrics.set_gauge(
+        "synora_job_bandwidth_bytes",
+        &[
+            ("job", job.name.as_str()),
+            ("worker", worker_label.as_str()),
+        ],
+        0.0,
+    );
     state.engine.metrics.set_job_gauge(
         "synora_job_status",
         &job.name,

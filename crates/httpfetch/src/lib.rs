@@ -22,7 +22,7 @@ const MAX_DEPTH: u32 = 16;
 /// Default max concurrent downloads during [`Fetcher::execute`]; override
 /// per fetcher via [`Fetcher::with_threads`] (tunasync
 /// `TUNASYNC_TSUMUGU_THREADS`).
-pub const DEFAULT_THREADS: usize = 8;
+pub const DEFAULT_THREADS: usize = 5;
 /// Per-request timeout (listings and downloads alike); a timed-out file is
 /// skipped like any other single-file failure.
 const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -85,8 +85,10 @@ pub struct FetchStats {
     /// pointed at the right target).
     pub files_symlinked: u32,
     /// Files skipped after a per-file failure (download error, timeout,
-    /// failed delete) — a single bad file never aborts a sync.
+    /// failed delete). Download failures also increment `files_failed`.
     pub files_skipped: u32,
+    /// Download errors. The HTTP provider fails the run when this is > 0.
+    pub files_failed: u32,
     /// Sum of remote sizes of every regular file in the listing (the
     /// repository size), whether or not it needs downloading. `None` when
     /// any remote file's size was unknown.
@@ -118,6 +120,7 @@ pub struct Plan {
 pub struct Fetcher {
     client: reqwest::Client,
     threads: usize,
+    byte_counter: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
 
 impl Fetcher {
@@ -144,6 +147,7 @@ impl Fetcher {
         Ok(Self {
             client: builder.build()?,
             threads: DEFAULT_THREADS,
+            byte_counter: None,
         })
     }
 
@@ -151,6 +155,15 @@ impl Fetcher {
     /// `0` is clamped to 1 — a zero-permit semaphore would deadlock.
     pub fn with_threads(mut self, threads: usize) -> Self {
         self.threads = threads.max(1);
+        self
+    }
+
+    /// Live downloaded-byte counter for the worker bandwidth sampler.
+    pub fn with_byte_counter(
+        mut self,
+        counter: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    ) -> Self {
+        self.byte_counter = Some(counter);
         self
     }
 
@@ -309,15 +322,20 @@ impl Fetcher {
                     stats
                         .log_lines
                         .push(format!("downloaded {url} ({bytes} bytes)"));
+                    if let Some(counter) = &self.byte_counter {
+                        counter.store(stats.downloaded_bytes, std::sync::atomic::Ordering::Relaxed);
+                    }
                 }
                 Ok(Err((FetchError::Cancelled, _))) => cancelled = true,
                 Ok(Err((e, url))) => {
                     stats.files_skipped += 1;
+                    stats.files_failed += 1;
                     stats.log_lines.push(format!("skipped {url}: {e}"));
                 }
                 Err(_) => {
                     tracing::warn!("download task panicked");
                     stats.files_skipped += 1;
+                    stats.files_failed += 1;
                 }
             }
             if stats.log_lines.len() > 256 {
@@ -1237,7 +1255,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(stats.files_downloaded, 2);
-        // Default stays 8.
+        // Default stays DEFAULT_THREADS.
         assert_eq!(Fetcher::new().unwrap().threads, DEFAULT_THREADS);
     }
 

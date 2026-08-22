@@ -1,0 +1,17 @@
+# RubyGems mirror: explicit docker so the worker records provider=docker
+# and uses the synora-scripts image argv.
+[[jobs]]
+name = "rubygems"
+enabled = true
+
+schedule = "interval"
+every = "60m"
+
+provider = "docker"
+image = "synora-scripts:latest"
+docker_command = ["/usr/lib/synora/scripts/rubygems.sh"]
+upstream = "https://rubygems.org"
+proxy = "cf-warp"
+env = ["INIT=0"]
+storage = "/srv/mirror/rubygems"
+memory_limit = "4G"

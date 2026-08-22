@@ -122,6 +122,7 @@ async fn main() -> Result<(), String> {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0);
+            let _ = reaper_engine.store.drop_superseded_runs().await;
             let _ = reaper_engine.store.reconcile_stale_job_status().await;
             if let Ok(expired) = reaper_engine.store.expired_runs(now).await {
                 for run in expired {
@@ -214,7 +215,7 @@ async fn main() -> Result<(), String> {
                     );
                 }
             }
-            if let Ok(queued) = reaper_engine.store.count_runs_with_status("QUEUED").await {
+            if let Ok(queued) = reaper_engine.store.count_waiting_runs().await {
                 reaper_engine
                     .metrics
                     .set_gauge("synora_runs_queued", &[], queued as f64);

@@ -31,9 +31,20 @@ permissions = ["runs.manage", "jobs.read"]
 kind = "zfs"
 mountpoint = "/datas"
 pool = "datas"
-dataset = "mirror"
+# Leave dataset empty when the pool root is the mount (production HDD is `datas` → /datas).
+# Set dataset = "mirror" only if a child dataset actually exists.
+dataset = ""
 zfs_options = "-o recordsize=1M -o xattr=off -o atime=off -o setuid=off -o exec=off -o devices=off -o sync=disabled -o secondarycache=metadata -o redundant_metadata=most"
 auto_create = true
+
+# NVMe/web node uses a different storage name so jobs cannot land on the
+# ZFS worker's `/datas` pool by accident. Pin those jobs with
+# `storage_name = "nvme"` and `worker = "worker-nvme"`.
+[storage.nvme]
+kind = "zfs"
+mountpoint = "/data"
+pool = "data"
+auto_create = false
 
 # 代理：CF One / WARP 本地出口（TUI 里 w 键自动注册同一段）
 [proxy.cf-warp]

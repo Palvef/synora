@@ -796,9 +796,24 @@ fn parse_zfs_options(v: Option<&toml::Value>) -> Option<Vec<(String, String)>> {
         ),
         Some(toml::Value::String(s)) => {
             let mut out = Vec::new();
+            let mut pending_dash_o = false;
             for tok in s.split_whitespace() {
-                let rest = tok.strip_prefix("-o").unwrap_or(tok);
-                let (k, v) = rest.split_once('=')?;
+                if tok == "-o" {
+                    pending_dash_o = true;
+                    continue;
+                }
+                let rest = if pending_dash_o {
+                    pending_dash_o = false;
+                    tok
+                } else {
+                    tok.strip_prefix("-o").unwrap_or(tok)
+                };
+                let Some((k, v)) = rest.split_once('=') else {
+                    continue;
+                };
+                if k.is_empty() {
+                    continue;
+                }
                 out.push((k.to_string(), v.to_string()));
             }
             Some(out)
@@ -1005,7 +1020,13 @@ fn parse_storage(root: &RootDoc) -> Result<HashMap<String, StorageConfig>, Confi
             let t = value.as_table().ok_or_else(|| {
                 ConfigError::new("<config>", 0, format!("[storage.{name}] must be a table"))
             })?;
-            let kind = match t.get("type").and_then(|v| v.as_str()).unwrap_or("dir") {
+            // Docs and production configs use `kind`; accept `type` as an alias.
+            let kind = match t
+                .get("kind")
+                .or_else(|| t.get("type"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("dir")
+            {
                 "dir" => StorageKind::Dir,
                 "zfs" => StorageKind::Zfs {
                     pool: t
