@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+
+# python deps: requests, pyyaml
+# non-python deps: aria2, git
+
+import os
+import pathlib
+import requests
+import shutil
+import subprocess
+import yaml
+
+MIRROR_BASE_URL = os.getenv("MIRROR_BASE_URL", 'https://mirrors.tuna.tsinghua.edu.cn/stackage')
+MIRROR_GITHUB_RELEASE_URL = os.getenv("MIRROR_GITHUB_RELEASE_URL", 'https://mirrors.tuna.tsinghua.edu.cn/github-release')
+
+class StackageSession(object):
+    def __init__(self):
+        self._base_path = pathlib.Path(os.environ['TUNASYNC_WORKING_DIR'])
+
+    def download(self, dir_, url, sha1=None, sha256=None, force=False):
+        dir_path = self._base_path / dir_
+        file_path = dir_path / url.split('/')[-1]
+        if force and file_path.is_file():
+            file_path.unlink()
+        if file_path.is_file():
+            print('{} exists, skipping'.format(file_path), flush=True)
+        else:
+            args = [
+                'aria2c', url, '--dir={}'.format(
+                    dir_path), '--out={}.tmp'.format(url.split('/')[-1]),
+                '--file-allocation=none', '--quiet=true'
+            ]
+            if sha1:
+                args.append('--checksum=sha-1={}'.format(sha1))
+            elif sha256:
+                args.append('--checksum=sha-256={}'.format(sha256))
+            subprocess.run(args, check=True)
+            shutil.move('{}.tmp'.format(file_path), file_path)
+            print('Downloaded {} to {}'.format(url, file_path), flush=True)
+
+    def load_stack_setup(self):
+        d = yaml.load(
+            requests
+                .get('https://raw.githubusercontent.com/commercialhaskell/stackage-content/master/stack/stack-setup-2.yaml')
+                .content,
+            Loader=yaml.FullLoader
+        )
+        for platform in d['ghc']:
+            for ver in d['ghc'][platform]:
+                meta = d['ghc'][platform][ver]
+                checksum_algo = None
+                checksum_value = None
+                if 'sha1' in meta:
+                    checksum_algo = 'sha-1'
+                    checksum_value = meta['sha1']
+                elif 'sha256' in meta:
+                    checksum_algo = 'sha-256'
+                    checksum_value = meta['sha256']
+                else:
+                    print(
+                        'WARNING: no checksum for GHC {}/{} ({}), skipping'
+                        .format(platform, ver, meta.get('url', '?')),
+                        flush=True,
+                    )
+                    continue
+                self.download(
+                    'ghc',
+                    meta['url'],
+                    sha1=checksum_value if checksum_algo == 'sha-1' else None,
+                    sha256=checksum_value if checksum_algo == 'sha-256' else None,
+                )
+                d['ghc'][platform][ver]['url'] = (
+                    '{}/ghc/{}'
+                    .format(MIRROR_BASE_URL, d['ghc'][platform][ver]['url'].split('/')[-1])
+                )
+
+        if 'msys2' in d:
+            if 'windows32' in d['msys2']:
+                d['msys2']['windows32']['url'] = d['msys2']['windows32']['url'].replace(
+                    'https://github.com/fpco/stackage-content/releases/download/',
+                    f'{MIRROR_GITHUB_RELEASE_URL}/commercialhaskell/stackage-content/msys2-')
+            if 'windows64' in d['msys2']:
+                d['msys2']['windows64']['url'] = d['msys2']['windows64']['url'].replace(
+                    'https://github.com/commercialhaskell/stackage-content/releases/download/',
+                    f'{MIRROR_GITHUB_RELEASE_URL}/commercialhaskell/stackage-content/')
+
+        if 'sevenzexe-info' in d:
+            d['sevenzexe-info']['url'] = d['sevenzexe-info']['url'].replace(
+                'https://github.com/commercialhaskell/stackage-content/releases/download/',
+                f'{MIRROR_GITHUB_RELEASE_URL}/commercialhaskell/stackage-content/')
+
+        if 'sevenzdll-info' in d:
+            d['sevenzdll-info']['url'] = d['sevenzdll-info']['url'].replace(
+                'https://github.com/commercialhaskell/stackage-content/releases/download/',
+                f'{MIRROR_GITHUB_RELEASE_URL}/commercialhaskell/stackage-content/')
+
+        for i in ['portable-git', 'stack', 'ghcjs']:
+            del d[i]
+        with open(self._base_path / 'stack-setup.yaml', 'w') as f:
+            yaml.dump(d, f, default_flow_style=False)
+        print('Loaded stack-setup.yaml', flush=True)
+
+    def load_stackage_snapshots(self):
+        for channel in ['lts-haskell', 'stackage-nightly']:
+            if (self._base_path / channel).is_dir():
+                args = ['git', '-C', self._base_path / channel, 'pull']
+            else:
+                args = ['git', '-C', self._base_path, 'clone', '--depth', '1',
+                        'https://github.com/commercialhaskell/{}.git'.format(channel)]
+            subprocess.run(args, check=True)
+            print('Loaded {}'.format(channel), flush=True)
+
+        self.download(
+            '',
+            'https://www.stackage.org/download/snapshots.json',
+            force=True,
+        )
+        print('Loaded snapshots.json', flush=True)
+
+
+def stackage_snapshots_git_sync():
+    base_path = pathlib.Path(os.environ['TUNASYNC_WORKING_DIR'])
+    working_dir = base_path / "stackage-snapshots"
+    if working_dir.is_dir():
+        subprocess.run(
+            ['git', '-C', working_dir.as_posix(), 'pull'], check=True)
+    else:
+        subprocess.run(['git', '-C', base_path.as_posix(), 'clone', '--depth', '1',
+                        'https://github.com/commercialhaskell/stackage-snapshots.git'], check=True)
+
+
+if __name__ == '__main__':
+    s = StackageSession()
+    stackage_snapshots_git_sync()
+    s.load_stackage_snapshots()
+    s.load_stack_setup()

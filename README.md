@@ -29,8 +29,8 @@ authors and maintainers of these projects.
 - **Six providers**: rsync (tunasync-aligned defaults, `success_exit_codes`
   23/24), two-stage-rsync (tunasync two-pass: a fast stage-1 subset by
   profile, then the full sync), script (SYNORA_* + TUNASYNC_* env for tunasync-scripts compatibility,
-  `SYNORA_SIZE=` size reporting), docker (`docker run`, storage mounted at /data,
-  optional in-container command), git (`clone --mirror` + `remote update --prune`),
+  `SYNORA_SIZE=` size reporting; workers run these in `synora-scripts`), docker (`docker run`, storage mounted at /data,
+  optional in-container command), git (`clone --mirror` + `remote update --prune`, same `synora-scripts` image on workers),
   and HTTP directory mirroring (tsumugu-style: per-file failures are skipped,
   local symlinks left alone, listing-marked symlinks mirrored as local links,
   configurable download concurrency, 30 s per-request timeout, unlimited run
@@ -163,6 +163,7 @@ token = "worker-token"
 labels = ["g1", "zfs"]
 ca_cert = "/etc/synora/ca.pem"   # optional, verifies the manager's TLS
 max_concurrency = 8
+scripts_image = "synora-scripts:latest"  # git/script runtime; empty = native
 ```
 
 ## REST API

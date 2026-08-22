@@ -91,6 +91,7 @@ pub async fn execute_run(
         netroute.as_deref(),
         None,
         None,
+        None,
     )
     .await;
 
@@ -112,6 +113,7 @@ pub async fn run_once(
     netroute: Option<&netroute::NetRoute>,
     manager_proxy_env: Option<Vec<(String, String)>>,
     shared_usage: Option<provider::UsageSink>,
+    scripts_image: Option<String>,
 ) -> RunOutcome {
     let started = unix_now();
     // Multi-machine storage layouts: a job referencing a [storage.<name>]
@@ -283,6 +285,7 @@ pub async fn run_once(
             std::sync::Arc::new(std::sync::Mutex::new(provider::ResourceUsage::default()))
         })),
         log_file: Some(log_dir.join(&job.name).join("current.log")),
+        scripts_image,
     };
 
     let provider = match build_provider(job) {
@@ -305,7 +308,17 @@ pub async fn run_once(
     // /proc so HTTP / in-process work still reports CPU and memory.
     if let Some(usage) = ctx.usage.clone() {
         let cancel = cancel.clone();
-        let is_docker = matches!(job.provider, synora_core::ProviderConfig::Docker { .. });
+        let uses_container = matches!(job.provider, synora_core::ProviderConfig::Docker { .. })
+            || (ctx
+                .scripts_image
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|s| !s.is_empty())
+                && matches!(
+                    job.provider,
+                    synora_core::ProviderConfig::Script { .. }
+                        | synora_core::ProviderConfig::Git { .. }
+                ));
         let cname = format!("synora-job-{}", job.name);
         let cg_path = cgroup_scope.as_ref().map(|c| c.path().clone());
         let proc0 = read_proc_stat();
@@ -319,7 +332,7 @@ pub async fn run_once(
                 tokio::select! {
                     _ = cancel.cancelled() => break,
                     _ = ticker.tick() => {
-                        let docker = if is_docker {
+                        let docker = if uses_container {
                             provider::docker::container_stats(&cname).await
                         } else {
                             None
@@ -969,6 +982,7 @@ fn hook_ctx(job: &JobSpec, run_id: &str) -> SyncContext {
         family: job.family.clone(),
         usage: None,
         log_file: None,
+        scripts_image: None,
     }
 }
 

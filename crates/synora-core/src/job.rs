@@ -108,6 +108,9 @@ pub enum ProviderConfig {
     Script {
         /// Path of the script/command to run (spec §16).
         command: String,
+        /// Extra KEY=VALUE environment lines (same as docker `env`).
+        #[serde(default)]
+        env: Vec<String>,
     },
     Docker {
         /// Image to run (spec §18).

@@ -110,6 +110,8 @@
 
 ### script provider
 
+Worker 上默认在 `synora-scripts` 容器内执行（`[worker] scripts_image`）；空字符串则在宿主机直接跑。配置仍是 `provider = "script"`。
+
 | 配置项 | 类型 | 说明 |
 |---|---|---|
 | `command` | `string` | 脚本/命令路径。注入 `SYNORA_JOB/UPSTREAM/STORAGE/RUN_ID` + 兼容 `TUNASYNC_MIRROR_NAME/UPSTREAM_URL/WORKING_DIR`；输出 `SYNORA_SIZE=123`（字节）、`SYNORA_STATUS=success`、`SYNORA_MESSAGE=…` |
@@ -126,6 +128,8 @@
 | `docker_network` | `string` | docker `--network`; `host` 用于绕过 docker0 NAT |
 
 ### git provider
+
+Worker 上默认与 script 共用 `synora-scripts` 容器；空 `scripts_image` 则在宿主机跑 git。配置仍是 `provider = "git"`。
 
 | 配置项 | 类型 | 说明 |
 |---|---|---|
@@ -252,3 +256,4 @@
 | `max_concurrency` | `int` | 最大并发运行数 |
 | `ca_cert` | `string` | 可选：校验 manager TLS 的 CA |
 | `log_dir` | `string` | 日志目录 |
+| `scripts_image` | `string` | git/script 使用的容器镜像，默认 `synora-scripts:latest`；设为空字符串则在宿主机直接执行 |

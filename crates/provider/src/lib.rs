@@ -217,6 +217,8 @@ pub struct SyncContext {
     /// Run log file: providers tee their child's output here as it arrives
     /// (the tool's own output belongs in the run log, live).
     pub log_file: Option<std::path::PathBuf>,
+    /// Image used to run git/script jobs on the worker. None/empty = native.
+    pub scripts_image: Option<String>,
 }
 
 /// Live resource sample shared between a provider, the executor sampler
@@ -377,6 +379,17 @@ fn parse_iec_size(s: &str) -> Option<u64> {
     Some((v * mult).round() as u64)
 }
 
+/// Last `SYNORA_STATUS=` value in provider output.
+pub fn parse_script_status(text: &str) -> Option<String> {
+    let mut last = None;
+    for line in text.lines() {
+        if let Some(rest) = line.trim().strip_prefix("SYNORA_STATUS=") {
+            last = Some(rest.trim().to_string());
+        }
+    }
+    last.filter(|s| !s.is_empty())
+}
+
 /// Phrases tunasync scripts print when the run actually failed, even if the
 /// process later exited 0 (yum-sync.py used to do this).
 pub fn script_reported_failure(text: &str) -> Option<&'static str> {
@@ -402,9 +415,10 @@ pub fn build_provider(job: &JobSpec) -> Result<Provider, ProviderError> {
                 exclude: exclude.clone(),
             }))
         }
-        synora_core::ProviderConfig::Script { command } => {
+        synora_core::ProviderConfig::Script { command, env } => {
             Ok(Provider::Script(script::ScriptProvider {
                 command: command.clone(),
+                env: env.clone(),
             }))
         }
         synora_core::ProviderConfig::Docker {

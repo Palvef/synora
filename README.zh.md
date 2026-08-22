@@ -24,7 +24,7 @@ Synora 是一个用 Rust 编写的**镜像同步引擎**：统一管理「什么
   租约 + 收割器保证**任务永不永久卡死**（LOST → 按 `on_worker_lost` 重派）
 - **六种同步方式**：rsync（参数与 tunasync 一致）、two-stage-rsync（tunasync 两遍同步：
   stage1 子集先发布 + stage2 全量）、script（兼容 `TUNASYNC_*` 环境变量）、
-  docker（tunasync-scripts 镜像直接跑）、git 镜像、HTTP 目录镜像（tsumugu 式）
+  docker、git / script（worker 上默认跑在 `synora-scripts` 容器里）、HTTP 目录镜像（tsumugu 式）
 - **删除/缩小保护**：`max_delete_files` / `max_delete_ratio` / `max_size_drop_ratio`
   同步前后校验，异常直接判失败
 - **存储**：普通目录 / ZFS（dataset 创建参数由配置指定）/ Btrfs；快照 + 保留策略

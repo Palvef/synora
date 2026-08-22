@@ -1519,6 +1519,7 @@ fn resolve_provider(
                 .ok_or_else(|| err("provider = \"script\" requires `command`".into()))?;
             Ok(ProviderConfig::Script {
                 command: command.clone(),
+                env: doc.env.clone(),
             })
         }
         "docker" => {

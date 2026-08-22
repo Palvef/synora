@@ -123,30 +123,29 @@ def render_job(m, log_dir, storage_dir, global_docker_volumes, global_interval):
         if codes:
             lines.append(f"success_exit_codes = {codes}")
     elif provider == "command":
-        if m.get("docker_image"):
-            # TUNA production mode: the command runs INSIDE the tunasync-scripts
-            # image (toolchain + proxies provided by the image env).
-            lines.append('provider = "docker"')
-            lines.append(f"image = {toml_str(m['docker_image'])}")
-            lines.append(f"docker_command = [{toml_str(m.get('command', ''))}]")
+        command = m.get("command", "") or ""
+        command = command.replace("/home/tunasync-scripts/", "/usr/lib/synora/scripts/")
+        env = list(stripped_env)
+        proxy_env = [e for e in env if any(k in e.upper() for k in ("PROXY",))]
+        env = [e for e in env if e not in proxy_env]
+        # Native git jobs: tunasync wrapped git.sh in a container.
+        if command.rstrip().endswith("/git.sh") or command.strip() in (
+            "/usr/lib/synora/scripts/git.sh",
+            "/home/tunasync-scripts/git.sh",
+            "git.sh",
+        ):
+            lines.append('provider = "git"')
             lines.append(f"upstream = {toml_str(m.get('upstream', ''))}")
-            env = list(stripped_env)
-            # Fixed proxy envs migrate to the worker docker-bridge HTTP proxy.
-            proxy_env = [e for e in env if any(k in e.upper() for k in ("PROXY",))]
-            if proxy_env:
-                lines.append('proxy = "cf-warp"')
-            env = [e for e in env if e not in proxy_env]
-            if env:
-                lines.append(f"env = {toml_list(env)}")
-            volumes = global_docker_volumes + parse_list(m.get("docker_volumes"))
-            if volumes:
-                lines.append(f"volumes = {toml_list(volumes)}")
         else:
             lines.append('provider = "script"')
-            lines.append(f"command = {toml_str(m.get('command', ''))}")
+            lines.append(f"command = {toml_str(command)}")
             lines.append(f"upstream = {toml_str(m.get('upstream', ''))}")
+            if env:
+                lines.append(f"env = {toml_list(env)}")
             if m.get("fail_on_match"):
                 lines.append(f"fail_on_match = {toml_str(m['fail_on_match'])}")
+        if proxy_env:
+            lines.append('proxy = "cf-warp"')
     elif provider == "two-stage-rsync":
         # Native two-stage rsync (stage 1 subset profile, stage 2 full sync).
         lines.append('provider = "two-stage-rsync"')

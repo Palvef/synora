@@ -38,6 +38,9 @@ struct WorkerConfig {
     #[serde(default = "default_log_dir")]
     log_dir: String,
     ca_cert: Option<String>,
+    /// Image used to run git/script jobs. Empty disables containerization.
+    #[serde(default = "default_scripts_image")]
+    scripts_image: String,
 }
 
 fn default_max_concurrency() -> u32 {
@@ -45,6 +48,9 @@ fn default_max_concurrency() -> u32 {
 }
 fn default_log_dir() -> String {
     "/var/log/synora".into()
+}
+fn default_scripts_image() -> String {
+    "synora-scripts:latest".into()
 }
 
 struct Running {
@@ -162,10 +168,15 @@ async fn main() -> Result<(), String> {
 
     let worker_id = register.worker_id;
     tracing::info!(
-        "registered as `{worker_id}` on {} (labels: {:?}, max_concurrency: {})",
+        "registered as `{worker_id}` on {} (labels: {:?}, max_concurrency: {}, scripts_image: {})",
         worker_cfg.manager,
         worker_cfg.labels,
-        worker_cfg.max_concurrency
+        worker_cfg.max_concurrency,
+        if worker_cfg.scripts_image.trim().is_empty() {
+            "(native)"
+        } else {
+            worker_cfg.scripts_image.trim()
+        }
     );
 
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -320,6 +331,12 @@ async fn main() -> Result<(), String> {
                         let client = client.clone();
                         let running = running.clone();
                         let log_dir = PathBuf::from(&worker_cfg.log_dir);
+                        let scripts_image = worker_cfg.scripts_image.trim().to_string();
+                        let scripts_image = if scripts_image.is_empty() {
+                            None
+                        } else {
+                            Some(scripts_image)
+                        };
                         let worker_id = worker_id.clone();
                         let cancel = CancellationToken::new();
                         let run_storage = run_storage.clone();
@@ -348,6 +365,7 @@ async fn main() -> Result<(), String> {
                                 netroute.as_deref(),
                                 Some(a.proxy_env),
                                 Some(usage),
+                                scripts_image,
                             )
                             .await;
                             let req = outcome_to_complete(

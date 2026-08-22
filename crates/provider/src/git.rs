@@ -68,6 +68,105 @@ pub struct GitProvider {
     pub branch: Option<String>,
 }
 
+async fn git_output(args: &[&str]) -> Option<String> {
+    let out = tokio::process::Command::new("git")
+        .args(args)
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// `git count-objects -v` size-pack is KiB of packed objects.
+async fn repo_size_bytes(dest: &str) -> Option<u64> {
+    let text = git_output(&["-C", dest, "count-objects", "-v"]).await?;
+    let mut packed = 0u64;
+    let mut loose = 0u64;
+    for line in text.lines() {
+        if let Some(v) = line.strip_prefix("size-pack: ") {
+            packed = v.trim().parse().ok()?;
+        } else if let Some(v) = line.strip_prefix("size: ") {
+            loose = v.trim().parse().unwrap_or(0);
+        }
+    }
+    Some((packed + loose).saturating_mul(1024))
+}
+
+/// Match tunasync git.sh: repack when there are many loose objects.
+async fn maybe_repack(dest: &str) {
+    let Some(text) = git_output(&["-C", dest, "count-objects", "-v"]).await else {
+        return;
+    };
+    let loose = text
+        .lines()
+        .find_map(|l| l.strip_prefix("count: "))
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    if loose <= 50 {
+        return;
+    }
+    tracing::info!("git {dest}: {loose} loose objects, repacking");
+    let _ = tokio::process::Command::new("git")
+        .args(["-C", dest, "repack", "-a", "-b", "-d"])
+        .status()
+        .await;
+}
+
+async fn refresh_head(dest: &str) {
+    let Some(text) = git_output(&["-C", dest, "remote", "show", "origin"]).await else {
+        return;
+    };
+    let head = text.lines().find_map(|l| {
+        l.trim()
+            .strip_prefix("HEAD branch:")
+            .map(|s| s.trim().to_string())
+    });
+    let Some(head) = head.filter(|s| !s.is_empty() && s != "(unknown)") else {
+        return;
+    };
+    let _ = tokio::fs::write(format!("{dest}/HEAD"), format!("ref: refs/heads/{head}\n")).await;
+}
+
+pub(crate) fn git_container_args(
+    branch: Option<&str>,
+    is_repo: bool,
+    url: &str,
+    dest: &str,
+) -> Vec<String> {
+    match (branch, is_repo) {
+        (Some(branch), false) => vec![
+            "git".into(),
+            "clone".into(),
+            "--single-branch".into(),
+            "--branch".into(),
+            branch.to_string(),
+            url.to_string(),
+            dest.to_string(),
+        ],
+        (None, false) => vec![
+            "git".into(),
+            "clone".into(),
+            "--mirror".into(),
+            url.to_string(),
+            dest.to_string(),
+        ],
+        (Some(_branch), true) => crate::docker::docker_exec_args(&[
+            r#"git -C "$DEST" fetch origin "$BRANCH" && git -C "$DEST" reset --hard "origin/$BRANCH""#.into(),
+        ]),
+        (None, true) => vec![
+            "git".into(),
+            "-C".into(),
+            dest.to_string(),
+            "remote".into(),
+            "update".into(),
+            "--prune".into(),
+        ],
+    }
+}
+
 impl GitProvider {
     pub async fn sync(&self, ctx: &SyncContext) -> Result<SyncResult, ProviderError> {
         let url = ctx.upstream.as_deref().ok_or_else(|| {
@@ -83,6 +182,43 @@ impl GitProvider {
         let is_repo = prepare_existing_repo(dest).await;
         if !is_repo {
             quarantine_invalid_dest(dest).await?;
+        }
+
+        if let Some(image) = crate::docker::scripts_image_name(ctx.scripts_image.as_deref()) {
+            let mut extra_env = Vec::new();
+            if let Some(branch) = &self.branch {
+                extra_env.push(format!("DEST={dest}"));
+                extra_env.push(format!("BRANCH={branch}"));
+            }
+            let result = crate::docker::run_named_container(
+                crate::docker::DockerRunSpec {
+                    image: image.to_string(),
+                    command: git_container_args(self.branch.as_deref(), is_repo, url, dest),
+                    extra_env,
+                    extra_volumes: Vec::new(),
+                    keep_container: false,
+                    network: None,
+                },
+                ctx,
+            )
+            .await?;
+            if self.branch.is_none() {
+                refresh_head(dest).await;
+                maybe_repack(dest).await;
+            }
+            let size_hint = match result.size_hint {
+                Some(s) => Some(s),
+                None => repo_size_bytes(dest).await,
+            };
+            return Ok(SyncResult {
+                size_hint,
+                message: Some(if is_repo {
+                    "repository updated".into()
+                } else {
+                    "repository cloned".into()
+                }),
+                ..result
+            });
         }
 
         let mut cmd = Command::new("git");
@@ -181,10 +317,16 @@ impl GitProvider {
                 )));
             }
         }
+        if self.branch.is_none() {
+            refresh_head(dest).await;
+            maybe_repack(dest).await;
+        }
+        let size_hint = repo_size_bytes(dest).await;
         Ok(SyncResult {
             exit_code: Some(0),
             stdout,
             stderr,
+            size_hint,
             message: Some(if is_repo {
                 "repository updated".into()
             } else {
@@ -192,5 +334,53 @@ impl GitProvider {
             }),
             ..Default::default()
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mirror_update_stays_argv() {
+        let args = git_container_args(None, true, "https://example.com/repo.git", "/data/repo.git");
+        assert_eq!(
+            args,
+            vec!["git", "-C", "/data/repo.git", "remote", "update", "--prune"]
+        );
+    }
+
+    #[test]
+    fn branch_update_uses_shell_and_env_placeholders() {
+        let args = git_container_args(
+            Some("main"),
+            true,
+            "https://example.com/repo.git",
+            "/data/repo",
+        );
+        assert_eq!(args[0], "/bin/sh");
+        assert_eq!(args[1], "-c");
+        assert!(args[2].contains("fetch origin"));
+        assert!(args[2].contains("reset --hard"));
+    }
+
+    #[test]
+    fn fresh_mirror_clone_is_argv() {
+        let args = git_container_args(
+            None,
+            false,
+            "https://example.com/repo.git",
+            "/data/repo.git",
+        );
+        assert_eq!(
+            args,
+            vec![
+                "git",
+                "clone",
+                "--mirror",
+                "https://example.com/repo.git",
+                "/data/repo.git"
+            ]
+        );
     }
 }

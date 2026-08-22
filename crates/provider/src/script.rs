@@ -13,6 +13,7 @@ use crate::{cancelled_after_wait, kill_group, spawn_group};
 
 pub struct ScriptProvider {
     pub command: String,
+    pub env: Vec<String>,
 }
 
 /// Machine-readable lines parsed from provider output (spec §16).
@@ -45,6 +46,20 @@ fn parse_output(stdout: &[u8]) -> ParsedOutput {
 
 impl ScriptProvider {
     pub async fn sync(&self, ctx: &SyncContext) -> Result<SyncResult, ProviderError> {
+        if let Some(image) = crate::docker::scripts_image_name(ctx.scripts_image.as_deref()) {
+            return crate::docker::run_named_container(
+                crate::docker::DockerRunSpec {
+                    image: image.to_string(),
+                    command: crate::docker::docker_exec_args(&[self.command.clone()]),
+                    extra_env: self.env.clone(),
+                    extra_volumes: Vec::new(),
+                    keep_container: false,
+                    network: None,
+                },
+                ctx,
+            )
+            .await;
+        }
         // Scripts run through a shell by design (tunasync compatibility:
         // tunasync-scripts are shell scripts). The command string comes from
         // trusted local config only — never from API input. Other providers
@@ -75,11 +90,21 @@ impl ScriptProvider {
         }
         cmd.env("SYNORA_FAMILY", &ctx.family);
         // tunasync-scripts compatibility (alignment decision).
+        cmd.env("PYTHONUNBUFFERED", "1");
         cmd.env("TUNASYNC_MIRROR_NAME", &ctx.job_name);
         if let Some(up) = &ctx.upstream {
             cmd.env("TUNASYNC_UPSTREAM_URL", up);
         }
         cmd.env("TUNASYNC_WORKING_DIR", ctx.storage.display().to_string());
+        cmd.env(
+            "TUNASYNC_LOG_DIR",
+            format!("{}/.synora-log", ctx.storage.display()),
+        );
+        for e in &self.env {
+            if let Some((k, v)) = e.split_once('=') {
+                cmd.env(k, v);
+            }
+        }
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
