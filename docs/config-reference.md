@@ -110,7 +110,7 @@
 
 ### script provider
 
-Worker 上默认在 `synora-scripts` 容器内执行（`[worker] scripts_image`）；空字符串则在宿主机直接跑。配置仍是 `provider = "script"`。
+Worker 上始终在 `synora-scripts` 容器内执行（`[worker] scripts_image`，默认 `synora-scripts:latest`）。配置仍是 `provider = "script"`。脚本读 `SYNORA_JOB` / `SYNORA_UPSTREAM` / `SYNORA_STORAGE`。
 
 | 配置项 | 类型 | 说明 |
 |---|---|---|
@@ -129,7 +129,7 @@ Worker 上默认在 `synora-scripts` 容器内执行（`[worker] scripts_image`�
 
 ### git provider
 
-Worker 上默认与 script 共用 `synora-scripts` 容器；空 `scripts_image` 则在宿主机跑 git。配置仍是 `provider = "git"`。
+Worker 上始终与 script 共用 `synora-scripts` 容器。配置仍是 `provider = "git"`。
 
 | 配置项 | 类型 | 说明 |
 |---|---|---|
@@ -256,4 +256,4 @@ Worker 上默认与 script 共用 `synora-scripts` 容器；空 `scripts_image` 
 | `max_concurrency` | `int` | 最大并发运行数 |
 | `ca_cert` | `string` | 可选：校验 manager TLS 的 CA |
 | `log_dir` | `string` | 日志目录 |
-| `scripts_image` | `string` | git/script 使用的容器镜像，默认 `synora-scripts:latest`；设为空字符串则在宿主机直接执行 |
+| `scripts_image` | `string` | git/script 使用的容器镜像，默认 `synora-scripts:latest` |

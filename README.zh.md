@@ -9,7 +9,7 @@ Synora 是一个用 Rust 编写的**镜像同步引擎**：统一管理「什么
 - **tunasync**：Manager + Worker 架构、rsync 参数约定（`success_exit_codes` 23/24、
   `--safe-links --timeout=120` 等）、脚本环境变量兼容（`TUNASYNC_*`）、
   manager/worker 之间明文或证书加密、`mirror_subdir`、tunasync.json 兼容输出、
-  tunasync-scripts 镜像直接可用
+  感谢 TUNA 的 tunasync / tunasync-scripts
 - **Yuki**：SQLite 存储、`yukictl reload` 式热重载、每仓库 cron 调度
 - **tsumugu**：HTTP 目录镜像的容错语义（单文件失败跳过、忽略软链接、30s 单请求超时）
 
@@ -23,7 +23,7 @@ Synora 是一个用 Rust 编写的**镜像同步引擎**：统一管理「什么
 - **Manager + N Worker**：worker 拉取模型（心跳即领任务，NAT 友好）；
   租约 + 收割器保证**任务永不永久卡死**（LOST → 按 `on_worker_lost` 重派）
 - **六种同步方式**：rsync（参数与 tunasync 一致）、two-stage-rsync（tunasync 两遍同步：
-  stage1 子集先发布 + stage2 全量）、script（兼容 `TUNASYNC_*` 环境变量）、
+  stage1 子集先发布 + stage2 全量）、script / git（worker 上始终在 `synora-scripts` 容器里跑，`SYNORA_*` 环境变量）、
   docker、git / script（worker 上默认跑在 `synora-scripts` 容器里）、HTTP 目录镜像（tsumugu 式）
 - **删除/缩小保护**：`max_delete_files` / `max_delete_ratio` / `max_size_drop_ratio`
   同步前后校验，异常直接判失败

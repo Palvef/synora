@@ -11,15 +11,16 @@ ZFS/Btrfs · Prometheus · TUI
 ## Acknowledgements
 
 Synora builds on the ideas and production experience of
-[tunasync](https://github.com/tuna/tunasync) (TUNA),
+[tunasync](https://github.com/tuna/tunasync) and
+[tunasync-scripts](https://github.com/tuna/tunasync-scripts) (TUNA),
 [Yuki](https://github.com/ustclug/yuki) (USTC LUG), and
 [tsumugu](https://github.com/taoky/tsumugu): tunasync's Manager + Worker
 architecture, rsync argument conventions (success exit codes 23/24,
-`--safe-links --timeout=120`), `TUNASYNC_*` script environment
-compatibility, `mirror_subdir`, tunasync.json-compatible status output and
-its optional-TLS wire mode; Yuki's SQLite storage and `reload` convention;
-tsumugu's fault-tolerant HTTP directory mirroring. Thanks are due to the
-authors and maintainers of these projects.
+`--safe-links --timeout=120`), `mirror_subdir`, tunasync.json-compatible
+status output and its optional-TLS wire mode; Yuki's SQLite storage and
+`reload` convention; tsumugu's fault-tolerant HTTP directory mirroring.
+The scripts in `synora-scripts/` started as tunasync-scripts. Thank you
+to TUNA and to the authors and maintainers of these projects.
 
 ## Features
 
@@ -28,8 +29,7 @@ authors and maintainers of these projects.
   "last run end + interval" (misfire policies: skip / run-immediately / run-next).
 - **Six providers**: rsync (tunasync-aligned defaults, `success_exit_codes`
   23/24), two-stage-rsync (tunasync two-pass: a fast stage-1 subset by
-  profile, then the full sync), script (SYNORA_* + TUNASYNC_* env for tunasync-scripts compatibility,
-  `SYNORA_SIZE=` size reporting; workers run these in `synora-scripts`), docker (`docker run`, storage mounted at /data,
+  profile, then the full sync), script (`SYNORA_*` env, `SYNORA_SIZE=` size reporting; workers always run these in `synora-scripts`), docker (`docker run`, storage mounted at /data,
   optional in-container command), git (`clone --mirror` + `remote update --prune`, same `synora-scripts` image on workers),
   and HTTP directory mirroring (tsumugu-style: per-file failures are skipped,
   local symlinks left alone, listing-marked symlinks mirrored as local links,
@@ -163,7 +163,7 @@ token = "worker-token"
 labels = ["g1", "zfs"]
 ca_cert = "/etc/synora/ca.pem"   # optional, verifies the manager's TLS
 max_concurrency = 8
-scripts_image = "synora-scripts:latest"  # git/script runtime; empty = native
+scripts_image = "synora-scripts:latest"  # git/script runtime (always Docker on workers)
 ```
 
 ## REST API

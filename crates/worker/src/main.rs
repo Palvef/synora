@@ -38,7 +38,7 @@ struct WorkerConfig {
     #[serde(default = "default_log_dir")]
     log_dir: String,
     ca_cert: Option<String>,
-    /// Image used to run git/script jobs. Empty disables containerization.
+    /// Image used to run git/script jobs. Empty falls back to the default.
     #[serde(default = "default_scripts_image")]
     scripts_image: String,
 }
@@ -331,11 +331,13 @@ async fn main() -> Result<(), String> {
                         let client = client.clone();
                         let running = running.clone();
                         let log_dir = PathBuf::from(&worker_cfg.log_dir);
-                        let scripts_image = worker_cfg.scripts_image.trim().to_string();
-                        let scripts_image = if scripts_image.is_empty() {
-                            None
-                        } else {
-                            Some(scripts_image)
+                        let scripts_image = {
+                            let image = worker_cfg.scripts_image.trim();
+                            Some(if image.is_empty() {
+                                default_scripts_image()
+                            } else {
+                                image.to_string()
+                            })
                         };
                         let worker_id = worker_id.clone();
                         let cancel = CancellationToken::new();

@@ -1,9 +1,8 @@
 //! Script provider (spec §16): run a configured command with the SYNORA_*
 //! environment, and parse machine-readable result lines.
 //!
-//! Also injects TUNASYNC_MIRROR_NAME / TUNASYNC_UPSTREAM_URL /
-//! TUNASYNC_WORKING_DIR so existing tunasync-scripts work unchanged
-//! (alignment decision, see plan).
+//! On workers this runs inside `synora-scripts`. Standalone/tests without
+//! `scripts_image` still exec the command on the host.
 
 use crate::{ProviderError, SyncContext, SyncResult};
 use std::process::Stdio;

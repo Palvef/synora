@@ -1,6 +1,7 @@
-# Synora git/script runtime. Job configs stay provider = "git" / "script";
-# the worker runs them with `docker run synora-scripts:latest`.
-# HTTP directory mirrors use the native http provider (former tsumugu).
+# Synora git/script runtime. Scripts come from the repo-root synora-scripts/
+# directory and are installed at /usr/lib/synora/scripts. Job configs stay
+# provider = "git" / "script". HTTP directory mirrors use the native http
+# provider (former tsumugu).
 FROM debian:trixie-slim
 
 # Used only for HTTPS fetches (git clone / gem / pip / repo). Do not set

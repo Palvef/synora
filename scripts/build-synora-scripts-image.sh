@@ -59,7 +59,9 @@ fi
 CTX=$(mktemp -d)
 trap 'rm -rf "$CTX"' EXIT
 mkdir -p "$CTX/scripts"
-cp -a "$ROOT/scripts/mirrors/." "$CTX/scripts/"
+cp -a "$ROOT/synora-scripts/." "$CTX/scripts/"
+# check.sh / README are docs; keep them in the image for operators
+rm -f "$CTX/scripts/check.sh"
 rm -f "$CTX/scripts/rustup-mirror"
 cp -a "$RUSTUP_MIRROR_SRC" "$CTX/rustup-mirror"
 chmod 0755 "$CTX/rustup-mirror"

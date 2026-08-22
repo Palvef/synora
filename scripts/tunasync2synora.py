@@ -10,7 +10,7 @@ Mapping:
                                  success_exit_codes from rsync_success_exit_codes /
                                  success_exit_codes)
   provider "command"          -> provider = "script", command = <command>
-                                 (env vars TUNASYNC_* are injected by Synora at
+                                 (env vars SYNORA_* are injected by Synora at
                                  run time — scripts keep working unchanged)
   interval (minutes)          -> schedule = "interval", every = "<N>m"
                                  (Synora is anchor-based/no-drift, unlike tunasync's
