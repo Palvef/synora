@@ -5,8 +5,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+RuntimeDirectory=synora
+RuntimeDirectoryMode=0755
+PIDFile=/run/synora/manager.pid
 ExecStart=/usr/local/bin/synora-manager -c /etc/synora/synora.toml
-ExecReload=/bin/true
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5
 User=root

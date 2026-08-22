@@ -1566,15 +1566,15 @@ mod tests {
             kind: fwd("socks5h://127.0.0.1:40000"),
             healthcheck: None,
             timeout: 5,
-            expose: Some("172.31.33.205:14000".into()),
+            expose: Some("192.0.2.10:14000".into()),
             expose_auth: None,
         };
         let env = dispatch_proxy_env(Some(&cfg), &sel);
         let map: HashMap<&str, &str> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-        assert_eq!(map.get("ALL_PROXY"), Some(&"http://172.31.33.205:14000"));
-        assert_eq!(map.get("HTTP_PROXY"), Some(&"http://172.31.33.205:14000"));
-        assert_eq!(map.get("http_proxy"), Some(&"http://172.31.33.205:14000"));
-        assert_eq!(map.get("RSYNC_PROXY"), Some(&"172.31.33.205:14000"));
+        assert_eq!(map.get("ALL_PROXY"), Some(&"http://192.0.2.10:14000"));
+        assert_eq!(map.get("HTTP_PROXY"), Some(&"http://192.0.2.10:14000"));
+        assert_eq!(map.get("http_proxy"), Some(&"http://192.0.2.10:14000"));
+        assert_eq!(map.get("RSYNC_PROXY"), Some(&"192.0.2.10:14000"));
         assert!(!map.values().any(|v| v.starts_with("socks")));
     }
 
@@ -1589,27 +1589,27 @@ mod tests {
             kind: fwd("socks5h://127.0.0.1:40000"),
             healthcheck: None,
             timeout: 5,
-            expose: Some("172.31.33.205:14000".into()),
+            expose: Some("192.0.2.10:14000".into()),
             expose_auth: Some("synora:secret".into()),
         };
         let env = dispatch_proxy_env(Some(&cfg), &sel);
         let map: HashMap<&str, &str> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
         assert_eq!(
             map.get("ALL_PROXY"),
-            Some(&"http://synora:secret@172.31.33.205:14000")
+            Some(&"http://synora:secret@192.0.2.10:14000")
         );
-        assert_eq!(map.get("RSYNC_PROXY"), Some(&"172.31.33.205:14000"));
+        assert_eq!(map.get("RSYNC_PROXY"), Some(&"192.0.2.10:14000"));
     }
 
     #[test]
     fn proxy_hostport_strips_scheme_and_userinfo() {
         assert_eq!(
-            proxy_hostport("http://172.31.33.205:14000"),
-            "172.31.33.205:14000"
+            proxy_hostport("http://192.0.2.10:14000"),
+            "192.0.2.10:14000"
         );
         assert_eq!(
-            proxy_hostport("http://synora:pass@172.31.33.205:14000"),
-            "172.31.33.205:14000"
+            proxy_hostport("http://synora:pass@192.0.2.10:14000"),
+            "192.0.2.10:14000"
         );
         assert_eq!(
             proxy_hostport("socks5h://127.0.0.1:40000"),

@@ -80,8 +80,7 @@ enum Command {
     },
     /// Cancel a running job (asks the daemon via a control file)
     Stop { job: String },
-    /// Hot-reload configuration (SIGHUP to the daemon; job/schedule changes
-    /// apply, non-reloadable changes are rejected)
+    /// Hot-reload configuration (manager API, or SIGHUP via /run/synora/*.pid)
     Reload {},
     /// Remove a proxy from the config (writes the change, then reloads)
     ProxyDelete { name: String },
@@ -211,7 +210,7 @@ async fn run(cli: Cli) -> Result<(), String> {
         return cmd_status(config).await;
     }
     if cli.reload {
-        return cmd_reload(config);
+        return cmd_reload(config).await;
     }
     if let Some(job) = cli.run {
         return cmd_run(job, config).await;
@@ -260,7 +259,7 @@ async fn run(cli: Cli) -> Result<(), String> {
         },
         Command::Logs { job, lines } => cmd_logs(job, lines, config)?,
         Command::Stop { job } => cmd_stop(job, config).await?,
-        Command::Reload {} => cmd_reload(config)?,
+        Command::Reload {} => cmd_reload(config).await?,
         Command::ProxyDelete { name } => cmd_delete_proxy(name, config)?,
         Command::Tui { manager, token } => tui::run(config, manager, token)?,
         Command::Snapshot { cmd } => match cmd {
@@ -340,11 +339,10 @@ async fn cmd_start(config: Option<PathBuf>, db: Option<String>) -> Result<(), St
         )
         .init();
 
-    // Pid file: `synora reload` / `synora stop` talk to the daemon.
-    let pid_dir = engine.cfg.daemon.log_dir.clone();
-    std::fs::create_dir_all(&pid_dir).map_err(|e| e.to_string())?;
-    std::fs::write(pid_dir.join("synora.pid"), std::process::id().to_string())
-        .map_err(|e| e.to_string())?;
+    match config::write_pid_file("synora") {
+        Ok(path) => tracing::info!("pid file {}", path.display()),
+        Err(e) => tracing::warn!("{e}"),
+    }
 
     // Metrics endpoint (spec §36).
     let metrics_engine = engine.clone();
@@ -376,7 +374,7 @@ async fn cmd_start(config: Option<PathBuf>, db: Option<String>) -> Result<(), St
     let result = engine.clone().run().await;
     metrics_task.abort();
     signal_task.abort();
-    let _ = std::fs::remove_file(pid_dir.join("synora.pid"));
+    config::remove_pid_file("synora");
     result
 }
 
@@ -756,35 +754,53 @@ async fn cmd_worker_drain(
     Ok(())
 }
 
-/// `synora reload`: SIGHUP the daemon from its pid file.
-fn cmd_reload(config: Option<PathBuf>) -> Result<(), String> {
-    let (cfg, _) = load_config(config, None)?;
-    let pid_path = cfg.daemon.log_dir.join("synora.pid");
-    let pid: i32 = std::fs::read_to_string(&pid_path)
-        .map_err(|e| {
-            format!(
-                "cannot read {}: {e} (is the daemon running?)",
-                pid_path.display()
-            )
-        })?
-        .trim()
-        .parse()
-        .map_err(|e| format!("bad pid file {}: {e}", pid_path.display()))?;
-    #[cfg(unix)]
-    unsafe {
-        libc::kill(pid, libc::SIGHUP);
+/// `synora reload`: ask the manager API first, then SIGHUP a pid in `/run/synora`.
+async fn cmd_reload(config: Option<PathBuf>) -> Result<(), String> {
+    let mut errors = Vec::new();
+    match manager_creds(config.clone(), None, None) {
+        Ok((url, token)) => {
+            let client = api::Client::new(&url, &token).map_err(|e| e.to_string())?;
+            match client.reload().await {
+                Ok(n) => {
+                    println!("reload applied via {url} ({n} job(s))");
+                    return Ok(());
+                }
+                Err(e) => errors.push(format!("manager {url}: {e}")),
+            }
+        }
+        Err(e) => errors.push(e),
     }
-    #[cfg(not(unix))]
-    {
-        // Windows: no SIGHUP; reload through the API instead.
-        let (url, token) = manager_creds(None, None, None)?;
-        let client = api::Client::new(&url, &token).map_err(|e| e.to_string())?;
-        tokio::runtime::Handle::current()
-            .block_on(client.reload())
-            .map_err(|e| e.to_string())?;
+    match sighup_runtime_pid() {
+        Ok(pid) => {
+            println!("reload requested for pid {pid}; it will be validated and applied");
+            Ok(())
+        }
+        Err(e) => {
+            errors.push(e);
+            Err(errors.join("; "))
+        }
     }
-    println!("reload requested for pid {pid}; it will be validated and applied");
-    Ok(())
+}
+
+fn sighup_runtime_pid() -> Result<i32, String> {
+    let mut last = "no pid file in /run/synora".to_string();
+    for name in ["manager", "synora"] {
+        match config::read_pid_file(name) {
+            Ok(pid) => {
+                #[cfg(unix)]
+                unsafe {
+                    libc::kill(pid, libc::SIGHUP);
+                }
+                #[cfg(not(unix))]
+                {
+                    return Err("SIGHUP is not available; use the manager API".into());
+                }
+                return Ok(pid);
+            }
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
 }
 
 fn format_ts(ts: i64) -> String {

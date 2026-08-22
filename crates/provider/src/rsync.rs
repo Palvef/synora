@@ -507,12 +507,12 @@ mod tests {
     #[test]
     fn rsync_proxy_hostport_strips_scheme_and_userinfo() {
         assert_eq!(
-            rsync_proxy_hostport("http://172.31.33.205:14000"),
-            "172.31.33.205:14000"
+            rsync_proxy_hostport("http://192.0.2.10:14000"),
+            "192.0.2.10:14000"
         );
         assert_eq!(
-            rsync_proxy_hostport("http://synora:pass@172.31.33.205:14000"),
-            "172.31.33.205:14000"
+            rsync_proxy_hostport("http://synora:pass@192.0.2.10:14000"),
+            "192.0.2.10:14000"
         );
         assert_eq!(rsync_proxy_hostport("172.17.0.1:5354"), "172.17.0.1:5354");
     }

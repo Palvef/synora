@@ -14,7 +14,7 @@
 
 | 配置项 | 类型 | 默认 | 说明 |
 |---|---|---|---|
-| `log_dir` | `string` | `/var/log/synora` | 运行日志目录（每 job 一个子目录，`current.log` + 按日归档） |
+| `log_dir` | `string` | `/var/log/synora` | 运行日志目录（每 job 一个子目录，`current.log` + 按日归档）。pid 文件在 `/run/synora/`，不在 log_dir |
 | `default_proxy` | `string` | — | 探测/工具流量的默认出口代理名（探测走代理，镜像同步默认本机直连） |
 
 ### `[daemon.db]`

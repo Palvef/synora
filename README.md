@@ -41,7 +41,7 @@ to TUNA and to the authors and maintainers of these projects.
 - **Crash safety**: every run has a 60 s lease; lease expiry → LOST →
   automatic re-dispatch (`on_worker_lost = "retry"`). No run stays RUNNING
   forever.
-- **Hot reload**: SIGHUP / `synora reload` / `POST /api/v1/reload` — job and
+- **Hot reload**: manager API / SIGHUP (`/run/synora/*.pid`) / `POST /api/v1/reload` — job and
   schedule changes apply live; invalid or non-reloadable changes are rejected
   as a whole; changed jobs get a catch-up run queued automatically.
 - **Delete/size protection**: `max_delete_files` / `max_delete_ratio` /

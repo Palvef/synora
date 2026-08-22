@@ -479,35 +479,35 @@ mod tests {
             "socks5h://synora:pass@127.0.0.1:40000"
         );
         assert_eq!(
-            rewrite_loopback_proxy("http://172.31.33.205:14000"),
-            "http://172.31.33.205:14000"
+            rewrite_loopback_proxy("http://192.0.2.10:14000"),
+            "http://192.0.2.10:14000"
         );
     }
 
     #[test]
     fn docker_http_connect_sets_http_and_all_proxy() {
         let env = docker_proxy_env(&[
-            ("HTTP_PROXY".into(), "http://172.31.33.205:14000".into()),
-            ("HTTPS_PROXY".into(), "http://172.31.33.205:14000".into()),
-            ("ALL_PROXY".into(), "http://172.31.33.205:14000".into()),
-            ("http_proxy".into(), "http://172.31.33.205:14000".into()),
+            ("HTTP_PROXY".into(), "http://192.0.2.10:14000".into()),
+            ("HTTPS_PROXY".into(), "http://192.0.2.10:14000".into()),
+            ("ALL_PROXY".into(), "http://192.0.2.10:14000".into()),
+            ("http_proxy".into(), "http://192.0.2.10:14000".into()),
         ]);
         let map: std::collections::HashMap<_, _> = env.into_iter().collect();
         assert_eq!(
             map.get("ALL_PROXY").map(String::as_str),
-            Some("http://172.31.33.205:14000")
+            Some("http://192.0.2.10:14000")
         );
         assert_eq!(
             map.get("HTTP_PROXY").map(String::as_str),
-            Some("http://172.31.33.205:14000")
+            Some("http://192.0.2.10:14000")
         );
         assert_eq!(
             map.get("HTTPS_PROXY").map(String::as_str),
-            Some("http://172.31.33.205:14000")
+            Some("http://192.0.2.10:14000")
         );
         assert_eq!(
             map.get("http_proxy").map(String::as_str),
-            Some("http://172.31.33.205:14000")
+            Some("http://192.0.2.10:14000")
         );
     }
 
@@ -543,20 +543,20 @@ mod tests {
     #[test]
     fn docker_keeps_socks_as_all_proxy_only() {
         let env = docker_proxy_env(&[
-            ("HTTP_PROXY".into(), "socks5h://172.31.33.205:14001".into()),
-            ("HTTPS_PROXY".into(), "socks5h://172.31.33.205:14001".into()),
-            ("ALL_PROXY".into(), "socks5h://172.31.33.205:14001".into()),
+            ("HTTP_PROXY".into(), "socks5h://192.0.2.10:14001".into()),
+            ("HTTPS_PROXY".into(), "socks5h://192.0.2.10:14001".into()),
+            ("ALL_PROXY".into(), "socks5h://192.0.2.10:14001".into()),
         ]);
         let map: std::collections::HashMap<_, _> = env.into_iter().collect();
         assert!(!map.contains_key("HTTP_PROXY"));
         assert!(!map.contains_key("HTTPS_PROXY"));
         assert_eq!(
             map.get("ALL_PROXY").map(String::as_str),
-            Some("socks5h://172.31.33.205:14001")
+            Some("socks5h://192.0.2.10:14001")
         );
         assert_eq!(
             map.get("all_proxy").map(String::as_str),
-            Some("socks5h://172.31.33.205:14001")
+            Some("socks5h://192.0.2.10:14001")
         );
     }
 }

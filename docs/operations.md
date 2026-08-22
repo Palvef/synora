@@ -114,7 +114,7 @@ proxy = "default"          # 显式指定才走代理组（一般不需要）
 | 重启任务 | `synora job restart <job>`（停 + 启） |
 | 触发一组任务 | `synora run-group <group> -c ...` |
 | 停止运行中的任务 | `synora stop <job>` 或 API `POST /api/v1/jobs/<job>/stop` |
-| 热重载 | `synora reload`（SIGHUP）或 API `POST /api/v1/reload`（**变更的 job 自动补跑一次**） |
+| 热重载 | `synora reload`（走 manager API；pid 在 `/run/synora/`）或 `POST /api/v1/reload`（**变更的 job 自动补跑一次**） |
 | 查看状态 | `synora status -c ...` |
 | 查看日志 | `synora logs <job> --lines 100`（API：`GET /api/v1/jobs/<job>/logs?tail=100`） |
 | 任务历史 | API `GET /api/v1/jobs/<job>/history` |
@@ -147,7 +147,7 @@ systemctl enable --now synora-manager
 systemctl enable --now synora-worker   # 每台执行机器
 
 # 日常
-systemctl reload synora-manager        # 热重载配置
+systemctl reload synora-manager        # SIGHUP → 热重载配置
 journalctl -u synora-manager -f        # 看服务日志
 tail -f /var/log/synora/<job>/current.log   # 看某镜像同步日志
 ```

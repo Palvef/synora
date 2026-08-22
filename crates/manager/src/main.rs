@@ -9,6 +9,7 @@ use clap::Parser;
 use config::{CliOverrides, ConfigLoader};
 use engine::Engine;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[derive(Parser)]
 #[command(
@@ -413,12 +414,20 @@ async fn main() -> Result<(), String> {
         }
     });
 
-    // SIGHUP is systemd `reload`. Treating it as shutdown took the
-    // production manager offline. Config changes need a restart.
+    match config::write_pid_file("manager") {
+        Ok(path) => tracing::info!("pid file {}", path.display()),
+        Err(e) => tracing::warn!("{e}"),
+    }
+
+    // SIGHUP is systemd `reload` / `synora reload` fallback. Reload jobs
+    // in-process; do not treat it as shutdown.
     #[cfg(unix)]
-    tokio::spawn(async {
-        ignore_sighup().await;
-    });
+    {
+        let hup_engine = engine.clone();
+        tokio::spawn(async move {
+            reload_on_sighup(hup_engine).await;
+        });
+    }
 
     // Signal: graceful stop of the HTTP server.
     let shutdown_engine = engine.clone();
@@ -436,6 +445,7 @@ async fn main() -> Result<(), String> {
     server_task.abort();
     reaper_task.abort();
     signal_task.abort();
+    config::remove_pid_file("manager");
     run_result
 }
 
@@ -467,11 +477,14 @@ async fn wait_sigterm() {
 }
 
 #[cfg(unix)]
-async fn ignore_sighup() {
+async fn reload_on_sighup(engine: Arc<Engine>) {
     let mut s = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
         .expect("SIGHUP handler");
     while s.recv().await.is_some() {
-        tracing::warn!("SIGHUP ignored; restart the service to apply config changes");
+        match engine.reload().await {
+            Ok(n) => tracing::info!("config reloaded: {n} job(s) applied"),
+            Err(e) => tracing::warn!("reload rejected: {e}"),
+        }
     }
 }
 
