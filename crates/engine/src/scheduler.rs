@@ -45,6 +45,32 @@ pub async fn retry_tick(engine: &Arc<Engine>, now: i64) {
         return;
     };
     for run in due {
+        if engine.job(&run.job_id).is_some_and(|j| !j.enabled) {
+            tracing::info!("job `{}`: retry dropped, job is disabled", run.job_id);
+            let _ = engine
+                .store
+                .finish_run(
+                    &run.id,
+                    JobStatus::Cancelled,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some("job disabled"),
+                    0,
+                )
+                .await;
+            continue;
+        }
+        if let Ok(active) = engine.store.active_runs_of_job(&run.job_id).await {
+            if !active.is_empty() {
+                tracing::info!(
+                    "job `{}`: retry skipped, another run is already active",
+                    run.job_id
+                );
+                continue;
+            }
+        }
         let _ = engine
             .store
             .set_run_status(&run.id, JobStatus::Queued)

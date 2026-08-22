@@ -6,8 +6,13 @@
 use crate::{
     cancelled_after_wait, kill_group, spawn_group, ProviderError, SyncContext, SyncResult,
 };
+use std::collections::HashMap;
 use std::process::Stdio;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
+use tokio::sync::Mutex;
 
 pub struct DockerProvider {
     pub image: String,
@@ -29,6 +34,22 @@ pub fn docker_exec_args(command: &[String]) -> Vec<String> {
         }
         args => args.to_vec(),
     }
+}
+
+/// `docker run` suffix: docker-init as PID 1 (reaps git/repo zombies) and
+/// `--entrypoint` so a leftover image ENTRYPOINT cannot wrap the job.
+pub fn image_command_args(image: &str, command: &[String]) -> Vec<String> {
+    let mut out = vec!["--init".to_string()];
+    match command.split_first() {
+        Some((entry, rest)) => {
+            out.push("--entrypoint".into());
+            out.push(entry.clone());
+            out.push(image.to_string());
+            out.extend(rest.iter().cloned());
+        }
+        None => out.push(image.to_string()),
+    }
+    out
 }
 
 fn needs_shell(s: &str) -> bool {
@@ -131,39 +152,134 @@ pub struct DockerRunSpec {
     pub network: Option<String>,
 }
 
-/// One-shot `docker stats` for a named container: (memory_bytes, cpu_percent).
+/// Shared `docker stats` sample for `synora-job-*` containers.
 ///
 /// Bound the CLI wait and kill the child on timeout/cancel. A hung
 /// `docker stats` used to stall the job task, stop draining pipes, and
 /// freeze the container on a full stdout pipe.
-pub async fn container_stats(name: &str) -> Option<(u64, f64)> {
-    let mut cmd = tokio::process::Command::new("docker");
+#[derive(Debug, Clone, Copy)]
+pub struct ContainerStats {
+    pub memory_bytes: u64,
+    pub cpu_percent: f64,
+    /// Cumulative rx+tx from `NetIO`, when Docker reports it.
+    pub net_bytes: Option<u64>,
+    /// Cumulative read+write from `BlockIO`, when Docker reports it.
+    pub block_bytes: Option<u64>,
+}
+
+struct StatsCache {
+    at: Instant,
+    by_name: HashMap<String, ContainerStats>,
+}
+
+static STATS_CACHE: OnceLock<Mutex<StatsCache>> = OnceLock::new();
+
+fn stats_cache() -> &'static Mutex<StatsCache> {
+    STATS_CACHE.get_or_init(|| {
+        Mutex::new(StatsCache {
+            at: Instant::now()
+                .checked_sub(Duration::from_secs(10))
+                .unwrap_or_else(Instant::now),
+            by_name: HashMap::new(),
+        })
+    })
+}
+
+/// One shared `docker stats --no-stream` for every `synora-job-*` container.
+/// Per-job CLI processes were the worker CPU spike and the docker zombies.
+pub async fn container_stats(name: &str) -> Option<ContainerStats> {
+    let mut cache = stats_cache().lock().await;
+    if cache.at.elapsed() >= Duration::from_secs(2) {
+        cache.by_name = collect_container_stats().await;
+        cache.at = Instant::now();
+    }
+    cache.by_name.get(name).copied()
+}
+
+async fn collect_container_stats() -> HashMap<String, ContainerStats> {
+    let mut cmd = Command::new("docker");
     cmd.args([
         "stats",
         "--no-stream",
         "--format",
-        "{{.MemUsage}}\t{{.CPUPerc}}",
-        name,
+        "{{.Name}}\t{{.MemUsage}}\t{{.CPUPerc}}\t{{.NetIO}}\t{{.BlockIO}}",
     ])
     .kill_on_drop(true)
     .stdout(Stdio::piped())
     .stderr(Stdio::null());
-    let out = tokio::time::timeout(std::time::Duration::from_secs(2), cmd.output())
-        .await
-        .ok()?
-        .ok()?;
-    if !out.status.success() {
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(_) => return HashMap::new(),
+    };
+    let mut stdout = match child.stdout.take() {
+        Some(pipe) => pipe,
+        None => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return HashMap::new();
+        }
+    };
+    let mut buf = Vec::new();
+    tokio::select! {
+        _ = tokio::time::sleep(Duration::from_secs(6)) => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            HashMap::new()
+        }
+        n = stdout.read_to_end(&mut buf) => {
+            let _ = n;
+            let _ = child.wait().await;
+            parse_stats_table(&buf)
+        }
+    }
+}
+
+fn parse_stats_table(bytes: &[u8]) -> HashMap<String, ContainerStats> {
+    let mut out = HashMap::new();
+    for line in String::from_utf8_lossy(bytes).lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((name, stats)) = parse_stats_line(line) else {
+            continue;
+        };
+        if name.starts_with("synora-job-") {
+            out.insert(name, stats);
+        }
+    }
+    out
+}
+
+fn parse_stats_line(line: &str) -> Option<(String, ContainerStats)> {
+    let mut parts = line.split('\t');
+    let name = parts.next()?.trim();
+    if name.is_empty() {
         return None;
     }
-    let line = String::from_utf8_lossy(&out.stdout);
-    let line = line.lines().next()?.trim();
-    if line.is_empty() {
-        return None;
-    }
-    let (mem_s, cpu_s) = line.split_once('\t').or_else(|| line.split_once(' '))?;
+    let mem_s = parts.next().unwrap_or("");
+    let cpu_s = parts.next().unwrap_or("");
+    let net_s = parts.next();
+    let block_s = parts.next();
     let mem = parse_docker_mem(mem_s.split('/').next().unwrap_or(mem_s).trim())?;
     let cpu = cpu_s.trim().trim_end_matches('%').parse::<f64>().ok()?;
-    Some((mem, cpu))
+    Some((
+        name.to_string(),
+        ContainerStats {
+            memory_bytes: mem,
+            cpu_percent: cpu,
+            net_bytes: net_s.and_then(parse_docker_netio),
+            block_bytes: block_s.and_then(parse_docker_netio),
+        },
+    ))
+}
+
+fn parse_docker_netio(s: &str) -> Option<u64> {
+    // Docker prints `rx / tx`, e.g. `1.2GB / 3.4MB`.
+    let (rx, tx) = s.split_once('/')?;
+    let rx = parse_docker_mem(rx.trim())?;
+    let tx = parse_docker_mem(tx.trim()).unwrap_or(0);
+    Some(rx.saturating_add(tx))
 }
 
 fn parse_docker_mem(s: &str) -> Option<u64> {
@@ -196,6 +312,11 @@ impl DockerProvider {
         )
         .await
     }
+}
+
+fn should_bind_host_storage_path(host_storage: &str) -> bool {
+    let path = std::path::Path::new(host_storage);
+    host_storage != "/data" && !path.starts_with("/data")
 }
 
 pub async fn run_named_container(
@@ -250,10 +371,13 @@ pub async fn run_named_container(
     if !mounts_data {
         cmd.arg("-v").arg(format!("{host_storage}:/data"));
     }
-    // tunasync-scripts images expect the mirror at its HOST path inside
-    // the container (TUNASYNC_WORKING_DIR=/datas/...): bind it under its
-    // own path too, so both conventions work.
-    cmd.arg("-v").arg(format!("{host_storage}:{host_storage}"));
+    // Scripts that still refer to the host path expect a bind at that
+    // path. Skip when it sits under /data: `/data/kali:/data` plus
+    // `/data/kali:/data/kali` nests the whole mirror at ./kali and
+    // rsync --delete tries to remove it.
+    if should_bind_host_storage_path(host_storage) {
+        cmd.arg("-v").arg(format!("{host_storage}:{host_storage}"));
+    }
     for v in &spec.extra_volumes {
         cmd.arg("-v").arg(v);
     }
@@ -273,44 +397,27 @@ pub async fn run_named_container(
         cmd.arg("-e").arg(format!("{k}={v}"));
     }
     cmd.arg("-e").arg("PYTHONUNBUFFERED=1");
-    // SYNORA_* env for scripts inside the container.
     cmd.arg("-e").arg(format!("SYNORA_JOB={}", ctx.job_name));
     if let Some(up) = &ctx.upstream {
         cmd.arg("-e").arg(format!("SYNORA_UPSTREAM={up}"));
-    }
-    // TUNASYNC_* compatibility (tunasync-scripts images read these).
-    // tunasync convention: the working dir is the per-mirror directory;
-    // synora's resolved storage path IS that directory (the relative
-    // path / mirror_subdir composition already happened), so no name
-    // is appended here.
-    let tunasync_workdir = host_storage.to_string();
-    cmd.arg("-w").arg(&tunasync_workdir);
-    cmd.arg("-e")
-        .arg(format!("TUNASYNC_MIRROR_NAME={}", ctx.job_name));
-    if let Some(up) = &ctx.upstream {
-        cmd.arg("-e").arg(format!("TUNASYNC_UPSTREAM_URL={up}"));
-        // ustcmirror/rsync-style sync.sh scripts read RSYNC_HOST /
-        // RSYNC_PATH instead of the tunasync variables.
         if let Some(rest) = up.strip_prefix("rsync://") {
             let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
             cmd.arg("-e").arg(format!("RSYNC_HOST={host}"));
             cmd.arg("-e").arg(format!("RSYNC_PATH=/{path}"));
         }
     }
+    let storage_in_container = if mounts_data { host_storage } else { "/data" };
+    let workdir = if should_bind_host_storage_path(host_storage) {
+        host_storage.to_string()
+    } else {
+        storage_in_container.to_string()
+    };
+    cmd.arg("-w").arg(&workdir);
     cmd.arg("-e")
-        .arg(format!("TUNASYNC_WORKING_DIR={tunasync_workdir}"));
+        .arg(format!("SYNORA_STORAGE={storage_in_container}"));
     cmd.arg("-e")
-        .arg(format!("TUNASYNC_LOG_DIR={tunasync_workdir}/.synora-log"));
-    // SYNORA_STORAGE is the in-container path (spec §77: /data by
-    // convention; when a user volume takes /data the host value is
-    // their problem, pass it through).
-    cmd.arg("-e")
-        .arg(format!(
-            "SYNORA_STORAGE={}",
-            if mounts_data { host_storage } else { "/data" }
-        ))
-        .arg("-e")
-        .arg(format!("SYNORA_RUN_ID={}", ctx.run_id));
+        .arg(format!("SYNORA_LOG_DIR={storage_in_container}/.synora-log"));
+    cmd.arg("-e").arg(format!("SYNORA_RUN_ID={}", ctx.run_id));
     if let Some(w) = &ctx.worker {
         cmd.arg("-e").arg(format!("SYNORA_WORKER={w}"));
     }
@@ -324,13 +431,16 @@ pub async fn run_named_container(
         cmd.arg("-e").arg(format!("SYNORA_EGRESS_ADDRESS={addr}"));
     }
     cmd.arg("-e").arg(format!("SYNORA_FAMILY={}", ctx.family));
+    if let Some(api) = ctx.manager_url.as_deref().filter(|s| !s.trim().is_empty()) {
+        cmd.arg("-e")
+            .arg(format!("SYNORA_API={}", rewrite_loopback_proxy(api)));
+    }
     // git.sh against an interrupted bare clone (empty HEAD) fails with
     // "not a git repository". Repair before the container starts.
     if spec.command.iter().any(|c| c.contains("git.sh")) {
         let _ = crate::git::prepare_existing_repo(host_storage).await;
     }
-    cmd.arg(&spec.image);
-    for arg in &spec.command {
+    for arg in image_command_args(&spec.image, &spec.command) {
         cmd.arg(arg);
     }
     cmd.stdin(Stdio::null())
@@ -339,6 +449,21 @@ pub async fn run_named_container(
 
     let (mut child, _guard) =
         spawn_group(&mut cmd, ctx).map_err(|e| ProviderError::Spawn(format!("docker run: {e}")))?;
+    async fn stop_container(name: &str) {
+        let mut rm = Command::new("docker");
+        rm.args(["rm", "-f", name])
+            .kill_on_drop(true)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        match rm.spawn() {
+            Ok(mut child) => {
+                let _ = tokio::time::timeout(Duration::from_secs(20), child.wait()).await;
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+            }
+            Err(_) => {}
+        }
+    }
     // Read pipes and wait for exit concurrently with cancellation: a
     // long-running child keeps its pipes open, so a plain read_to_end
     // before the select would swallow cancels until the child exits.
@@ -362,6 +487,7 @@ pub async fn run_named_container(
     let (stdout, stderr) = tokio::select! {
         _ = ctx.cancel.cancelled() => {
             kill_group(&mut child).await;
+            stop_container(&cname).await;
             return Err(ProviderError::Cancelled);
         }
         r = &mut read_fut => r,
@@ -369,6 +495,7 @@ pub async fn run_named_container(
     let status = tokio::select! {
         _ = ctx.cancel.cancelled() => {
             kill_group(&mut child).await;
+            stop_container(&cname).await;
             return Err(ProviderError::Cancelled);
         }
         r = child.wait() => r.map_err(|e| ProviderError::Other(e.to_string()))?,
@@ -457,11 +584,65 @@ mod tests {
     }
 
     #[test]
+    fn image_command_overrides_entrypoint() {
+        assert_eq!(
+            image_command_args(
+                "synora-scripts:latest",
+                &["/usr/lib/synora/scripts/homebrew.sh".into()]
+            ),
+            vec![
+                "--init",
+                "--entrypoint",
+                "/usr/lib/synora/scripts/homebrew.sh",
+                "synora-scripts:latest",
+            ]
+        );
+        assert_eq!(
+            image_command_args(
+                "synora-scripts:latest",
+                &["/bin/sh".into(), "-c".into(), "git fetch".into()]
+            ),
+            vec![
+                "--init",
+                "--entrypoint",
+                "/bin/sh",
+                "synora-scripts:latest",
+                "-c",
+                "git fetch",
+            ]
+        );
+        assert_eq!(
+            image_command_args("synora-scripts:latest", &[]),
+            vec!["--init", "synora-scripts:latest"]
+        );
+    }
+
+    #[test]
+    fn parse_named_docker_stats_line() {
+        let (name, stats) = parse_stats_line(
+            "synora-job-homebrew\t488.6MiB / 2GiB\t31.1%\t1.0GiB / 512MiB\t0B / 0B",
+        )
+        .unwrap();
+        assert_eq!(name, "synora-job-homebrew");
+        assert_eq!(stats.memory_bytes, (488.6 * 1024.0 * 1024.0) as u64);
+        assert!((stats.cpu_percent - 31.1).abs() < f64::EPSILON);
+        assert_eq!(
+            stats.net_bytes,
+            Some(1024 * 1024 * 1024 + 512 * 1024 * 1024)
+        );
+    }
+
+    #[test]
     fn parse_docker_mem_units() {
         assert_eq!(parse_docker_mem("16MiB"), Some(16 * 1024 * 1024));
         assert_eq!(parse_docker_mem("1GiB"), Some(1024 * 1024 * 1024));
         assert_eq!(parse_docker_mem("512KiB"), Some(512 * 1024));
         assert_eq!(parse_docker_mem("100"), Some(100));
+        assert_eq!(
+            parse_docker_netio("1.0GiB / 512MiB"),
+            Some(1024 * 1024 * 1024 + 512 * 1024 * 1024)
+        );
+        assert_eq!(parse_docker_netio("100kB / 0B"), Some(100 * 1024));
     }
 
     #[test]
@@ -481,6 +662,18 @@ mod tests {
         assert_eq!(
             rewrite_loopback_proxy("http://192.0.2.10:14000"),
             "http://192.0.2.10:14000"
+        );
+        assert_eq!(
+            rewrite_loopback_proxy("http://127.0.0.1:9290"),
+            "http://172.17.0.1:9290"
+        );
+        assert_eq!(
+            rewrite_loopback_proxy("http://192.0.2.10:9290"),
+            "http://192.0.2.10:9290"
+        );
+        assert_eq!(
+            rewrite_loopback_proxy("http://localhost:9290"),
+            "http://172.17.0.1:9290"
         );
     }
 
@@ -523,10 +716,22 @@ mod tests {
         );
         assert_eq!(crate::parse_script_size("SYNORA_SIZE=42"), Some(42));
         assert!(crate::script_reported_failure("Failed YUM repos: [('rpm', 'x86_64')]").is_some());
+        assert!(
+            crate::script_reported_failure("Failed APT repos of http://example: [('a', 'b')]")
+                .is_some()
+        );
         assert_eq!(
             crate::parse_script_status("SYNORA_STATUS=success"),
             Some("success".into())
         );
+    }
+
+    #[test]
+    fn host_storage_under_data_is_not_rebound() {
+        assert!(!should_bind_host_storage_path("/data"));
+        assert!(!should_bind_host_storage_path("/data/kali"));
+        assert!(should_bind_host_storage_path("/datas/virtualbox"));
+        assert!(should_bind_host_storage_path("/srv/mirror/debian"));
     }
 
     #[test]

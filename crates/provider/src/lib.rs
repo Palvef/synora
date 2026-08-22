@@ -219,6 +219,9 @@ pub struct SyncContext {
     pub log_file: Option<std::path::PathBuf>,
     /// Image used to run git/script jobs on the worker. None/empty = native.
     pub scripts_image: Option<String>,
+    /// Manager API URL as the worker sees it (`[worker].manager`).
+    /// Injected as SYNORA_API; docker rewrites loopback to the bridge gateway.
+    pub manager_url: Option<String>,
 }
 
 /// Live resource sample shared between a provider, the executor sampler
@@ -228,6 +231,9 @@ pub struct ResourceUsage {
     pub memory_bytes: Option<u64>,
     pub cpu_seconds: Option<f64>,
     pub cpu_percent: Option<f64>,
+    /// Instantaneous network bandwidth (bytes/sec). Docker NetIO, HTTP
+    /// download counters, or child /proc socket bytes — never disk IO.
+    pub bandwidth_bytes: Option<f64>,
     /// Process-group id of the spawned provider child (rsync/git/script).
     /// The executor sampler sums /proc RSS+CPU for this group.
     pub child_pgid: Option<u32>,
@@ -239,6 +245,14 @@ impl ResourceUsage {
         self.cpu_seconds = Some(cpu_seconds);
         if let Some(pct) = cpu_percent {
             self.cpu_percent = Some(pct);
+        }
+    }
+
+    pub fn record_bandwidth(&mut self, bytes_per_sec: f64) {
+        // Reject dt≈0 docker-stats spikes (TB/s). 20 GB/s is above any
+        // 100GbE mirror path we run.
+        if bytes_per_sec.is_finite() && (0.0..=20_000_000_000.0).contains(&bytes_per_sec) {
+            self.bandwidth_bytes = Some(bytes_per_sec);
         }
     }
 }
@@ -395,6 +409,7 @@ pub fn parse_script_status(text: &str) -> Option<String> {
 pub fn script_reported_failure(text: &str) -> Option<&'static str> {
     const NEEDLES: &[&str] = &[
         "Failed YUM repos:",
+        "Failed APT repos of",
         "==== SYNC yum FAILED",
         "==== SYNC docker-ce FAILED",
         "==== SYNC rustup FAILED",

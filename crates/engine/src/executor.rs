@@ -7,8 +7,10 @@
 use crate::engine::{unix_now, Engine, LOCAL_WORKER};
 use crate::logs::{walk_size, RunLogger};
 use provider::{build_provider, ProviderError, SyncContext, SyncResult};
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use synora_core::job::{JobSpec, JobStatus};
 use synora_core::state::retry_decision;
 use tokio_util::sync::CancellationToken;
@@ -92,6 +94,7 @@ pub async fn execute_run(
         None,
         None,
         None,
+        None,
     )
     .await;
 
@@ -114,6 +117,7 @@ pub async fn run_once(
     manager_proxy_env: Option<Vec<(String, String)>>,
     shared_usage: Option<provider::UsageSink>,
     scripts_image: Option<String>,
+    manager_url: Option<String>,
 ) -> RunOutcome {
     let started = unix_now();
     // Multi-machine storage layouts: a job referencing a [storage.<name>]
@@ -286,6 +290,7 @@ pub async fn run_once(
         })),
         log_file: Some(log_dir.join(&job.name).join("current.log")),
         scripts_image,
+        manager_url,
     };
 
     let provider = match build_provider(job) {
@@ -325,9 +330,15 @@ pub async fn run_once(
         tokio::spawn(async move {
             let mut peak = 0u64;
             let mut last_cpu = 0.0f64;
+            let mut last_io: Option<u64> = None;
             let mut last_tick = std::time::Instant::now();
-            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(2));
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            usage.lock().unwrap().record_bandwidth(0.0);
+            // Delay: docker stats --no-stream itself waits ~1s. Skip would
+            // fire the next tick immediately, making dt≈0 and reporting
+            // multi-GB/s spikes.
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(3));
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            ticker.tick().await;
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => break,
@@ -337,14 +348,34 @@ pub async fn run_once(
                         } else {
                             None
                         };
-                        if let Some((mem, pct)) = docker {
-                            peak = peak.max(mem);
+                        let now = std::time::Instant::now();
+                        let dt = now.duration_since(last_tick).as_secs_f64();
+                        if let Some(stats) = docker {
+                            peak = peak.max(stats.memory_bytes);
                             let prev = usage.lock().unwrap().cpu_seconds.unwrap_or(0.0);
-                            usage.lock().unwrap().record(peak, prev + (pct / 100.0) * 2.0, Some(pct));
-                            last_tick = std::time::Instant::now();
+                            usage.lock().unwrap().record(
+                                peak,
+                                prev + (stats.cpu_percent / 100.0) * dt.max(0.001),
+                                Some(stats.cpu_percent),
+                            );
+                            if let Some(io) = stats.net_bytes {
+                                if let Some(bps) = network_bps(last_io, io, dt) {
+                                    usage.lock().unwrap().record_bandwidth(bps);
+                                }
+                                last_io = Some(io);
+                            }
+                            last_tick = now;
                             continue;
                         }
                         let pgid = usage.lock().unwrap().child_pgid;
+                        // Network only: never fold in cgroup/block disk IO.
+                        let io_bytes = pgid.and_then(proc_group_net_bytes);
+                        if let Some(bytes) = io_bytes {
+                            if let Some(bps) = network_bps(last_io, bytes, dt) {
+                                usage.lock().unwrap().record_bandwidth(bps);
+                            }
+                            last_io = Some(bytes);
+                        }
                         let sample = pgid
                             .and_then(proc_group_usage)
                             .or_else(|| {
@@ -367,11 +398,16 @@ pub async fn run_once(
                         });
                         if let Some((mem, cpu)) = sample {
                             peak = peak.max(mem);
-                            let dt = last_tick.elapsed().as_secs_f64().max(0.001);
-                            let pct = ((cpu - last_cpu) / dt * 100.0).max(0.0);
+                            let pct = if dt >= 0.5 {
+                                ((cpu - last_cpu) / dt * 100.0).max(0.0)
+                            } else {
+                                usage.lock().unwrap().cpu_percent.unwrap_or(0.0)
+                            };
                             last_cpu = cpu;
-                            last_tick = std::time::Instant::now();
+                            last_tick = now;
                             usage.lock().unwrap().record(peak, cpu, Some(pct));
+                        } else {
+                            last_tick = now;
                         }
                     }
                 }
@@ -383,8 +419,19 @@ pub async fn run_once(
 
     // Delete/size protection baseline (spec §52-53): measured around the
     // provider run, enforced after — a mirror that shrinks too much is
-    // failed instead of kept.
-    let before = crate::logs::walk(&job.storage);
+    // failed instead of kept. Skip the tree walk unless limits are set;
+    // walking AOSP/debian is multi-hour and blocks the actual sync.
+    let safety_on = job.safety.max_delete_files.is_some()
+        || job.safety.max_delete_ratio.is_some()
+        || job.safety.max_size_drop_ratio.is_some();
+    let before = if safety_on {
+        if let Some(l) = logger.as_mut() {
+            let _ = l.line("measuring repository for delete/size safety");
+        }
+        crate::logs::walk(&job.storage)
+    } else {
+        (0, 0)
+    };
 
     // Timeout wraps the provider; cancel kills the child process group.
     // Unlimited unless the job sets a real timeout (user requirement).
@@ -413,6 +460,9 @@ pub async fn run_once(
     // Enforce delete/size protection (spec §52-53). Runs only on a provider
     // success: a failed sync already fails the run.
     let safety_violation = outcome.as_ref().ok().and_then(|_| {
+        if !safety_on {
+            return None;
+        }
         let after = crate::logs::walk(&job.storage);
         let deleted = before.0.saturating_sub(after.0);
         let msg = |what: String| Some(ProviderError::Other(what));
@@ -592,48 +642,124 @@ fn proc_clk_tck() -> f64 {
     100.0
 }
 
-/// Sum RSS + CPU seconds of every process in `pgid` (rsync/git/script tree).
-fn proc_group_usage(pgid: u32) -> Option<(u64, f64)> {
+fn network_bps(prev: Option<u64>, now: u64, dt: f64) -> Option<f64> {
+    if dt < 0.5 {
+        return None;
+    }
+    let bps = now.saturating_sub(prev?) as f64 / dt;
+    // Drop dt≈0 leftovers that look like TB/s.
+    if bps > 20_000_000_000.0 {
+        return None;
+    }
+    Some(bps)
+}
+
+#[derive(Clone, Copy, Default)]
+struct ProcAgg {
+    rss: u64,
+    cpu: f64,
+    net: u64,
+}
+
+struct ProcSnapshot {
+    at: Instant,
+    by_pgid: HashMap<u32, ProcAgg>,
+}
+
+static PROC_SNAP: Mutex<Option<Arc<ProcSnapshot>>> = Mutex::new(None);
+
+fn cached_proc_snapshot() -> Arc<ProcSnapshot> {
+    let mut slot = PROC_SNAP.lock().unwrap();
+    let stale = slot
+        .as_ref()
+        .map(|s| s.at.elapsed() >= Duration::from_millis(1500))
+        .unwrap_or(true);
+    if stale {
+        *slot = Some(Arc::new(collect_proc_snapshot()));
+    }
+    Arc::clone(slot.as_ref().unwrap())
+}
+
+fn collect_proc_snapshot() -> ProcSnapshot {
     let page = proc_page_size();
     let tick = proc_clk_tck();
-    let mut rss = 0u64;
-    let mut cpu = 0.0f64;
-    let mut found = false;
-    let dir = std::fs::read_dir("/proc").ok()?;
-    for ent in dir.flatten() {
-        let name = ent.file_name();
-        let pid = match name.to_str().and_then(|s| s.parse::<u32>().ok()) {
-            Some(p) => p,
-            None => continue,
-        };
-        let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        let rest = match stat.rsplit_once(')') {
-            Some((_, r)) => r,
-            None => continue,
-        };
-        let fields: Vec<&str> = rest.split_whitespace().collect();
-        let pgrp: u32 = match fields.get(2).and_then(|s| s.parse().ok()) {
-            Some(v) => v,
-            None => continue,
-        };
-        if pgrp != pgid && pid != pgid {
-            continue;
+    let mut by_pgid: HashMap<u32, ProcAgg> = HashMap::new();
+    if let Ok(dir) = std::fs::read_dir("/proc") {
+        for ent in dir.flatten() {
+            let name = ent.file_name();
+            let pid = match name.to_str().and_then(|s| s.parse::<u32>().ok()) {
+                Some(p) => p,
+                None => continue,
+            };
+            let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let rest = match stat.rsplit_once(')') {
+                Some((_, r)) => r,
+                None => continue,
+            };
+            let fields: Vec<&str> = rest.split_whitespace().collect();
+            let pgrp: u32 = match fields.get(2).and_then(|s| s.parse().ok()) {
+                Some(v) => v,
+                None => continue,
+            };
+            let utime: f64 = fields.get(11).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            let stime: f64 = fields.get(12).and_then(|s| s.parse().ok()).unwrap_or(0.0);
+            let rss_pages: u64 = fields.get(21).and_then(|s| s.parse().ok()).unwrap_or(0);
+            let mut net = 0u64;
+            if let Ok(io) = std::fs::read_to_string(format!("/proc/{pid}/io")) {
+                let mut rchar = 0u64;
+                let mut wchar = 0u64;
+                let mut read_bytes = 0u64;
+                let mut write_bytes = 0u64;
+                for line in io.lines() {
+                    if let Some(v) = line.strip_prefix("rchar:") {
+                        rchar = v.trim().parse().unwrap_or(0);
+                    } else if let Some(v) = line.strip_prefix("wchar:") {
+                        wchar = v.trim().parse().unwrap_or(0);
+                    } else if let Some(v) = line.strip_prefix("read_bytes:") {
+                        read_bytes = v.trim().parse().unwrap_or(0);
+                    } else if let Some(v) = line.strip_prefix("write_bytes:") {
+                        write_bytes = v.trim().parse().unwrap_or(0);
+                    }
+                }
+                // syscall chars minus storage IO ≈ socket traffic.
+                net = rchar
+                    .saturating_sub(read_bytes)
+                    .saturating_add(wchar.saturating_sub(write_bytes));
+            }
+            let rss = rss_pages.saturating_mul(page);
+            let cpu = (utime + stime) / tick;
+            let entry = by_pgid.entry(pgrp).or_default();
+            entry.rss = entry.rss.saturating_add(rss);
+            entry.cpu += cpu;
+            entry.net = entry.net.saturating_add(net);
+            if pid != pgrp {
+                let leader = by_pgid.entry(pid).or_default();
+                leader.rss = leader.rss.saturating_add(rss);
+                leader.cpu += cpu;
+                leader.net = leader.net.saturating_add(net);
+            }
         }
-        let utime: f64 = fields.get(11).and_then(|s| s.parse().ok()).unwrap_or(0.0);
-        let stime: f64 = fields.get(12).and_then(|s| s.parse().ok()).unwrap_or(0.0);
-        let rss_pages: u64 = fields.get(21).and_then(|s| s.parse().ok()).unwrap_or(0);
-        rss += rss_pages.saturating_mul(page);
-        cpu += (utime + stime) / tick;
-        found = true;
     }
-    if found {
-        Some((rss.max(1), cpu))
-    } else {
-        None
+    ProcSnapshot {
+        at: Instant::now(),
+        by_pgid,
     }
+}
+
+fn proc_group_net_bytes(pgid: u32) -> Option<u64> {
+    cached_proc_snapshot().by_pgid.get(&pgid).map(|e| e.net)
+}
+
+fn proc_group_usage(pgid: u32) -> Option<(u64, f64)> {
+    let snap = cached_proc_snapshot();
+    let e = snap.by_pgid.get(&pgid)?;
+    if e.rss == 0 && e.cpu == 0.0 {
+        return None;
+    }
+    Some((e.rss.max(1), e.cpu))
 }
 
 fn read_proc_stat() -> Option<(u64, f64)> {
@@ -944,6 +1070,9 @@ async fn run_hooks(hooks: &[String], ctx: &SyncContext, mut logger: Option<&mut 
         }
         cmd.env("SYNORA_STORAGE", ctx.storage.display().to_string());
         cmd.env("SYNORA_RUN_ID", &ctx.run_id);
+        if let Some(api) = ctx.manager_url.as_deref().filter(|s| !s.trim().is_empty()) {
+            cmd.env("SYNORA_API", api);
+        }
         let out = cmd.output().await;
         match out {
             Ok(o) if o.status.success() => {}
@@ -983,6 +1112,7 @@ fn hook_ctx(job: &JobSpec, run_id: &str) -> SyncContext {
         usage: None,
         log_file: None,
         scripts_image: None,
+        manager_url: None,
     }
 }
 

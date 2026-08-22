@@ -255,15 +255,6 @@ async fn main() -> Result<(), String> {
             }
             break;
         }
-        let delay = if jobs_running < worker_cfg.max_concurrency {
-            2
-        } else {
-            15
-        };
-        tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
-        if shutdown.load(Ordering::SeqCst) {
-            continue;
-        }
         let (resources, active_jobs) = {
             let guard = running.lock().await;
             let active_jobs: Vec<String> = guard.values().map(|r| r.job.clone()).collect();
@@ -273,6 +264,7 @@ async fn main() -> Result<(), String> {
                 if sample.memory_bytes.is_none()
                     && sample.cpu_seconds.is_none()
                     && sample.cpu_percent.is_none()
+                    && sample.bandwidth_bytes.is_none()
                 {
                     continue;
                 }
@@ -281,6 +273,7 @@ async fn main() -> Result<(), String> {
                     memory_bytes: sample.memory_bytes,
                     cpu_seconds: sample.cpu_seconds,
                     cpu_percent: sample.cpu_percent,
+                    bandwidth_bytes: sample.bandwidth_bytes,
                 });
             }
             (out, active_jobs)
@@ -305,12 +298,14 @@ async fn main() -> Result<(), String> {
             Ok(h) => h,
             Err(e) => {
                 tracing::warn!("heartbeat failed: {e}");
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 continue;
             }
         };
 
         // Cancel requests from the operator (stop).
-        if let Some(cancel_id) = heartbeat.cancel_run {
+        let cancel_id = heartbeat.cancel_run.clone();
+        if let Some(cancel_id) = cancel_id {
             let cancel = running
                 .lock()
                 .await
@@ -319,101 +314,131 @@ async fn main() -> Result<(), String> {
             if let Some(token) = cancel {
                 tracing::info!("run {cancel_id}: cancel requested by manager");
                 token.cancel();
-            }
-        }
-
-        // New assignment: claim it (capacity-gated).
-        let has_capacity = (jobs_running as u32) < worker_cfg.max_concurrency;
-        if has_capacity && !shutdown.load(Ordering::SeqCst) {
-            if let Some(assignment) = heartbeat.assignment {
-                match client.claim_run(&assignment.run_id, &worker_id).await {
-                    Ok(Some(a)) => {
-                        let client = client.clone();
-                        let running = running.clone();
-                        let log_dir = PathBuf::from(&worker_cfg.log_dir);
-                        let scripts_image = {
-                            let image = worker_cfg.scripts_image.trim();
-                            Some(if image.is_empty() {
-                                default_scripts_image()
-                            } else {
-                                image.to_string()
-                            })
-                        };
-                        let worker_id = worker_id.clone();
-                        let cancel = CancellationToken::new();
-                        let run_storage = run_storage.clone();
-                        let netroute = netroute.clone();
-                        let usage = std::sync::Arc::new(std::sync::Mutex::new(
-                            provider::ResourceUsage::default(),
-                        ));
-                        running.lock().await.insert(
-                            a.run_id.clone(),
-                            Running {
-                                cancel: cancel.clone(),
-                                job: a.job.name.clone(),
-                                usage: usage.clone(),
-                            },
-                        );
-                        tokio::spawn(async move {
-                            let job = a.job;
-                            let name = job.name.clone();
-                            let outcome = run_once(
-                                &job,
-                                &a.run_id,
-                                &worker_id,
-                                cancel,
-                                &log_dir,
-                                run_storage.as_ref(),
-                                netroute.as_deref(),
-                                Some(a.proxy_env),
-                                Some(usage),
-                                scripts_image,
-                            )
-                            .await;
-                            let req = outcome_to_complete(
-                                &worker_id,
-                                &job,
-                                &outcome,
-                                &log_dir,
-                                run_storage.as_ref(),
-                            );
-                            let mut reported = false;
-                            for attempt in 1..=8u32 {
-                                match client.complete_run(&a.run_id, &req).await {
-                                    Ok(()) => {
-                                        reported = true;
-                                        break;
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            "complete_run {} attempt {attempt} failed: {e}",
-                                            a.run_id
-                                        );
-                                        tokio::time::sleep(std::time::Duration::from_secs(
-                                            2 * u64::from(attempt),
-                                        ))
-                                        .await;
-                                    }
-                                }
-                            }
-                            if !reported {
-                                tracing::error!(
-                                    "complete_run {} dropped after retries ({})",
-                                    a.run_id,
-                                    req.status
-                                );
-                            }
-                            running.lock().await.remove(&a.run_id);
-                            tracing::info!("job `{name}` finished ({})", req.status);
-                        });
+                if let Some(job) = running.lock().await.get(&cancel_id).map(|r| r.job.clone()) {
+                    let cname = format!("synora-job-{job}");
+                    let mut rm = tokio::process::Command::new("docker");
+                    rm.args(["rm", "-f", &cname])
+                        .kill_on_drop(true)
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null());
+                    if let Ok(mut child) = rm.spawn() {
+                        let _ =
+                            tokio::time::timeout(std::time::Duration::from_secs(20), child.wait())
+                                .await;
+                        let _ = child.start_kill();
+                        let _ = child.wait().await;
                     }
-                    Ok(None) => {
-                        // claimed by someone else — fine, next heartbeat offers again.
-                    }
-                    Err(e) => tracing::warn!("claim failed: {e}"),
                 }
             }
         }
+
+        // Claim every offered run up to the concurrency cap in this beat.
+        let offers = heartbeat.offered_assignments();
+        for assignment in offers {
+            if shutdown.load(Ordering::SeqCst) {
+                break;
+            }
+            let jobs_now = running.lock().await.len() as u32;
+            if jobs_now >= worker_cfg.max_concurrency {
+                break;
+            }
+            match client.claim_run(&assignment.run_id, &worker_id).await {
+                Ok(Some(a)) => {
+                    let client = client.clone();
+                    let running = running.clone();
+                    let log_dir = PathBuf::from(&worker_cfg.log_dir);
+                    let scripts_image = {
+                        let image = worker_cfg.scripts_image.trim();
+                        Some(if image.is_empty() {
+                            default_scripts_image()
+                        } else {
+                            image.to_string()
+                        })
+                    };
+                    let worker_id = worker_id.clone();
+                    let cancel = CancellationToken::new();
+                    let run_storage = run_storage.clone();
+                    let netroute = netroute.clone();
+                    let usage = std::sync::Arc::new(std::sync::Mutex::new(
+                        provider::ResourceUsage::default(),
+                    ));
+                    running.lock().await.insert(
+                        a.run_id.clone(),
+                        Running {
+                            cancel: cancel.clone(),
+                            job: a.job.name.clone(),
+                            usage: usage.clone(),
+                        },
+                    );
+                    let manager_url = Some(worker_cfg.manager.clone());
+                    tokio::spawn(async move {
+                        let job = a.job;
+                        let name = job.name.clone();
+                        let outcome = run_once(
+                            &job,
+                            &a.run_id,
+                            &worker_id,
+                            cancel,
+                            &log_dir,
+                            run_storage.as_ref(),
+                            netroute.as_deref(),
+                            Some(a.proxy_env),
+                            Some(usage),
+                            scripts_image,
+                            manager_url,
+                        )
+                        .await;
+                        let req = outcome_to_complete(
+                            &worker_id,
+                            &job,
+                            &outcome,
+                            &log_dir,
+                            run_storage.as_ref(),
+                        );
+                        let mut reported = false;
+                        for attempt in 1..=8u32 {
+                            match client.complete_run(&a.run_id, &req).await {
+                                Ok(()) => {
+                                    reported = true;
+                                    break;
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "complete_run {} attempt {attempt} failed: {e}",
+                                        a.run_id
+                                    );
+                                    tokio::time::sleep(std::time::Duration::from_secs(
+                                        2 * u64::from(attempt),
+                                    ))
+                                    .await;
+                                }
+                            }
+                        }
+                        if !reported {
+                            tracing::error!(
+                                "complete_run {} dropped after retries ({})",
+                                a.run_id,
+                                req.status
+                            );
+                        }
+                        running.lock().await.remove(&a.run_id);
+                        tracing::info!("job `{name}` finished ({})", req.status);
+                    });
+                }
+                Ok(None) => {
+                    // claimed by someone else — fine, next heartbeat offers again.
+                }
+                Err(e) => tracing::warn!("claim failed: {e}"),
+            }
+        }
+
+        let jobs_running = running.lock().await.len() as u32;
+        let delay = if jobs_running < worker_cfg.max_concurrency {
+            2
+        } else {
+            15
+        };
+        tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
     }
     Ok(())
 }
