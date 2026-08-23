@@ -191,23 +191,38 @@ async fn tunasync_json(State(state): State<AppState>) -> axum::Json<serde_json::
         entries
             .into_iter()
             .map(|e| {
+                let last_success =
+                    json_i64(e.get("last_success").unwrap_or(&serde_json::Value::Null));
+                let last_ended =
+                    json_i64(e.get("last_finished").unwrap_or(&serde_json::Value::Null));
+                // last_update is last successful sync. If a job has only
+                // failed, keep last_ended so ha-mirrors-web does not force
+                // "unknown" (`last_update_ts <= 0`).
+                let last_update_ts = synora_core::tunasync_ts(last_success.or(last_ended));
+                let last_started_ts = synora_core::tunasync_ts(json_i64(
+                    e.get("last_started").unwrap_or(&serde_json::Value::Null),
+                ));
+                let last_ended_ts = synora_core::tunasync_ts(last_ended);
+                let next_schedule_ts = synora_core::tunasync_ts(json_i64(
+                    e.get("next_run").unwrap_or(&serde_json::Value::Null),
+                ));
                 let size = e
                     .get("size_bytes")
                     .and_then(json_u64)
                     .map(synora_core::tunasync_size)
-                    .unwrap_or_default();
+                    .unwrap_or_else(|| "unknown".into());
                 serde_json::json!({
                     "name": e.get("name"),
                     "is_master": true,
-                    "status": e.get("status"),
-                    "last_update": e.get("last_finished").and_then(json_i64).map(fmt_tunasync),
-                    "last_update_ts": e.get("last_finished"),
-                    "last_started": e.get("last_started").and_then(json_i64).map(fmt_tunasync),
-                    "last_started_ts": e.get("last_started"),
-                    "last_ended": e.get("last_finished").and_then(json_i64).map(fmt_tunasync),
-                    "last_ended_ts": e.get("last_finished"),
-                    "next_schedule": e.get("next_run").and_then(json_i64).map(fmt_tunasync),
-                    "next_schedule_ts": e.get("next_run"),
+                    "status": e.get("tunasync_status"),
+                    "last_update": synora_core::tunasync_time(last_update_ts),
+                    "last_update_ts": last_update_ts,
+                    "last_started": synora_core::tunasync_time(last_started_ts),
+                    "last_started_ts": last_started_ts,
+                    "last_ended": synora_core::tunasync_time(last_ended_ts),
+                    "last_ended_ts": last_ended_ts,
+                    "next_schedule": synora_core::tunasync_time(next_schedule_ts),
+                    "next_schedule_ts": next_schedule_ts,
                     "upstream": e.get("upstream"),
                     "size": size,
                 })
@@ -240,52 +255,85 @@ fn strip_userinfo(u: &str) -> String {
 /// Shared status collection for both JSON shapes.
 async fn status_entries(state: &AppState) -> Vec<serde_json::Value> {
     let mut out = Vec::new();
-    if let (Ok(statuses), Ok(schedules)) = (
-        state.engine.store.job_status_list().await,
-        state.engine.store.all_schedules().await,
-    ) {
-        for (name, status) in statuses {
-            let job = state.engine.job(&name);
-            let last = state
-                .engine
-                .store
-                .run_history(&name, 1)
-                .await
-                .ok()
-                .and_then(|mut v| v.pop());
-            let next_run = schedules
-                .iter()
-                .find(|(n, _)| *n == name)
-                .and_then(|(_, r)| r.next_run);
-            let size = state
-                .engine
-                .store
-                .repository_size(
-                    &job.as_ref()
-                        .map(|j| j.storage.display().to_string())
-                        .unwrap_or_default(),
-                )
-                .await
-                .ok()
-                .flatten();
-            out.push(serde_json::json!({
-                "name": name,
-                "status": status.as_str().to_string(),
-                "worker": last.as_ref().and_then(|r| r.worker_id.clone()),
-                "upstream": job
-                    .as_ref()
-                    .and_then(|j| j.upstream.clone())
-                    .map(|u| strip_userinfo(&u)),
-                "size_bytes": size,
-                "size_human": size.map(|s| synora_core::human_size(s as u64)),
-                "last_started": last.as_ref().and_then(|r| r.started_at),
-                "last_finished": last.as_ref().and_then(|r| r.finished_at),
-                "last_started_human": last.as_ref().and_then(|r| r.started_at).map(fmt_local),
-                "last_finished_human": last.as_ref().and_then(|r| r.finished_at).map(fmt_local),
-                "next_run": next_run,
-                "next_run_human": next_run.map(fmt_local),
-            }));
-        }
+    let Ok(statuses) = state.engine.store.job_status_list().await else {
+        return out;
+    };
+    let schedules = state.engine.store.all_schedules().await.unwrap_or_default();
+    let run_stats: std::collections::HashMap<String, db::store::JobRunStats> = state
+        .engine
+        .store
+        .latest_run_stats()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|s| (s.job_id.clone(), s))
+        .collect();
+    let repo_sizes: std::collections::HashMap<String, i64> = state
+        .engine
+        .store
+        .list_repository_sizes()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    let run_sizes: std::collections::HashMap<String, i64> = state
+        .engine
+        .store
+        .latest_run_sizes()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+    for (name, status) in statuses {
+        let job = state.engine.job(&name);
+        let stats = run_stats.get(&name);
+        let next_run = schedules
+            .iter()
+            .find(|(n, _)| *n == name)
+            .and_then(|(_, r)| r.next_run);
+        let storage_path = job
+            .as_ref()
+            .map(|j| j.storage.display().to_string())
+            .unwrap_or_default();
+        let size = repo_sizes
+            .get(&storage_path)
+            .copied()
+            .or_else(|| run_sizes.get(&name).copied())
+            .map(|s| s as u64);
+        let last_success = stats.and_then(|s| s.last_success);
+        let last_started = stats.and_then(|s| s.last_start);
+        let last_finished = stats.and_then(|s| s.last_end);
+        let last_finished_status = stats.and_then(|s| s.last_finished_status);
+        let enabled = job.as_ref().map(|j| j.enabled).unwrap_or(true);
+        let tunasync_status = synora_core::JobStatus::tunasync_status(
+            enabled,
+            status,
+            last_finished_status,
+            last_success.is_some(),
+        );
+        out.push(serde_json::json!({
+            "name": name,
+            "status": status.as_str().to_string(),
+            "tunasync_status": tunasync_status,
+            "worker": job
+                .as_ref()
+                .and_then(|j| j.worker.clone())
+                .filter(|s| !s.is_empty())
+                .or_else(|| stats.and_then(|s| s.last_worker.clone())),
+            "upstream": job
+                .as_ref()
+                .and_then(|j| j.upstream.clone())
+                .map(|u| strip_userinfo(&u)),
+            "size_bytes": size,
+            "size_human": size.map(synora_core::human_size),
+            "last_started": last_started,
+            "last_finished": last_finished,
+            "last_success": last_success,
+            "last_started_human": last_started.map(fmt_local),
+            "last_finished_human": last_finished.map(fmt_local),
+            "next_run": next_run,
+            "next_run_human": next_run.map(fmt_local),
+        }));
     }
     out
 }
@@ -302,16 +350,6 @@ fn fmt_local(ts: i64) -> String {
             t.format(&time::format_description::well_known::Rfc3339)
                 .ok()
         })
-        .unwrap_or_else(|| "-".into())
-}
-
-/// tunasync.json timestamps: `2026-08-22 07:13:00 +0800`.
-fn fmt_tunasync(ts: i64) -> String {
-    const FMT: &[time::format_description::FormatItem<'_>] = time::macros::format_description!(
-        "[year]-[month]-[day] [hour]:[minute]:[second] [offset_hour sign:mandatory padding:zero][offset_minute]"
-    );
-    local_datetime(ts)
-        .and_then(|t| t.format(&FMT).ok())
         .unwrap_or_else(|| "-".into())
 }
 

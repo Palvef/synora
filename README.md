@@ -51,8 +51,10 @@ to TUNA and to the authors and maintainers of these projects.
   egress-IP probing (default Cloudflare egress), per-job direct sync with
   ipv4/ipv6 and bind-address selection; TUI auto-registers CF One / WARP.
 - **cgroup v2 limits** per run (memory.max / cpu.max) plus docker resource flags.
-- **tunasync.json compatibility**: the manager serves a mirror-web-compatible
-  bare-array status JSON (path configurable) alongside its native synora.json.
+- **tunasync.json compatibility**: the manager serves TUNA/mirror-web
+  `tunasync.json` (bare array, `success`/`syncing`/`failed`/`paused`,
+  last-success `last_update`, `du -h` sizes like `1.6T`) alongside its
+  native synora.json. Internal states such as `queued` stay in synora.json.
 - **Security**: Bearer-token API with RBAC permission keys, plain HTTP or
   TLS/mTLS (tunasync-style `[api.tls]` + worker `ca_cert`), constant-time
   token comparison. The rsync/docker/git providers execute argv arrays

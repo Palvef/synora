@@ -248,20 +248,12 @@ async fn main() -> Result<(), String> {
             if let Ok(statuses) = reaper_engine.store.job_status_list().await {
                 for (name, status) in statuses {
                     let job = reaper_engine.job(&name);
-                    let worker = match job
+                    let worker = job
                         .as_ref()
                         .and_then(|j| j.worker.clone())
                         .filter(|s| !s.is_empty())
-                    {
-                        Some(w) => w,
-                        None => reaper_engine
-                            .store
-                            .last_run_worker(&name)
-                            .await
-                            .ok()
-                            .flatten()
-                            .unwrap_or_else(|| "unassigned".into()),
-                    };
+                        .or_else(|| run_stats.get(&name).and_then(|s| s.last_worker.clone()))
+                        .unwrap_or_else(|| "unassigned".into());
                     let provider = job
                         .as_ref()
                         .map(|j| engine::provider_name(j))

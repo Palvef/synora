@@ -20,6 +20,8 @@ pub struct JobRunStats {
     pub last_start: Option<i64>,
     pub last_end: Option<i64>,
     pub last_success: Option<i64>,
+    pub last_finished_status: Option<JobStatus>,
+    pub last_worker: Option<String>,
     pub duration_secs: Option<i64>,
     pub memory_bytes: Option<i64>,
     pub cpu_seconds: Option<f64>,
@@ -39,6 +41,23 @@ pub struct RunRow {
     pub duration_secs: Option<i64>,
     pub exit_code: Option<i32>,
     pub message: Option<String>,
+}
+
+fn job_run_stats_entry(
+    map: &mut std::collections::HashMap<String, JobRunStats>,
+    job_id: String,
+) -> &mut JobRunStats {
+    map.entry(job_id.clone()).or_insert_with(|| JobRunStats {
+        job_id,
+        last_start: None,
+        last_end: None,
+        last_success: None,
+        last_finished_status: None,
+        last_worker: None,
+        duration_secs: None,
+        memory_bytes: None,
+        cpu_seconds: None,
+    })
 }
 
 pub struct Store {
@@ -1043,6 +1062,9 @@ impl Store {
 
     /// Latest finished run per job: timestamps + last resource sample.
     pub async fn latest_run_stats(&self) -> DbResult<Vec<JobRunStats>> {
+        let mut out: std::collections::HashMap<String, JobRunStats> =
+            std::collections::HashMap::new();
+
         let rows = self
             .db
             .query(
@@ -1060,6 +1082,26 @@ impl Store {
                 &[],
             )
             .await?;
+        for r in &rows {
+            let Some(job_id) = cell(r, "job_id").and_then(|v| v.as_str()).map(String::from) else {
+                continue;
+            };
+            let cpu = cell(r, "cpu_seconds").and_then(|v| match v {
+                crate::sqlite::DbValue::Int(i) => Some(*i as f64),
+                crate::sqlite::DbValue::Text(s) => s.parse().ok(),
+                _ => None,
+            });
+            let stats = job_run_stats_entry(&mut out, job_id);
+            stats.last_finished_status = cell(r, "status")
+                .and_then(|v| v.as_str())
+                .map(JobStatus::from_db);
+            stats.last_start = cell(r, "started_at").and_then(|v| v.as_i64());
+            stats.last_end = cell(r, "finished_at").and_then(|v| v.as_i64());
+            stats.duration_secs = cell(r, "duration_secs").and_then(|v| v.as_i64());
+            stats.memory_bytes = cell(r, "memory_bytes").and_then(|v| v.as_i64());
+            stats.cpu_seconds = cpu;
+        }
+
         let success_rows = self
             .db
             .query(
@@ -1075,37 +1117,66 @@ impl Store {
                 &[],
             )
             .await?;
-        let mut success = std::collections::HashMap::new();
         for r in &success_rows {
             if let (Some(job), Some(ts)) = (
                 cell(r, "job_id").and_then(|v| v.as_str()).map(String::from),
                 cell(r, "finished_at").and_then(|v| v.as_i64()),
             ) {
-                success.insert(job, ts);
+                job_run_stats_entry(&mut out, job).last_success = Some(ts);
             }
         }
-        Ok(rows
-            .iter()
-            .filter_map(|r| {
-                let job_id = cell(r, "job_id")
+
+        let start_rows = self
+            .db
+            .query(
+                "SELECT job_id, started_at FROM (
+                     SELECT job_id, started_at,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY job_id
+                                ORDER BY started_at DESC
+                            ) AS rn
+                     FROM job_runs
+                     WHERE started_at IS NOT NULL
+                 ) WHERE rn = 1",
+                &[],
+            )
+            .await?;
+        for r in &start_rows {
+            if let (Some(job), Some(ts)) = (
+                cell(r, "job_id").and_then(|v| v.as_str()).map(String::from),
+                cell(r, "started_at").and_then(|v| v.as_i64()),
+            ) {
+                job_run_stats_entry(&mut out, job).last_start = Some(ts);
+            }
+        }
+
+        let worker_rows = self
+            .db
+            .query(
+                "SELECT job_id, worker_id FROM (
+                     SELECT job_id, worker_id,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY job_id
+                                ORDER BY created_at DESC
+                            ) AS rn
+                     FROM job_runs
+                     WHERE worker_id IS NOT NULL
+                 ) WHERE rn = 1",
+                &[],
+            )
+            .await?;
+        for r in &worker_rows {
+            if let (Some(job), Some(worker)) = (
+                cell(r, "job_id").and_then(|v| v.as_str()).map(String::from),
+                cell(r, "worker_id")
                     .and_then(|v| v.as_str())
-                    .map(String::from)?;
-                let cpu = cell(r, "cpu_seconds").and_then(|v| match v {
-                    crate::sqlite::DbValue::Int(i) => Some(*i as f64),
-                    crate::sqlite::DbValue::Text(s) => s.parse().ok(),
-                    _ => None,
-                });
-                Some(JobRunStats {
-                    last_success: success.get(&job_id).copied(),
-                    job_id,
-                    last_start: cell(r, "started_at").and_then(|v| v.as_i64()),
-                    last_end: cell(r, "finished_at").and_then(|v| v.as_i64()),
-                    duration_secs: cell(r, "duration_secs").and_then(|v| v.as_i64()),
-                    memory_bytes: cell(r, "memory_bytes").and_then(|v| v.as_i64()),
-                    cpu_seconds: cpu,
-                })
-            })
-            .collect())
+                    .map(String::from),
+            ) {
+                job_run_stats_entry(&mut out, job).last_worker = Some(worker);
+            }
+        }
+
+        Ok(out.into_values().collect())
     }
 
     pub async fn set_run_resources(

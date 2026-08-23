@@ -39,6 +39,39 @@ pub enum JobStatus {
 }
 
 impl JobStatus {
+    /// Map internal job state onto tuna/mirror-web tunasync.json.
+    ///
+    /// ha-mirrors-web only renders `success` / `syncing` / `failed` /
+    /// `paused`. Idle queue/cancel states must keep the last finished
+    /// result, otherwise the frontend shows "unknown".
+    pub fn tunasync_status(
+        enabled: bool,
+        current: JobStatus,
+        last_finished: Option<JobStatus>,
+        has_success: bool,
+    ) -> &'static str {
+        if !enabled {
+            return "paused";
+        }
+        match current {
+            JobStatus::Syncing | JobStatus::Running | JobStatus::Cancelling => "syncing",
+            JobStatus::Failed | JobStatus::Lost | JobStatus::Skipped | JobStatus::Retrying => {
+                "failed"
+            }
+            JobStatus::Success => "success",
+            _ => match last_finished {
+                Some(
+                    JobStatus::Failed | JobStatus::Lost | JobStatus::Skipped | JobStatus::Retrying,
+                ) => "failed",
+                Some(JobStatus::Success) => "success",
+                Some(JobStatus::Cancelled) if has_success => "success",
+                Some(JobStatus::Cancelled) => "failed",
+                _ if has_success => "success",
+                _ => "none",
+            },
+        }
+    }
+
     /// Stable lowercase API / TUI label.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -311,4 +344,59 @@ pub struct JobSpec {
     pub snapshot_policy: SnapshotPolicy,
     /// Post-sync verification (spec §56).
     pub verify: VerifyConfig,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tunasync_status_maps_idle_queue_to_last_result() {
+        assert_eq!(
+            JobStatus::tunasync_status(true, JobStatus::Queued, Some(JobStatus::Success), true),
+            "success"
+        );
+        assert_eq!(
+            JobStatus::tunasync_status(true, JobStatus::Queued, Some(JobStatus::Failed), true),
+            "failed"
+        );
+        assert_eq!(
+            JobStatus::tunasync_status(true, JobStatus::Syncing, Some(JobStatus::Success), true),
+            "syncing"
+        );
+        assert_eq!(
+            JobStatus::tunasync_status(
+                true,
+                JobStatus::Cancelled,
+                Some(JobStatus::Cancelled),
+                true
+            ),
+            "success"
+        );
+        assert_eq!(
+            JobStatus::tunasync_status(true, JobStatus::Pending, None, false),
+            "none"
+        );
+        assert_eq!(
+            JobStatus::tunasync_status(false, JobStatus::Success, Some(JobStatus::Success), true),
+            "paused"
+        );
+        assert_eq!(
+            JobStatus::tunasync_status(
+                true,
+                JobStatus::Cancelled,
+                Some(JobStatus::Cancelled),
+                false
+            ),
+            "failed"
+        );
+        assert_eq!(
+            JobStatus::tunasync_status(true, JobStatus::Retrying, Some(JobStatus::Failed), true),
+            "failed"
+        );
+        assert_eq!(
+            JobStatus::tunasync_status(true, JobStatus::Scheduled, Some(JobStatus::Success), true),
+            "success"
+        );
+    }
 }
