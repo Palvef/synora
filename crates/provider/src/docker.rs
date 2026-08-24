@@ -455,13 +455,10 @@ pub async fn run_named_container(
             .kill_on_drop(true)
             .stdout(Stdio::null())
             .stderr(Stdio::null());
-        match rm.spawn() {
-            Ok(mut child) => {
-                let _ = tokio::time::timeout(Duration::from_secs(20), child.wait()).await;
-                let _ = child.start_kill();
-                let _ = child.wait().await;
-            }
-            Err(_) => {}
+        if let Ok(mut child) = rm.spawn() {
+            let _ = tokio::time::timeout(Duration::from_secs(20), child.wait()).await;
+            let _ = child.start_kill();
+            let _ = child.wait().await;
         }
     }
     // Read pipes and wait for exit concurrently with cancellation: a

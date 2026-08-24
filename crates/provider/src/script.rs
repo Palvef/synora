@@ -49,7 +49,7 @@ impl ScriptProvider {
             return crate::docker::run_named_container(
                 crate::docker::DockerRunSpec {
                     image: image.to_string(),
-                    command: crate::docker::docker_exec_args(&[self.command.clone()]),
+                    command: crate::docker::docker_exec_args(std::slice::from_ref(&self.command)),
                     extra_env: self.env.clone(),
                     extra_volumes: Vec::new(),
                     keep_container: false,
