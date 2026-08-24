@@ -80,7 +80,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          # Native build artifacts (notably aws-lc) are glibc-sensitive.
+          # Never restore objects produced on ubuntu-latest/24.04 here.
+          key: ubuntu-22.04-${{ matrix.target }}
 
       - name: Install cross toolchain (linux aarch64)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
