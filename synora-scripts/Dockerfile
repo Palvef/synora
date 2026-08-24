@@ -6,12 +6,13 @@
 # rustup-mirror is built from https://github.com/jiegec/rustup-mirror so the
 # binary is not stored in git. HTTP directory mirrors use the native http
 # provider (former tsumugu). FETCH_HTTPS_PROXY is only for HTTPS fetches
-# (git/cargo/gem/pip/curl). Do not set HTTP_PROXY: manager CONNECT expose
-# answers GET with 405 and that breaks apt.
+# (git/cargo/gem/pip/curl). Apt intentionally stays on its direct build path.
 
 FROM rust:1-bookworm AS rustup-mirror
 ARG FETCH_HTTPS_PROXY
+ARG RUSTUP_MIRROR_REV=df47bd0a6527b7781e6ec5a2136e4cc1960c0030
 WORKDIR /src
+COPY patches/rustup-mirror-large-file-timeout.patch /tmp/rustup-mirror-large-file-timeout.patch
 RUN set -e; \
     if [ -n "$FETCH_HTTPS_PROXY" ]; then \
       export HTTPS_PROXY="$FETCH_HTTPS_PROXY" \
@@ -19,7 +20,11 @@ RUN set -e; \
              ALL_PROXY="$FETCH_HTTPS_PROXY" \
              all_proxy="$FETCH_HTTPS_PROXY"; \
     fi; \
-    git clone --depth 1 https://github.com/jiegec/rustup-mirror.git .; \
+    git init .; \
+    git remote add origin https://github.com/jiegec/rustup-mirror.git; \
+    git fetch --depth 1 origin "$RUSTUP_MIRROR_REV"; \
+    git checkout --detach FETCH_HEAD; \
+    git apply /tmp/rustup-mirror-large-file-timeout.patch; \
     cargo build --release --locked; \
     install -m0755 target/release/rustup-mirror /rustup-mirror
 

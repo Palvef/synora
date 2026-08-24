@@ -34,14 +34,16 @@ Job commands stay `/usr/lib/synora/scripts/<name>`.
 | `MIRROR_BASE_URL` | rustup: public URL written into manifests |
 | `RUSTUP_TARGETS` | rustup: comma-separated rustc targets (default: Tier 1, no i686) |
 | `RUSTUP_GC` | rustup: nightly retention days (default 30) |
+| `RUSTUP_MIRROR_TIMEOUT_SECS` | rustup: per-file client timeout (default 21600) |
 
 HTTP directory mirrors use Synora's native `http` provider, not `tsumugu.sh`.
 
 The worker injects `ALL_PROXY` / `HTTP(S)_PROXY` and starts each job with
 `docker --init --entrypoint <script>` so git/repo children are reaped.
 Python scripts that need CONNECT for `http://` URLs call
-`helpers.http_connect.enable()`. `helpers/http_connect_proxy.py` stays in
-the image for optional use; it is not PID 1. `github-release.py` reads
+`helpers.http_connect.enable()`. `proxmox.sh` and `virtualbox.sh` use
+`helpers/http_connect_proxy.py` as a compatibility adapter for older
+CONNECT-only managers; it is not PID 1. `github-release.py` reads
 `github-release.json` from the script directory. `debian.sh` / `kali.sh`
 generate an ftpsync config from `SYNORA_UPSTREAM` and `SYNORA_STORAGE`.
 

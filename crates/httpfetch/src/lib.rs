@@ -16,16 +16,19 @@ use tokio_util::sync::CancellationToken;
 
 /// Upper bound on index entries visited while planning, so a hostile or
 /// runaway index can't spin the planner forever.
-const MAX_ENTRIES: usize = 200_000;
+// Large upstreams such as download.postgresql.org exceed 200k entries. Keep
+// a defensive ceiling, but high enough to finish a real distribution tree.
+const MAX_ENTRIES: usize = 1_000_000;
 /// Hard cap on recursion depth even when the caller asks for more.
 const MAX_DEPTH: u32 = 16;
 /// Default max concurrent downloads during [`Fetcher::execute`]; override
 /// per fetcher via [`Fetcher::with_threads`] (tunasync
 /// `TUNASYNC_TSUMUGU_THREADS`).
 pub const DEFAULT_THREADS: usize = 5;
-/// Per-request timeout (listings and downloads alike); a timed-out file is
-/// skipped like any other single-file failure.
-const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Connection and idle-read timeouts. A total 30-second request deadline made
+/// every large package fail even while bytes were still arriving.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Live progress lines are appended at most this often (per-run log noise cap).
 const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
@@ -115,8 +118,8 @@ pub struct Plan {
 }
 
 /// HTTP fetcher: a reqwest client with rustls, redirects followed (max 10),
-/// no proxy by default, 30 s per-request timeout, up to `threads`
-/// concurrent downloads.
+/// no proxy by default, a 30 s connect timeout plus 120 s idle-read timeout,
+/// and up to `threads` concurrent downloads.
 pub struct Fetcher {
     client: reqwest::Client,
     threads: usize,
@@ -133,7 +136,8 @@ impl Fetcher {
     pub fn with_proxy(proxy: Option<&str>) -> Result<Self, FetchError> {
         let mut builder = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::limited(10))
-            .timeout(REQUEST_TIMEOUT);
+            .connect_timeout(CONNECT_TIMEOUT)
+            .read_timeout(READ_TIMEOUT);
         builder = match proxy {
             Some(url) if url.to_ascii_lowercase().starts_with("socks") => {
                 return Err(FetchError::Http(
@@ -330,12 +334,15 @@ impl Fetcher {
                 Ok(Err((e, url))) => {
                     stats.files_skipped += 1;
                     stats.files_failed += 1;
-                    stats.log_lines.push(format!("skipped {url}: {e}"));
+                    let line = format!("skipped {url}: {e}");
+                    append_log(log_file, &line);
+                    stats.log_lines.push(line);
                 }
                 Err(_) => {
                     tracing::warn!("download task panicked");
                     stats.files_skipped += 1;
                     stats.files_failed += 1;
+                    append_log(log_file, "skipped download: worker task panicked");
                 }
             }
             if stats.log_lines.len() > 256 {

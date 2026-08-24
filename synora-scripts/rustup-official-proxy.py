@@ -169,6 +169,6 @@ with open(portfile, "w", encoding="utf-8") as fh:
     fh.write(str(httpd.server_address[1]))
 sys.stderr.write(
     "official sidecar listening on 127.0.0.1:%s -> %s proxy=%s\n"
-    % (httpd.server_address[1], upstream, proxy_url or "direct")
+    % (httpd.server_address[1], upstream, "configured" if proxy_url else "direct")
 )
 httpd.serve_forever()

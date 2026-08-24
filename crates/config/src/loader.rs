@@ -53,8 +53,8 @@ pub struct ProxyConfig {
     /// Local listener to expose when "exposed" from the TUI
     /// (e.g. "127.0.0.1:4000" for a local CF One / WARP endpoint).
     pub expose: Option<String>,
-    /// Optional "user:pass" for the exposed HTTP CONNECT port. Empty means
-    /// unauthenticated CONNECT (required for rsync `RSYNC_PROXY=host:port`).
+    /// Optional "user:pass" for the exposed HTTP proxy port. Empty means
+    /// unauthenticated use (required for rsync `RSYNC_PROXY=host:port`).
     pub expose_auth: Option<String>,
 }
 

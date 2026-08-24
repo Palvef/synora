@@ -25,7 +25,7 @@ fn resolve_proxy_env(
     let Some(nr) = netroute else {
         return Vec::new();
     };
-    let selection = nr.select_proxy(job.proxy.as_deref());
+    let selection = nr.select_job_proxy(job.proxy.as_deref());
     let cfg = match &selection {
         netroute::Selection::Forward { name, .. } => nr.proxy_configs().get(name),
         _ => None,

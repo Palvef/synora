@@ -146,13 +146,25 @@ impl NetRoute {
         }
     }
 
-    /// Resolve a job's `proxy` (job-level name, or None → default_proxy).
+    /// Resolve a general-purpose proxy selection. When no name is supplied,
+    /// `default_proxy` is used (for probes and interactive tools).
     /// Group strategies: fixed (first), failover (first healthy), round-robin,
     /// random. Unhealthy proxies are skipped (except `fixed`, which returns
     /// it anyway — operator intent). Unprobed proxies count as healthy;
     /// command proxies can't route traffic and are skipped in groups.
-    pub fn select_proxy(&self, job_proxy: Option<&str>) -> Selection {
-        let name = job_proxy.or(self.default_proxy.as_deref());
+    pub fn select_proxy(&self, proxy_name: Option<&str>) -> Selection {
+        let name = proxy_name.or(self.default_proxy.as_deref());
+        self.select_named_proxy(name)
+    }
+
+    /// Resolve a sync job's explicitly configured proxy. Mirror jobs are
+    /// direct unless their own `proxy` field is set; `default_proxy` is only
+    /// the default for manager-side tools/probes.
+    pub fn select_job_proxy(&self, proxy_name: Option<&str>) -> Selection {
+        self.select_named_proxy(proxy_name)
+    }
+
+    fn select_named_proxy(&self, name: Option<&str>) -> Selection {
         let Some(name) = name else {
             return Selection::Direct;
         };
@@ -887,9 +899,9 @@ fn lcg() -> u64 {
 
 // ---------------------------------------------------------------------------
 // Authenticated expose proxy (user requirement): registering CF One / WARP
-// with an `expose` address also starts a Basic-auth HTTP CONNECT proxy on
-// this machine that forwards to the local WARP endpoint — other programs on
-// the box can use the port with the generated credentials.
+// with an `expose` address also starts a Basic-auth HTTP proxy on this
+// machine that forwards CONNECT tunnels and plain HTTP requests through the
+// local WARP endpoint.
 // ---------------------------------------------------------------------------
 
 /// Connect to an upstream SOCKS5 (no-auth) proxy and tunnel to target.
@@ -951,9 +963,10 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-/// Serve an HTTP CONNECT proxy on `listen`, forwarding through the local
-/// WARP/SOCKS endpoint `upstream`. Empty user/pass allows unauthenticated
-/// CONNECT (needed for rsync `RSYNC_PROXY=host:port`). Runs forever.
+/// Serve an HTTP proxy on `listen`, forwarding CONNECT and plain HTTP through
+/// the local WARP/SOCKS endpoint `upstream`. Empty user/pass allows
+/// unauthenticated use (needed for rsync `RSYNC_PROXY=host:port`). Runs
+/// forever.
 pub async fn serve_auth_proxy(
     listen: &str,
     upstream: &str,
@@ -1016,7 +1029,8 @@ async fn serve_auth_proxy_conn(
     upstream: &str,
     expected_auth: &str,
 ) -> Result<(), RouteError> {
-    // Read the CONNECT request head.
+    // Read one proxy request head. Any request body remains in the socket and
+    // is relayed by copy_bidirectional after the rewritten head.
     let mut head = Vec::new();
     let mut buf = [0u8; 1];
     while !head.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -1032,17 +1046,18 @@ async fn serve_auth_proxy_conn(
     let text = String::from_utf8_lossy(&head);
     let mut lines = text.lines();
     let request = lines.next().unwrap_or("");
-    // `CONNECT host:port HTTP/1.1`
     let mut parts = request.split_whitespace();
-    let (Some("CONNECT"), Some(hostport)) = (parts.next(), parts.next()) else {
-        let _ = client
-            .write_all(b"HTTP/1.1 405 Method Not Allowed\r\n\r\n")
-            .await;
+    let (Some(method), Some(target), Some(version)) = (parts.next(), parts.next(), parts.next())
+    else {
+        let _ = client.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n").await;
         return Ok(());
     };
     if !expected_auth.is_empty() {
         let auth_ok = lines
-            .find_map(|l| l.strip_prefix("Proxy-Authorization:"))
+            .clone()
+            .find_map(|l| l.split_once(':'))
+            .filter(|(name, _)| name.eq_ignore_ascii_case("Proxy-Authorization"))
+            .map(|(_, value)| value)
             .map(|v| v.trim().as_bytes())
             .map(|v| constant_time_eq(v, expected_auth.as_bytes()))
             .unwrap_or(false);
@@ -1053,6 +1068,63 @@ async fn serve_auth_proxy_conn(
             return Ok(());
         }
     }
+
+    if !method.eq_ignore_ascii_case("CONNECT") {
+        let Ok(url) = reqwest::Url::parse(target) else {
+            let _ = client.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n").await;
+            return Ok(());
+        };
+        if url.scheme() != "http" {
+            let _ = client
+                .write_all(b"HTTP/1.1 405 Method Not Allowed\r\n\r\n")
+                .await;
+            return Ok(());
+        }
+        let Some(target_host) = url.host_str() else {
+            let _ = client.write_all(b"HTTP/1.1 400 Bad Request\r\n\r\n").await;
+            return Ok(());
+        };
+        let target_port = url.port_or_known_default().unwrap_or(80);
+        let mut tunnel = match socks5_connect_tunnel(upstream, target_host, target_port).await {
+            Ok(t) => t,
+            Err(_) => {
+                let _ = client.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await;
+                return Ok(());
+            }
+        };
+        let mut origin = url.path().to_string();
+        if origin.is_empty() {
+            origin.push('/');
+        }
+        if let Some(query) = url.query() {
+            origin.push('?');
+            origin.push_str(query);
+        }
+        let mut forwarded = format!("{method} {origin} {version}\r\n").into_bytes();
+        for line in lines {
+            if line.is_empty() {
+                continue;
+            }
+            let name = line.split_once(':').map(|(name, _)| name).unwrap_or("");
+            if name.eq_ignore_ascii_case("Proxy-Authorization")
+                || name.eq_ignore_ascii_case("Proxy-Connection")
+            {
+                continue;
+            }
+            forwarded.extend_from_slice(line.as_bytes());
+            forwarded.extend_from_slice(b"\r\n");
+        }
+        forwarded.extend_from_slice(b"\r\n");
+        if tunnel.write_all(&forwarded).await.is_err() {
+            let _ = client.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await;
+            return Ok(());
+        }
+        let _ = tokio::io::copy_bidirectional(&mut client, &mut tunnel).await;
+        return Ok(());
+    }
+
+    // `CONNECT host:port HTTP/1.1`
+    let hostport = target;
     let (target_host, target_port) = {
         let (h, p) = hostport
             .rsplit_once(':')
@@ -1371,6 +1443,16 @@ mod tests {
         // job-level wins over default
         assert_eq!(
             route.select_proxy(None),
+            Selection::Forward {
+                name: "p".into(),
+                url: "http://p".into(),
+                env: vec![]
+            }
+        );
+        // Synchronization is direct unless the job explicitly opts in.
+        assert_eq!(route.select_job_proxy(None), Selection::Direct);
+        assert_eq!(
+            route.select_job_proxy(Some("p")),
             Selection::Forward {
                 name: "p".into(),
                 url: "http://p".into(),
@@ -1705,6 +1787,37 @@ mod tests {
         assert_eq!(probe.egress_ip.as_deref(), Some(PROBE_BODY));
         th.abort();
         ph.abort();
+    }
+
+    #[tokio::test]
+    async fn exposed_proxy_forwards_plain_http_through_socks() {
+        let (target, th) = spawn_http_target().await;
+        let (socks, sh) = spawn_socks5_proxy().await;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy_addr = listener.local_addr().unwrap();
+        let upstream = format!("socks5h://127.0.0.1:{}", socks.port());
+        let ph = tokio::spawn(async move {
+            let (client, _) = listener.accept().await.unwrap();
+            serve_auth_proxy_conn(client, &upstream, "").await.unwrap();
+        });
+        let client = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all(format!("http://{proxy_addr}")).unwrap())
+            .build()
+            .unwrap();
+        let body = client
+            .get(format!("http://127.0.0.1:{}/probe?q=1", target.port()))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .text()
+            .await
+            .unwrap();
+        assert_eq!(body, PROBE_BODY);
+        ph.await.unwrap();
+        th.abort();
+        sh.abort();
     }
 
     #[tokio::test]

@@ -47,10 +47,10 @@ async fn main() -> Result<(), String> {
         )
         .init();
 
-    // Serve HTTP CONNECT expose proxies for the manager's own proxy
-    // configs. Workers receive these addresses with the assignment and
-    // must not talk to manager-local loopback/SOCKS directly. Auth is
-    // optional: rsync's RSYNC_PROXY=host:port cannot send Basic credentials.
+    // Serve HTTP expose proxies for the manager's own proxy configs. Workers
+    // receive these addresses with the assignment and must not talk to
+    // manager-local loopback/SOCKS directly. Auth is optional: rsync's
+    // RSYNC_PROXY=host:port cannot send Basic credentials.
     for (name, p) in &cfg.proxies {
         let Some(expose) = &p.expose else { continue };
         let config::ProxyKind::Forward { url, .. } = &p.kind else {
@@ -70,7 +70,7 @@ async fn main() -> Result<(), String> {
             }
         });
         tracing::info!(
-            "proxy `{name}`: serving HTTP CONNECT expose {expose} → {url}{}",
+            "proxy `{name}`: serving HTTP expose {expose} → {url}{}",
             if p.expose_auth.is_some() {
                 " (auth)"
             } else {

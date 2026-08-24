@@ -3,9 +3,22 @@
 set -e
 set -o pipefail
 
-_here=`dirname $(realpath $0)`
+_here=$(dirname "$(realpath "$0")")
 apt_sync="${_here}/apt-sync.py" 
 yum_sync="${_here}/yum-sync.py"
+
+# Keep working with an older CONNECT-only manager expose: requests, wget and
+# the package helpers all use this local adapter for plain HTTP URLs.
+connect_wrapper="${_here}/helpers/http_connect_proxy.py"
+assigned_proxy=${HTTP_PROXY:-${http_proxy:-${ALL_PROXY:-${all_proxy:-}}}}
+if [ "${SYNORA_HTTP_CONNECT_WRAPPED:-}" != "1" ] && [ -f "$connect_wrapper" ]; then
+	case "$assigned_proxy" in
+		http://*|https://*)
+			export SYNORA_HTTP_CONNECT_WRAPPED=1
+			exec python3 "$connect_wrapper" -- "$0" "$@"
+			;;
+	esac
+fi
 
 MAX_RETRY=${MAX_RETRY:-"3"}
 DOWNLOAD_TIMEOUT=${DOWNLOAD_TIMEOUT:-"1800"}

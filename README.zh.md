@@ -11,7 +11,7 @@ Synora 是一个用 Rust 编写的**镜像同步引擎**：统一管理「什么
   manager/worker 之间明文或证书加密、`mirror_subdir`、tunasync.json 兼容输出、
   感谢 TUNA 的 tunasync / tunasync-scripts
 - **Yuki**：SQLite 存储、`yukictl reload` 式热重载、每仓库 cron 调度
-- **tsumugu**：HTTP 目录镜像的容错语义（单文件失败跳过、忽略软链接、30s 单请求超时）
+- **tsumugu**：HTTP 目录镜像的容错语义（单文件失败跳过、忽略软链接；连接超时 30s、空闲读取超时 120s）
 
 > 本项目为 tunasync / Yuki / tsumugu 的再实现与演进，在此向上述项目的作者与维护者
 > 致以感谢。

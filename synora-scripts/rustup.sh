@@ -3,8 +3,6 @@ set -euo pipefail
 
 cd "$SYNORA_STORAGE"
 echo "==== SYNC rustup START ===="
-echo "proxy env before sidecar:"
-env | grep -i proxy || echo "(none)"
 
 # Sidecar must fetch official through the manager-assigned proxy.
 # rustup-mirror must NOT inherit it: otherwise GET 127.0.0.1 is sent to
@@ -53,7 +51,11 @@ echo "official upstream: ${OFFICIAL}"
 echo "manifest public url (-u): ${BASE_URL}"
 echo "targets (-t): ${TIER1_TARGETS}"
 echo "keep (--keep): ${KEEP}"
-echo "sidecar ALL_PROXY: ${SIDECAR_ALL_PROXY:-none}"
+if [ -n "$SIDECAR_ALL_PROXY" ]; then
+  echo "sidecar proxy: configured"
+else
+  echo "sidecar proxy: direct"
+fi
 "$MIRROR_BIN" -V || true
 
 PROXY_PY=/usr/lib/synora/scripts/rustup-official-proxy.py

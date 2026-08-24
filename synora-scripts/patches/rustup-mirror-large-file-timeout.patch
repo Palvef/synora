@@ -1,0 +1,19 @@
+diff --git a/src/main.rs b/src/main.rs
+index 8b4ade0..875d9f1 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -379,6 +379,13 @@ fn file_sha256(file_path: &Path) -> Option<String> {
+ fn download(upstream_url: &str, dir: &str, path: &str) -> Result<PathBuf, Error> {
+     let manifest = format!("{}{}", upstream_url, path);
+-    let mut response = reqwest::blocking::get(&manifest)?;
++    let timeout_secs = std::env::var("RUSTUP_MIRROR_TIMEOUT_SECS")
++        .ok()
++        .and_then(|value| value.parse().ok())
++        .unwrap_or(21_600);
++    let client = reqwest::blocking::Client::builder()
++        .timeout(std::time::Duration::from_secs(timeout_secs))
++        .build()?;
++    let mut response = client.get(&manifest).send()?;
+     let mirror = Path::new(dir);
+     let file_path = mirror.join(&path);
+     create_dir_all(file_path.parent().unwrap())?;

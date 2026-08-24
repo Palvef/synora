@@ -361,7 +361,7 @@ fn proxy_env_for(state: &AppState, job: &synora_core::job::JobSpec) -> Vec<(Stri
         .ok()
         .and_then(|g| {
             g.as_ref().map(|nr| {
-                let sel = nr.select_proxy(job.proxy.as_deref());
+                let sel = nr.select_job_proxy(job.proxy.as_deref());
                 let cfg = match &sel {
                     netroute::Selection::Forward { name, .. } => nr.proxy_configs().get(name),
                     _ => None,
