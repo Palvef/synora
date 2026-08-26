@@ -4,6 +4,12 @@ set -e
 REPO=${REPO:-"/usr/local/bin/repo"}
 USE_BITMAP_INDEX=${USE_BITMAP_INDEX:-"0"}
 UPSTREAM=${SYNORA_UPSTREAM:-"https://android.googlesource.com/mirror/manifest"}
+AOSP_SYNC_JOBS=${AOSP_SYNC_JOBS:-"4"}
+
+if [[ ! "$AOSP_SYNC_JOBS" =~ ^[1-9][0-9]*$ ]]; then
+	echo "AOSP_SYNC_JOBS must be a positive integer" >&2
+	exit 2
+fi
 
 git config --global user.email "mirrors@hernet"
 git config --global user.name "hernet mirrors"
@@ -19,7 +25,7 @@ function repo_init() {
 function repo_sync() {
 	cd $SYNORA_STORAGE
 	set +e
-	$REPO sync -f -j1
+	$REPO sync -f -j"$AOSP_SYNC_JOBS"
 	repo_sync_rc=$?
 	set -e
 	if [[ "$repo_sync_rc" -ne 0 ]]; then

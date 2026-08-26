@@ -155,8 +155,9 @@ impl ScriptProvider {
             ..Default::default()
         };
 
-        // Exit 0 = SUCCESS, non-zero = FAILED (spec §16) — but SYNORA_STATUS=
-        // can override both directions.
+        // Exit 0 = SUCCESS, non-zero/no-code = FAILED (spec §16).
+        // SYNORA_STATUS can turn exit 0 into failure, but success must never
+        // hide a real process failure.
         // Failures carry the script's output so it lands in the run log.
         let fail = |code: i32| -> ProviderError {
             let out = String::from_utf8_lossy(&result.stdout);
@@ -177,11 +178,19 @@ impl ScriptProvider {
                 }
             ))
         };
-        match (&result.status, status.code()) {
-            (Some(s), _) if s == "success" => Ok(result),
-            (Some(_), _) => Err(fail(status.code().unwrap_or(1))),
-            (None, Some(0)) | (None, None) => Ok(result),
-            (None, Some(code)) => Err(fail(code)),
+        if crate::process_result_is_success(result.exit_code, result.status.as_deref(), &[]) {
+            return Ok(result);
+        }
+        match (result.exit_code, result.status.as_deref()) {
+            (None, _) => Err(ProviderError::Other(
+                "script terminated without an exit code".to_string(),
+            )),
+            (Some(0), Some(reported)) => Err(ProviderError::Other(format!(
+                "script reported status {reported}"
+            ))),
+            // The success predicate above accepts exit 0 without a status.
+            (Some(0), None) => unreachable!(),
+            (Some(code), _) => Err(fail(code)),
         }
     }
 }

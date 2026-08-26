@@ -272,10 +272,30 @@ pub struct SyncResult {
     pub bytes_transferred: Option<u64>,
     /// Human message (SYNORA_MESSAGE= or provider summary).
     pub message: Option<String>,
-    /// Machine-readable status from the provider (SYNORA_STATUS=);
-    /// "success" counts as success even with a non-zero exit, anything else
-    /// forces failure even with exit 0 (spec §16).
+    /// Machine-readable status from the provider (SYNORA_STATUS=).
+    /// A non-success value forces failure even with exit 0. `success` is
+    /// advisory and never overrides a missing or non-zero process exit code.
     pub status: Option<String>,
+}
+
+/// Apply the common process-result contract used by script/docker providers
+/// and by the engine's defensive final-status check.
+///
+/// Success requires both an allowed exit code and either no reported status or
+/// `SYNORA_STATUS=success`. A status line can make an exit-0 process fail, but
+/// can never turn a non-zero (or signal/no-code) exit into success.
+pub fn process_result_is_success(
+    exit_code: Option<i32>,
+    reported_status: Option<&str>,
+    allowed_nonzero_exit_codes: &[i32],
+) -> bool {
+    let status_ok = reported_status.map(|s| s == "success").unwrap_or(true);
+    let exit_ok = match exit_code {
+        Some(0) => true,
+        Some(code) => allowed_nonzero_exit_codes.contains(&code),
+        None => false,
+    };
+    status_ok && exit_ok
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -472,5 +492,38 @@ pub fn build_provider(job: &JobSpec) -> Result<Provider, ProviderError> {
             delete: *delete,
             threads: *threads,
         })),
+    }
+}
+
+#[cfg(test)]
+mod result_tests {
+    use super::process_result_is_success;
+
+    #[test]
+    fn reported_success_never_overrides_process_failure() {
+        assert!(!process_result_is_success(Some(1), Some("success"), &[]));
+        assert!(!process_result_is_success(None, Some("success"), &[]));
+    }
+
+    #[test]
+    fn reported_failure_overrides_exit_zero() {
+        assert!(!process_result_is_success(Some(0), Some("failed"), &[]));
+        assert!(process_result_is_success(Some(0), Some("success"), &[]));
+        assert!(process_result_is_success(Some(0), None, &[]));
+    }
+
+    #[test]
+    fn explicitly_allowed_nonzero_exit_still_requires_success_status() {
+        assert!(process_result_is_success(Some(24), None, &[23, 24]));
+        assert!(process_result_is_success(
+            Some(24),
+            Some("success"),
+            &[23, 24]
+        ));
+        assert!(!process_result_is_success(
+            Some(24),
+            Some("failed"),
+            &[23, 24]
+        ));
     }
 }

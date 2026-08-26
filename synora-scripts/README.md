@@ -3,6 +3,9 @@
 Mirror sync scripts for Synora `provider = "script"` and `provider = "docker"` jobs.
 
 They run inside the `synora-scripts` image (`docker run synora-scripts:latest`).
+
+The AOSP script uses four parallel `repo sync` jobs by default. Set
+`AOSP_SYNC_JOBS` on the job to override the concurrency.
 Git jobs (`provider = "git"`) use the same image. Script jobs can keep
 `provider = "script"` (worker wraps them in `scripts_image`) or use an
 explicit docker job:

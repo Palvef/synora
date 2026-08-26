@@ -520,10 +520,13 @@ pub async fn run_named_container(
             "script reported failure: {reason}"
         )));
     }
-    if let Some(status) = status.as_deref() {
-        if status == "success" {
-            return Ok(result);
-        }
+    if crate::process_result_is_success(result.exit_code, status.as_deref(), &[]) {
+        return Ok(result);
+    }
+    // Exit status is authoritative. SYNORA_STATUS=success is only an
+    // annotation and must not turn a failed container into a successful run.
+    if code == 0 {
+        let status = status.as_deref().unwrap_or("invalid");
         let mut detail = String::from_utf8_lossy(&result.stderr).trim().to_string();
         if detail.is_empty() {
             detail = String::from_utf8_lossy(&result.stdout).trim().to_string();
@@ -533,31 +536,27 @@ pub async fn run_named_container(
             detail.chars().take(800).collect::<String>()
         )));
     }
-    if code == 0 {
-        Ok(result)
+    // Carry both streams: tunasync scripts often print the reason on stdout,
+    // not stderr.
+    let mut detail = String::from_utf8_lossy(&result.stderr).trim().to_string();
+    if detail.is_empty() {
+        detail = String::from_utf8_lossy(&result.stdout).trim().to_string();
     } else {
-        // Carry both streams: tunasync scripts often print the reason
-        // on stdout, not stderr.
-        let mut detail = String::from_utf8_lossy(&result.stderr).trim().to_string();
-        if detail.is_empty() {
-            detail = String::from_utf8_lossy(&result.stdout).trim().to_string();
-        } else {
-            let out = String::from_utf8_lossy(&result.stdout);
-            if !out.trim().is_empty() {
-                detail.push_str(" | stdout: ");
-                detail.push_str(out.trim());
-            }
+        let out = String::from_utf8_lossy(&result.stdout);
+        if !out.trim().is_empty() {
+            detail.push_str(" | stdout: ");
+            detail.push_str(out.trim());
         }
-        detail = detail.chars().take(800).collect();
-        Err(ProviderError::Other(format!(
-            "docker exited with {code}{}",
-            if detail.is_empty() {
-                String::new()
-            } else {
-                format!(": {detail}")
-            }
-        )))
     }
+    detail = detail.chars().take(800).collect();
+    Err(ProviderError::Other(format!(
+        "docker exited with {code}{}",
+        if detail.is_empty() {
+            String::new()
+        } else {
+            format!(": {detail}")
+        }
+    )))
 }
 
 #[cfg(test)]

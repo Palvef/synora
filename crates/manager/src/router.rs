@@ -766,6 +766,26 @@ async fn complete(
     // own id; auth.name is only the token name).
     let worker_label = run.worker_id.clone().unwrap_or_else(|| auth.name.clone());
     let mut new_status = JobStatus::Success;
+    // Treat the process exit status as authoritative at the manager boundary too.
+    // This protects the database from old, buggy, or custom workers that report
+    // `status=success` together with a failed process exit code.
+    let completion_validation_error = (body.status == "success")
+        .then(|| {
+            engine::reported_completion_failure_reason(
+                &job,
+                body.exit_code.map(|value| value as i32),
+                Some(body.status.as_str()),
+            )
+        })
+        .flatten();
+    let effective_status = if completion_validation_error.is_some() {
+        "failed"
+    } else {
+        body.status.as_str()
+    };
+    let completion_message = completion_validation_error
+        .as_deref()
+        .or(body.message.as_deref());
     // Store the worker-reported log (distributed runs: the log lives on the
     // worker host; the manager keeps the text for job_logs).
     if let Some(log) = body.log.as_deref().filter(|l| !l.is_empty()) {
@@ -781,7 +801,7 @@ async fn complete(
             .await;
     }
 
-    match body.status.as_str() {
+    match effective_status {
         "cancelled" => {
             new_status = JobStatus::Cancelled;
             let _ = state
@@ -794,7 +814,7 @@ async fn complete(
                     None,
                     None,
                     None,
-                    body.message.as_deref(),
+                    completion_message,
                     duration,
                 )
                 .await;
@@ -810,7 +830,7 @@ async fn complete(
                     body.size_before,
                     body.size_after,
                     body.bytes_transferred,
-                    body.message.as_deref(),
+                    completion_message,
                     duration,
                 )
                 .await;
@@ -878,7 +898,7 @@ async fn complete(
                             None,
                             None,
                             None,
-                            body.message.as_deref(),
+                            completion_message,
                             duration,
                         )
                         .await;

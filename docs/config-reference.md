@@ -116,6 +116,8 @@ Worker 上始终在 `synora-scripts` 容器内执行（`[worker] scripts_image`�
 |---|---|---|
 | `command` | `string` | 脚本/命令路径。注入 `SYNORA_JOB/UPSTREAM/STORAGE/LOG_DIR/RUN_ID/API`；输出 `SYNORA_SIZE=123`（字节）、`SYNORA_STATUS=success`、`SYNORA_MESSAGE=…` |
 
+脚本和容器的退出码是最终依据：只有退出码为 0 且没有报告失败状态时才算成功。`SYNORA_STATUS=success` 不能覆盖非零退出码；`SYNORA_STATUS=failed` 则可以将退出码为 0 的运行标记为失败。`success_exit_codes` 仅用于 rsync provider 显式接受部分传输退出码。
+
 ### docker provider
 
 | 配置项 | 类型 | 说明 |

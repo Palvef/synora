@@ -452,21 +452,27 @@ fn outcome_to_complete(
     log_dir: &std::path::Path,
     storage_ctx: Option<&engine::RunStorageCtx>,
 ) -> CompleteRequest {
+    let result = outcome.result.as_ref().ok();
+    let validation_error = result.and_then(|r| engine::sync_result_failure_reason(job, r));
     let status = match &outcome.result {
-        Ok(_) => "success",
+        Ok(_) if validation_error.is_none() => "success",
+        Ok(_) => "failed",
         Err(provider::ProviderError::Cancelled) => "cancelled",
         Err(_) => "failed",
     };
-    let ok = outcome.result.as_ref().ok();
+    let successful = (status == "success").then_some(());
     let dest = storage_ctx
         .map(|ctx| ctx.resolve_storage_path(job))
         .unwrap_or_else(|| job.storage.clone());
-    let size_after = ok
-        .and_then(|r| r.size_hint)
-        .or_else(|| engine::logs::measure_repo_size(&dest))
-        .or_else(|| match job.statistics {
-            synora_core::StatisticsMode::Filesystem => Some(engine::logs::walk_size(&dest)),
-            synora_core::StatisticsMode::Provider => None,
+    let size_after = successful
+        .and_then(|_| {
+            result
+                .and_then(|r| r.size_hint)
+                .or_else(|| engine::logs::measure_repo_size(&dest))
+                .or_else(|| match job.statistics {
+                    synora_core::StatisticsMode::Filesystem => Some(engine::logs::walk_size(&dest)),
+                    synora_core::StatisticsMode::Provider => None,
+                })
         })
         .map(|v| v as i64);
     // Report the run log so the manager can serve job_logs for
@@ -486,12 +492,12 @@ fn outcome_to_complete(
     CompleteRequest {
         worker_id: worker_id.to_string(),
         status: status.to_string(),
-        exit_code: ok.and_then(|r| r.exit_code).map(|v| v as i64),
+        exit_code: result.and_then(|r| r.exit_code).map(|v| v as i64),
         size_before: None,
         size_after,
-        bytes_transferred: ok.and_then(|r| r.bytes_transferred).map(|v| v as i64),
+        bytes_transferred: result.and_then(|r| r.bytes_transferred).map(|v| v as i64),
         message: match &outcome.result {
-            Ok(r) => r.message.clone(),
+            Ok(r) => validation_error.clone().or_else(|| r.message.clone()),
             Err(e) => Some(e.to_string()),
         },
         log,

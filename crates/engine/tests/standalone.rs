@@ -167,6 +167,36 @@ retry_delay = "1s"
 }
 
 #[tokio::test]
+async fn reported_success_cannot_hide_nonzero_exit() {
+    let dir = temp_dir("status-cannot-hide-exit");
+    write(
+        &dir,
+        "jobs/status.toml",
+        &format!(
+            r#"[[jobs]]
+name = "status"
+schedule = "startup"
+provider = "script"
+command = "echo SYNORA_STATUS=success; exit 7"
+storage = "{}"
+retry = 0
+"#,
+            dir.join("repo/status").display()
+        ),
+    );
+    write(&dir, "synora.toml", &config_text(&dir));
+    let engine = engine_for(&dir).await;
+    engine.sync_config().await.unwrap();
+    let run_id = engine.dispatch("status", true).await.unwrap();
+    let status = wait_terminal(&engine, &run_id, 15).await;
+    assert_eq!(
+        status,
+        synora_core::JobStatus::Failed,
+        "SYNORA_STATUS=success must not override exit 7"
+    );
+}
+
+#[tokio::test]
 async fn fail_on_match_forces_failure_despite_exit_zero() {
     let dir = temp_dir("failonmatch");
     write(

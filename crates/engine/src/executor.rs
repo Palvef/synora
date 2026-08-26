@@ -42,6 +42,41 @@ pub struct RunOutcome {
     pub cpu_seconds: Option<f64>,
 }
 
+/// Defensive validation before a provider result is persisted or reported.
+/// Providers should already return `Err` for these cases, but keeping the
+/// invariant here prevents a future/custom provider from reporting success
+/// with a failed process status.
+pub fn reported_completion_failure_reason(
+    job: &JobSpec,
+    exit_code: Option<i32>,
+    reported_status: Option<&str>,
+) -> Option<String> {
+    let allowed_nonzero = if matches!(
+        &job.provider,
+        synora_core::ProviderConfig::Rsync { .. }
+            | synora_core::ProviderConfig::TwoStageRsync { .. }
+    ) {
+        job.success_exit_codes.as_slice()
+    } else {
+        &[]
+    };
+    if provider::process_result_is_success(exit_code, reported_status, allowed_nonzero) {
+        return None;
+    }
+    if let Some(status) = reported_status.filter(|s| *s != "success") {
+        return Some(format!("provider reported status {status}"));
+    }
+    match exit_code {
+        Some(code) => Some(format!("provider exited with {code}")),
+        None => Some("provider terminated without an exit code".to_string()),
+    }
+}
+
+/// Defensive validation before a provider result is persisted or reported.
+pub fn sync_result_failure_reason(job: &JobSpec, result: &SyncResult) -> Option<String> {
+    reported_completion_failure_reason(job, result.exit_code, result.status.as_deref())
+}
+
 /// Execute one claimed run. Called from a spawned task; drops the global
 /// semaphore permit when done.
 pub async fn execute_run(
@@ -858,7 +893,7 @@ async fn finish_run(engine: &Arc<Engine>, run_id: &str, job: &JobSpec, outcome: 
     }
 
     let success = match &outcome.result {
-        Ok(r) => r.status.as_deref().map(|s| s == "success").unwrap_or(true),
+        Ok(r) => sync_result_failure_reason(job, r).is_none(),
         Err(_) => false,
     };
     let final_status = if success {
@@ -931,10 +966,8 @@ async fn finish_run(engine: &Arc<Engine>, run_id: &str, job: &JobSpec, outcome: 
             .unwrap_or(synora_core::ErrorKind::ProviderError);
         let message = match &outcome.result {
             Err(e) => e.to_string(),
-            Ok(r) => r
-                .status
-                .clone()
-                .unwrap_or_else(|| "status marked failure".to_string()),
+            Ok(r) => sync_result_failure_reason(job, r)
+                .unwrap_or_else(|| "provider result marked failure".to_string()),
         };
         let decision = retry_decision(
             kind,
