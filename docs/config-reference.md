@@ -106,7 +106,7 @@
 | 配置项 | 类型 | 说明 |
 |---|---|---|
 | `options` | `string[]` | 追加的 rsync 参数（每个元素一个参数） |
-| `exclude` | `string[]` | `--exclude=PATTERN`（tunasync `exclude`） |
+| `exclude` | `string[]` | rsync：`--exclude=PATTERN`；HTTP：不遍历、不下载且不删除的根目录相对路径前缀（可带首尾 `/`） |
 
 ### script provider
 
@@ -143,13 +143,13 @@ Worker 上始终与 script 共用 `synora-scripts` 容器。配置仍是 `provid
 |---|---|---|
 | `parser` | `"nginx"`/`"apache"`/`"caddy"`/`"s3"`/`"directory-listing"`/`"fallback"` | 目录列表解析器 |
 | `delete` | `bool` | 上游消失的本地文件是否删除 |
-| `threads` | `int` | 下载并发数（tunasync `TUNASYNC_TSUMUGU_THREADS`；默认 5，0 视为 1） |
+| `threads` | `int` | 目录索引请求和文件下载的并发数（tunasync `TUNASYNC_TSUMUGU_THREADS`；默认 5，0 视为 1，最多 64 个并发索引请求） |
 
 行为：按大小+时间判断是否下载、**单文件失败/超时跳过不退出**、**本地软链接不覆盖不写穿**
 （tsumugu 语义：同步时忽略软链接）、fancyindex `@` 后缀标记的软链接条目镜像为本地软链接
 （列表不提供指向目标时，链接目标为该条目名；幂等，已有同指向软链接则跳过）、
 `delete=true` 时多余软链接随文件一起清理、连接超时 30s、空闲读取超时 120s、`.partial` 原子改名；
-每文件详情写入运行日志。
+规划日志每 10 秒记录目录数、条目数、待下载数、索引速度和并发状态；传输日志实时记录下载文件、目标路径、文件大小、耗时、单文件速度以及当前/平均总吞吐。
 
 ### `[jobs.hooks]`（可选）
 

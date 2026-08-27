@@ -3,7 +3,7 @@
 //! with the same provider machinery as the standalone engine, reports back.
 //! Pull model: no inbound listener (NAT-friendly).
 
-use api::{Client, CompleteRequest, HeartbeatRequest, RegisterRequest};
+use api::{Client, CompleteRequest, HeartbeatRequest, JobLogSample, RegisterRequest};
 use clap::Parser;
 use config::{CliOverrides, ConfigLoader};
 use engine::run_once;
@@ -182,15 +182,13 @@ async fn main() -> Result<(), String> {
     let shutdown = Arc::new(AtomicBool::new(false));
     let running: Arc<tokio::sync::Mutex<HashMap<String, Running>>> =
         Arc::new(tokio::sync::Mutex::new(HashMap::new()));
-    // Worker exit: stop accepting work, cancel runs, then the main loop
-    // drains, removes leftover job containers, and unregisters.
-    async fn request_stop(
-        running: Arc<tokio::sync::Mutex<HashMap<String, Running>>>,
-        shutdown: Arc<AtomicBool>,
-    ) {
+    // Worker exit is a drain, not a cancellation: stop accepting work and
+    // keep heartbeating until every in-flight run finishes naturally.
+    // Only the manager's explicit cancel_run path may cancel a run.
+    async fn request_drain(client: Client, worker_id: String, shutdown: Arc<AtomicBool>) {
         shutdown.store(true, Ordering::SeqCst);
-        for r in running.lock().await.values() {
-            r.cancel.cancel();
+        if let Err(e) = client.drain_worker(&worker_id).await {
+            tracing::warn!("failed to mark worker `{worker_id}` draining: {e}");
         }
     }
 
@@ -221,15 +219,16 @@ async fn main() -> Result<(), String> {
 
     // SIGTERM/SIGINT: drain — finish current runs, unregister, exit (spec §11).
     {
-        let running2 = running.clone();
         let shutdown2 = shutdown.clone();
+        let client2 = client.clone();
+        let worker_id2 = worker_id.clone();
         tokio::spawn(async move {
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {}
                 _ = wait_sigterm() => {}
             }
-            tracing::info!("stopping all runs and removing job containers");
-            request_stop(running2, shutdown2).await;
+            tracing::info!("shutdown requested; draining in-flight runs without cancelling them");
+            request_drain(client2, worker_id2, shutdown2).await;
         });
         // SIGHUP (systemd reload): ignore. Reload used to cancel every
         // running job; apply config with `systemctl restart`.
@@ -242,11 +241,7 @@ async fn main() -> Result<(), String> {
         // Poll fast while under the concurrency cap so a worker can fill
         // all slots (production: 30) instead of claiming one every 15s.
         let jobs_running = running.lock().await.len() as u32;
-        if shutdown.load(Ordering::SeqCst) {
-            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
-            while tokio::time::Instant::now() < deadline && !running.lock().await.is_empty() {
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            }
+        if shutdown.load(Ordering::SeqCst) && jobs_running == 0 {
             cleanup_job_containers().await;
             if let Err(e) = client.unregister(&worker_id).await {
                 tracing::warn!("unregister failed: {e}");
@@ -255,28 +250,41 @@ async fn main() -> Result<(), String> {
             }
             break;
         }
-        let (resources, active_jobs) = {
+        let (resources, active_jobs, logs) = {
             let guard = running.lock().await;
             let active_jobs: Vec<String> = guard.values().map(|r| r.job.clone()).collect();
             let mut out = Vec::new();
-            for r in guard.values() {
+            let mut logs = Vec::new();
+            for (run_id, r) in guard.iter() {
                 let sample = *r.usage.lock().unwrap();
-                if sample.memory_bytes.is_none()
-                    && sample.cpu_seconds.is_none()
-                    && sample.cpu_percent.is_none()
-                    && sample.bandwidth_bytes.is_none()
+                if sample.memory_bytes.is_some()
+                    || sample.cpu_seconds.is_some()
+                    || sample.cpu_percent.is_some()
+                    || sample.bandwidth_bytes.is_some()
                 {
-                    continue;
+                    out.push(api::JobResourceSample {
+                        job: r.job.clone(),
+                        memory_bytes: sample.memory_bytes,
+                        cpu_seconds: sample.cpu_seconds,
+                        cpu_percent: sample.cpu_percent,
+                        bandwidth_bytes: sample.bandwidth_bytes,
+                    });
                 }
-                out.push(api::JobResourceSample {
-                    job: r.job.clone(),
-                    memory_bytes: sample.memory_bytes,
-                    cpu_seconds: sample.cpu_seconds,
-                    cpu_percent: sample.cpu_percent,
-                    bandwidth_bytes: sample.bandwidth_bytes,
-                });
+                if let Some(content) = tail_run_log(
+                    &PathBuf::from(&worker_cfg.log_dir)
+                        .join(&r.job)
+                        .join("current.log"),
+                    200,
+                    256 * 1024,
+                ) {
+                    logs.push(JobLogSample {
+                        run_id: run_id.clone(),
+                        job: r.job.clone(),
+                        content,
+                    });
+                }
             }
-            (out, active_jobs)
+            (out, active_jobs, logs)
         };
         let heartbeat = client
             .heartbeat(
@@ -291,6 +299,7 @@ async fn main() -> Result<(), String> {
                     resources,
                     repository_sizes: collect_repo_sizes(),
                     active_jobs,
+                    logs,
                 },
             )
             .await;
@@ -477,18 +486,11 @@ fn outcome_to_complete(
         .map(|v| v as i64);
     // Report the run log so the manager can serve job_logs for
     // distributed runs (the log lives on this worker host).
-    let log = std::fs::read_to_string(log_dir.join(&job.name).join("current.log"))
-        .ok()
-        .map(|c| {
-            c.lines()
-                .rev()
-                .take(500)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect::<Vec<_>>()
-                .join("\n")
-        });
+    let log = tail_run_log(
+        &log_dir.join(&job.name).join("current.log"),
+        500,
+        512 * 1024,
+    );
     CompleteRequest {
         worker_id: worker_id.to_string(),
         status: status.to_string(),
@@ -504,6 +506,21 @@ fn outcome_to_complete(
         memory_bytes: outcome.mem_peak,
         cpu_seconds: outcome.cpu_seconds,
     }
+}
+
+/// Read a bounded tail without loading a multi-gigabyte per-file transfer log.
+fn tail_run_log(path: &std::path::Path, max_lines: usize, max_bytes: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let size = file.metadata().ok()?.len();
+    let want = size.min(max_bytes);
+    file.seek(SeekFrom::End(-(want as i64))).ok()?;
+    let mut bytes = Vec::with_capacity(want as usize);
+    file.read_to_end(&mut bytes).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    let mut lines = text.lines().rev().take(max_lines).collect::<Vec<_>>();
+    lines.reverse();
+    Some(lines.join("\n"))
 }
 
 fn collect_repo_sizes() -> Vec<api::RepoSizeSample> {

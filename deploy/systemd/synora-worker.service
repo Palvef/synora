@@ -13,6 +13,10 @@ ExecStartPre=/bin/chmod 777 /sys/fs/cgroup/synora
 ExecStart=/usr/local/bin/synora-worker -c /etc/synora/worker.toml
 ExecReload=/bin/true
 ExecStopPost=/bin/sh -c 'rmdir /sys/fs/cgroup/synora 2>/dev/null || true'
+# SIGTERM asks the worker to drain. Signal only the main process, keep its
+# rsync/script children alive, and do not impose a deadline on active syncs.
+KillMode=mixed
+TimeoutStopSec=infinity
 Restart=always
 RestartSec=10
 # Runs as root like tunasync's worker (mirror storage on ZFS pools is

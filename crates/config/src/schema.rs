@@ -154,7 +154,7 @@ pub struct JobDoc {
     pub enabled: bool,
     pub worker: Option<String>,
     pub provider: Option<String>,
-    // rsync
+    // rsync and http (HTTP treats values as root-relative path prefixes)
     #[serde(default)]
     pub options: Vec<String>,
     #[serde(default)]
@@ -182,8 +182,8 @@ pub struct JobDoc {
     pub parser: Option<String>,
     #[serde(default = "no")]
     pub delete: bool,
-    /// http provider: max concurrent downloads (tunasync
-    /// `TUNASYNC_TSUMUGU_THREADS`; None = 8, 0 clamped to 1).
+    /// http provider: max concurrent directory listings and downloads
+    /// (tunasync `TUNASYNC_TSUMUGU_THREADS`; None = 5, 0 clamped to 1).
     pub threads: Option<u32>,
     // common
     pub upstream: Option<String>,

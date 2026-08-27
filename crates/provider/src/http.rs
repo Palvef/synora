@@ -9,8 +9,11 @@ use crate::{ProviderError, SyncContext, SyncResult};
 pub struct HttpProvider {
     pub parser: String,
     pub delete: bool,
-    /// Max concurrent downloads; `None` = httpfetch default (5).
+    /// Max concurrent directory-listing requests and downloads;
+    /// `None` = httpfetch default (5).
     pub threads: Option<u32>,
+    /// Root-relative path prefixes excluded from traversal and deletion.
+    pub exclude: Vec<String>,
 }
 
 impl HttpProvider {
@@ -61,6 +64,7 @@ impl HttpProvider {
         let fetcher = httpfetch::Fetcher::with_proxy(proxy.as_deref())
             .map_err(|e| ProviderError::Other(e.to_string()))?
             .with_threads(self.threads.unwrap_or(httpfetch::DEFAULT_THREADS as u32) as usize)
+            .with_excludes(self.exclude.clone())
             .with_byte_counter(bytes);
         let started = std::time::Instant::now();
         let stats = fetcher

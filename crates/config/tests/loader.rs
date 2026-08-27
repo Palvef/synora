@@ -382,7 +382,7 @@ fn http_threads_none_zero_and_some() {
         &job(
             "five",
             "schedule = \"manual\"",
-            "provider = \"http\"\nparser = \"nginx\"\nthreads = 5\nupstream = \"https://x/pub/\"\nstorage = \"/srv/five\"",
+            "provider = \"http\"\nparser = \"nginx\"\nthreads = 5\nexclude = [\"/gone/\"]\nupstream = \"https://x/pub/\"\nstorage = \"/srv/five\"",
         ),
     );
     let cfg = load(&dir).unwrap();
@@ -409,8 +409,9 @@ fn http_threads_none_zero_and_some() {
         threads("five"),
         synora_core::ProviderConfig::Http {
             threads: Some(5),
+            exclude,
             ..
-        }
+        } if exclude == vec!["/gone/"]
     ));
 }
 

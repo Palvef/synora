@@ -8,7 +8,7 @@
 //! and skipped ([`FetchStats::files_skipped`]). Only an unreachable base
 //! URL (the first index request) or explicit cancellation returns an error.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 
 use tokio::io::AsyncWriteExt;
@@ -42,6 +42,15 @@ fn synora_size(bytes: u64) -> String {
         u += 1;
     }
     format!("{v:.1} {}", UNITS[u])
+}
+
+fn synora_rate(bytes: u64, elapsed_secs: f64) -> String {
+    let bytes_per_second = if elapsed_secs > 0.0 {
+        bytes as f64 / elapsed_secs
+    } else {
+        0.0
+    };
+    format!("{}/s", synora_size(bytes_per_second.max(0.0) as u64))
 }
 
 /// Append a progress line to the run log (fire-and-forget; best-effort).
@@ -117,12 +126,26 @@ pub struct Plan {
     incomplete: bool,
 }
 
+#[derive(Debug)]
+struct DirectoryWork {
+    url: String,
+    rel: String,
+    depth: u32,
+    root: bool,
+}
+
+type DownloadSuccess = (u64, String, PathBuf, std::time::Duration);
+type DownloadFailure = (FetchError, String, PathBuf, std::time::Duration);
+
 /// HTTP fetcher: a reqwest client with rustls, redirects followed (max 10),
 /// no proxy by default, a 30 s connect timeout plus 120 s idle-read timeout,
 /// and up to `threads` concurrent downloads.
 pub struct Fetcher {
     client: reqwest::Client,
     threads: usize,
+    /// Root-relative path prefixes that are neither crawled/downloaded nor
+    /// considered by `delete`. Leading/trailing slashes are ignored.
+    excludes: Vec<String>,
     byte_counter: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
 
@@ -151,6 +174,7 @@ impl Fetcher {
         Ok(Self {
             client: builder.build()?,
             threads: DEFAULT_THREADS,
+            excludes: Vec::new(),
             byte_counter: None,
         })
     }
@@ -159,6 +183,18 @@ impl Fetcher {
     /// `0` is clamped to 1 — a zero-permit semaphore would deadlock.
     pub fn with_threads(mut self, threads: usize) -> Self {
         self.threads = threads.max(1);
+        self
+    }
+
+    /// Exclude root-relative path prefixes from both traversal and deletion.
+    /// `/repos/yum/` and `repos/yum` are equivalent and match the directory
+    /// itself plus every descendant.
+    pub fn with_excludes(mut self, excludes: Vec<String>) -> Self {
+        self.excludes = excludes
+            .into_iter()
+            .map(|value| value.trim_matches('/').to_string())
+            .filter(|value| !value.is_empty())
+            .collect();
         self
     }
 
@@ -180,32 +216,6 @@ impl Fetcher {
     /// the entry path to `base_url`. Fails only if the base index itself is
     /// unreachable; a broken subdirectory listing is warned about and
     /// skipped.
-    async fn get_listing(&self, url: &str) -> Result<Vec<u8>, FetchError> {
-        let mut last = FetchError::Http(format!("GET {url} failed"));
-        for attempt in 1..=4u32 {
-            let sent = self.client.get(url).send().await;
-            match sent {
-                Ok(resp) => match resp.error_for_status() {
-                    Ok(ok) => match ok.bytes().await {
-                        Ok(body) => return Ok(body.to_vec()),
-                        Err(e) => last = e.into(),
-                    },
-                    Err(e) => last = e.into(),
-                },
-                Err(e) => last = e.into(),
-            }
-            if attempt == 4 || !listing_error_transient(&last) {
-                return Err(last);
-            }
-            tracing::warn!("listing {url} attempt {attempt} failed: {last}; retrying");
-            tokio::time::sleep(std::time::Duration::from_millis(
-                300 * u64::from(attempt).pow(2),
-            ))
-            .await;
-        }
-        Err(last)
-    }
-
     pub async fn plan(
         &self,
         base_url: &str,
@@ -215,24 +225,198 @@ impl Fetcher {
         depth: u32,
         log_file: Option<&Path>,
     ) -> Result<Plan, FetchError> {
+        self.plan_inner(
+            base_url,
+            parser_name,
+            storage,
+            delete,
+            depth,
+            log_file,
+            &CancellationToken::new(),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn plan_inner(
+        &self,
+        base_url: &str,
+        parser_name: &str,
+        storage: &Path,
+        delete: bool,
+        depth: u32,
+        log_file: Option<&Path>,
+        cancel: &CancellationToken,
+    ) -> Result<Plan, FetchError> {
         let parser: Box<dyn parser::IndexParser> = parser::parser_for(parser_name)
             .ok_or_else(|| FetchError::Http(format!("unknown index parser `{parser_name}`")))?;
         let mut plan = Plan::default();
         let mut remote = HashSet::new();
-        let mut planner = Planner {
-            fetcher: self,
-            storage,
-            parser: parser.as_ref(),
-            plan: &mut plan,
-            remote: &mut remote,
-            seen: 0,
-            dirs: 0,
-            last_report: tokio::time::Instant::now(),
+        let mut pending = VecDeque::from([DirectoryWork {
+            url: base_url.to_string(),
+            rel: String::new(),
+            depth: depth.min(MAX_DEPTH),
+            root: true,
+        }]);
+        let mut listings = tokio::task::JoinSet::new();
+        let listing_concurrency = self.threads.clamp(1, 64);
+        let mut seen = 0usize;
+        let mut dirs = 0usize;
+        let mut listing_failed = false;
+        let mut entry_cap_reached = false;
+        let started = tokio::time::Instant::now();
+        let mut last_report = started;
+
+        loop {
+            while listings.len() < listing_concurrency {
+                let Some(work) = pending.pop_front() else {
+                    break;
+                };
+                let client = self.client.clone();
+                let task_cancel = cancel.clone();
+                listings.spawn(async move {
+                    let result = get_listing(&client, &work.url, &task_cancel).await;
+                    (work, result)
+                });
+            }
+            if listings.is_empty() {
+                break;
+            }
+            let joined = tokio::select! {
+                joined = listings.join_next() => joined,
+                _ = cancel.cancelled() => {
+                    listings.abort_all();
+                    return Err(FetchError::Cancelled);
+                }
+            };
+            let Some(joined) = joined else { break };
+            let (work, body) = match joined {
+                Ok(result) => result,
+                Err(e) => {
+                    listing_failed = true;
+                    plan.incomplete = true;
+                    tracing::warn!("listing task failed: {e}");
+                    continue;
+                }
+            };
+            dirs += 1;
+            let body = match body {
+                Ok(body) => body,
+                Err(FetchError::Cancelled) => {
+                    listings.abort_all();
+                    return Err(FetchError::Cancelled);
+                }
+                Err(e) if work.root => {
+                    listings.abort_all();
+                    return Err(e);
+                }
+                Err(e) => {
+                    tracing::warn!("listing {} failed: {e}", work.url);
+                    append_log(
+                        log_file,
+                        &format!("planning: listing {} failed: {e}", work.url),
+                    );
+                    listing_failed = true;
+                    plan.incomplete = true;
+                    continue;
+                }
+            };
+
+            for entry in parser.parse(&body) {
+                if seen >= MAX_ENTRIES {
+                    tracing::warn!("index entry cap ({MAX_ENTRIES}) reached at {}", work.url);
+                    append_log(
+                        log_file,
+                        &format!("planning: entry cap {MAX_ENTRIES} reached at {}", work.url),
+                    );
+                    plan.incomplete = true;
+                    pending.clear();
+                    listings.abort_all();
+                    entry_cap_reached = true;
+                    break;
+                }
+                if !is_safe_rel(&entry.path) {
+                    tracing::warn!(
+                        "skipping unsafe entry path `{}` at {}",
+                        entry.path,
+                        work.url
+                    );
+                    continue;
+                }
+                let rel = if work.rel.is_empty() {
+                    entry.path.clone()
+                } else {
+                    format!("{}/{}", work.rel, entry.path)
+                };
+                let rel_key = rel.trim_end_matches('/').to_string();
+                if is_excluded(&rel_key, &self.excludes) {
+                    continue;
+                }
+                seen += 1;
+                remote.insert(rel_key.clone());
+                match entry.kind {
+                    parser::EntryKind::Dir => {
+                        if work.depth == 0 {
+                            plan.incomplete = true;
+                            continue;
+                        }
+                        pending.push_back(DirectoryWork {
+                            url: join_slash(&work.url, &entry.path),
+                            rel: rel_key,
+                            depth: work.depth - 1,
+                            root: false,
+                        });
+                    }
+                    parser::EntryKind::File => {
+                        match entry.size {
+                            Some(size) => plan.size_sum += size,
+                            None => plan.size_unknown = true,
+                        }
+                        let dest = storage.join(&rel);
+                        if !local_matches(&dest, &entry).await {
+                            plan.downloads.push((join(&work.url, &entry.path), dest));
+                        }
+                    }
+                    parser::EntryKind::Symlink => {
+                        let target = match entry.symlink_target.as_deref() {
+                            Some(target) if is_safe_rel(target) => target.to_string(),
+                            _ => entry.path.trim_end_matches('/').to_string(),
+                        };
+                        plan.symlinks.push((storage.join(&rel_key), target));
+                    }
+                }
+            }
+
+            if entry_cap_reached {
+                break;
+            }
+
+            if last_report.elapsed() >= PROGRESS_INTERVAL {
+                last_report = tokio::time::Instant::now();
+                let elapsed = started.elapsed().as_secs_f64().max(0.001);
+                append_log(
+                    log_file,
+                    &format!(
+                        "planning: {dirs} directories, {seen} entries, {} downloads in {:.1}s ({:.0} entries/s, {} active, {} queued; last {})",
+                        plan.downloads.len(),
+                        elapsed,
+                        seen as f64 / elapsed,
+                        listings.len(),
+                        pending.len(),
+                        work.url
+                    ),
+                );
+            }
+        }
+        append_log(
             log_file,
-            listing_failed: false,
-        };
-        planner.dir(base_url, "", depth.min(MAX_DEPTH)).await?;
-        if delete && planner.listing_failed {
+            &format!(
+                "planning complete: {dirs} directories, {seen} entries, {} downloads in {:.1}s",
+                plan.downloads.len(),
+                started.elapsed().as_secs_f64()
+            ),
+        );
+        if delete && listing_failed {
             return Err(FetchError::Http(
                 "subdirectory listing failed; refusing delete to avoid wiping the mirror".into(),
             ));
@@ -243,7 +427,7 @@ impl Fetcher {
                 storage.display()
             );
         } else if delete {
-            plan.deletes = local_extras(storage, &remote).await?;
+            plan.deletes = local_extras(storage, &remote, &self.excludes).await?;
         }
         plan.total_size_hint = if plan.size_unknown {
             None
@@ -272,40 +456,44 @@ impl Fetcher {
             total_size_hint: plan.total_size_hint,
             ..FetchStats::default()
         };
-        let mut last_report = tokio::time::Instant::now();
-        let report = |log_file: Option<&std::path::Path>, s: &FetchStats| {
-            append_log(
-                log_file,
-                &format!(
-                    "progress: downloaded {} files ({}) skipped {} deleted {}",
-                    s.files_downloaded,
-                    synora_size(s.downloaded_bytes),
-                    s.files_skipped,
-                    s.files_deleted
-                ),
-            );
-        };
+        let transfer_counter = self
+            .byte_counter
+            .clone()
+            .unwrap_or_else(|| std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)));
+        transfer_counter.store(0, std::sync::atomic::Ordering::Relaxed);
+        let transfer_started = tokio::time::Instant::now();
+        let mut last_report_at = transfer_started;
+        let mut last_report_bytes = 0u64;
+        let mut progress_tick = tokio::time::interval(PROGRESS_INTERVAL);
+        progress_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        progress_tick.tick().await;
         append_log(
             log_file,
             &format!(
-                "planning done: {} downloads, {} deletes, {} symlinks",
+                "transfer starting: {} downloads, {} deletes, {} symlinks, {} concurrent requests",
                 plan.downloads.len(),
                 plan.deletes.len(),
-                plan.symlinks.len()
+                plan.symlinks.len(),
+                self.threads
             ),
         );
         let mut remaining = plan.downloads.iter().cloned();
-        let mut in_flight: tokio::task::JoinSet<Result<(u64, String), (FetchError, String)>> =
+        let mut in_flight: tokio::task::JoinSet<Result<DownloadSuccess, DownloadFailure>> =
             tokio::task::JoinSet::new();
         let spawn_one = |set: &mut tokio::task::JoinSet<_>, url: String, dest: PathBuf| {
+            append_log(
+                log_file,
+                &format!("downloading {url} -> {}", dest.display()),
+            );
             let client = self.client.clone();
             let cancel = cancel.clone();
+            let counter = transfer_counter.clone();
             set.spawn(async move {
-                let u2 = url.clone();
-                download_one(&client, &url, &dest, &cancel)
+                let started = std::time::Instant::now();
+                download_one(&client, &url, &dest, &cancel, Some(counter.as_ref()))
                     .await
-                    .map(|b| (b, u2.clone()))
-                    .map_err(|e| (e, u2))
+                    .map(|bytes| (bytes, url.clone(), dest.clone(), started.elapsed()))
+                    .map_err(|error| (error, url, dest, started.elapsed()))
             });
         };
         for _ in 0..self.threads {
@@ -318,31 +506,72 @@ impl Fetcher {
         // download_one) and carry on; only cancellation aborts. At most
         // `threads` tasks exist at once (not one task per file).
         let mut cancelled = false;
-        while let Some(joined) = in_flight.join_next().await {
+        while !in_flight.is_empty() {
+            let joined = tokio::select! {
+                joined = in_flight.join_next() => joined,
+                _ = progress_tick.tick() => {
+                    let now = tokio::time::Instant::now();
+                    let live_bytes = transfer_counter.load(std::sync::atomic::Ordering::Relaxed);
+                    let interval = now.duration_since(last_report_at).as_secs_f64().max(0.001);
+                    let interval_bytes = live_bytes.saturating_sub(last_report_bytes);
+                    append_log(
+                        log_file,
+                        &format!(
+                            "transfer progress: {} complete, {} active, {} queued; {} received, current {}, average {}; {} failed",
+                            stats.files_downloaded,
+                            in_flight.len(),
+                            remaining.len(),
+                            synora_size(live_bytes),
+                            synora_rate(interval_bytes, interval),
+                            synora_rate(live_bytes, transfer_started.elapsed().as_secs_f64()),
+                            stats.files_failed
+                        ),
+                    );
+                    last_report_at = now;
+                    last_report_bytes = live_bytes;
+                    continue;
+                }
+                _ = cancel.cancelled(), if !cancelled => {
+                    cancelled = true;
+                    continue;
+                }
+            };
+            let Some(joined) = joined else { break };
             match joined {
-                Ok(Ok((bytes, url))) => {
+                Ok(Ok((bytes, url, dest, elapsed))) => {
                     stats.downloaded_bytes += bytes;
                     stats.files_downloaded += 1;
-                    stats
-                        .log_lines
-                        .push(format!("downloaded {url} ({bytes} bytes)"));
-                    if let Some(counter) = &self.byte_counter {
-                        counter.store(stats.downloaded_bytes, std::sync::atomic::Ordering::Relaxed);
-                    }
-                }
-                Ok(Err((FetchError::Cancelled, _))) => cancelled = true,
-                Ok(Err((e, url))) => {
-                    stats.files_skipped += 1;
-                    stats.files_failed += 1;
-                    let line = format!("skipped {url}: {e}");
+                    let line = format!(
+                        "downloaded {url} -> {} ({}, {:.2}s, {})",
+                        dest.display(),
+                        synora_size(bytes),
+                        elapsed.as_secs_f64(),
+                        synora_rate(bytes, elapsed.as_secs_f64())
+                    );
                     append_log(log_file, &line);
                     stats.log_lines.push(line);
                 }
-                Err(_) => {
+                Ok(Err((FetchError::Cancelled, _, _, _))) => cancelled = true,
+                Ok(Err((e, url, dest, elapsed))) => {
+                    stats.files_skipped += 1;
+                    stats.files_failed += 1;
+                    let line = format!(
+                        "skipped {url} -> {} after {:.2}s: {e}",
+                        dest.display(),
+                        elapsed.as_secs_f64()
+                    );
+                    append_log(log_file, &line);
+                    stats.log_lines.push(line);
+                }
+                Err(_) if cancelled => {}
+                Err(error) => {
                     tracing::warn!("download task panicked");
                     stats.files_skipped += 1;
                     stats.files_failed += 1;
-                    append_log(log_file, "skipped download: worker task panicked");
+                    append_log(
+                        log_file,
+                        &format!("skipped download: worker task failed: {error}"),
+                    );
                 }
             }
             if stats.log_lines.len() > 256 {
@@ -354,12 +583,20 @@ impl Fetcher {
                     spawn_one(&mut in_flight, url, dest);
                 }
             }
-            if last_report.elapsed() >= PROGRESS_INTERVAL {
-                report(log_file, &stats);
-                last_report = tokio::time::Instant::now();
-            }
         }
-        report(log_file, &stats);
+        let live_bytes = transfer_counter.load(std::sync::atomic::Ordering::Relaxed);
+        append_log(
+            log_file,
+            &format!(
+                "transfer complete: {} files, {} stored, {} received in {:.1}s (average {}), {} failed",
+                stats.files_downloaded,
+                synora_size(stats.downloaded_bytes),
+                synora_size(live_bytes),
+                transfer_started.elapsed().as_secs_f64(),
+                synora_rate(live_bytes, transfer_started.elapsed().as_secs_f64()),
+                stats.files_failed
+            ),
+        );
         if cancelled {
             return Err(FetchError::Cancelled);
         }
@@ -436,7 +673,15 @@ impl Fetcher {
         log_file: Option<&Path>,
     ) -> Result<FetchStats, FetchError> {
         let plan = self
-            .plan(base_url, parser_name, storage, delete, depth, log_file)
+            .plan_inner(
+                base_url,
+                parser_name,
+                storage,
+                delete,
+                depth,
+                log_file,
+                cancel,
+            )
             .await?;
         self.execute(&plan, cancel, log_file).await
     }
@@ -446,6 +691,45 @@ impl Default for Fetcher {
     fn default() -> Self {
         Self::new().expect("reqwest client with default TLS setup cannot fail to build")
     }
+}
+
+async fn get_listing(
+    client: &reqwest::Client,
+    url: &str,
+    cancel: &CancellationToken,
+) -> Result<Vec<u8>, FetchError> {
+    let mut last = FetchError::Http(format!("GET {url} failed"));
+    for attempt in 1..=4u32 {
+        let sent = tokio::select! {
+            result = client.get(url).send() => result,
+            _ = cancel.cancelled() => return Err(FetchError::Cancelled),
+        };
+        match sent {
+            Ok(resp) => match resp.error_for_status() {
+                Ok(ok) => {
+                    let body = tokio::select! {
+                        result = ok.bytes() => result,
+                        _ = cancel.cancelled() => return Err(FetchError::Cancelled),
+                    };
+                    match body {
+                        Ok(body) => return Ok(body.to_vec()),
+                        Err(e) => last = e.into(),
+                    }
+                }
+                Err(e) => last = e.into(),
+            },
+            Err(e) => last = e.into(),
+        }
+        if attempt == 4 || !listing_error_transient(&last) {
+            return Err(last);
+        }
+        tracing::warn!("listing {url} attempt {attempt} failed: {last}; retrying");
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_millis(300 * u64::from(attempt).pow(2))) => {},
+            _ = cancel.cancelled() => return Err(FetchError::Cancelled),
+        }
+    }
+    Err(last)
 }
 
 fn listing_error_transient(err: &FetchError) -> bool {
@@ -463,103 +747,6 @@ fn listing_error_transient(err: &FetchError) -> bool {
         || s.contains("522")
         || s.contains("523")
         || s.contains("524")
-}
-
-/// Recursive planner: fetches one index, diffs files against local storage,
-/// recurses into dirs. One planner per `plan()` call; `seen` bounds total
-/// entries and `dir` is reentrant per depth.
-struct Planner<'a> {
-    fetcher: &'a Fetcher,
-    storage: &'a Path,
-    parser: &'a dyn parser::IndexParser,
-    plan: &'a mut Plan,
-    remote: &'a mut HashSet<String>,
-    seen: usize,
-    dirs: usize,
-    last_report: tokio::time::Instant,
-    log_file: Option<&'a Path>,
-    listing_failed: bool,
-}
-
-impl Planner<'_> {
-    async fn dir(&mut self, url: &str, dir_rel: &str, depth: u32) -> Result<(), FetchError> {
-        self.dirs += 1;
-        // Progress at most every few seconds — deep trees would otherwise
-        // flood the run log with a line per directory.
-        if self.dirs.is_multiple_of(20) && self.last_report.elapsed() >= PROGRESS_INTERVAL {
-            self.last_report = tokio::time::Instant::now();
-            append_log(
-                self.log_file,
-                &format!("planning: listed {} entries so far (at {url})", self.seen),
-            );
-        }
-        let body = self.fetcher.get_listing(url).await?;
-        for entry in self.parser.parse(&body) {
-            if self.seen >= MAX_ENTRIES {
-                tracing::warn!("index entry cap ({MAX_ENTRIES}) reached at {url}");
-                self.plan.incomplete = true;
-                break;
-            }
-            if !is_safe_rel(&entry.path) {
-                tracing::warn!("skipping unsafe entry path `{}` at {url}", entry.path);
-                continue;
-            }
-            self.seen += 1;
-            let rel = if dir_rel.is_empty() {
-                entry.path.clone()
-            } else {
-                format!("{dir_rel}/{}", entry.path)
-            };
-            let rel_key = rel.trim_end_matches('/').to_string();
-            self.remote.insert(rel_key.clone());
-            match entry.kind {
-                parser::EntryKind::Dir => {
-                    if depth == 0 {
-                        self.plan.incomplete = true;
-                        continue;
-                    }
-                    let child_url = join_slash(url, &entry.path);
-                    let child_rel = rel.trim_end_matches('/').to_string();
-                    let result = Box::pin(self.dir(&child_url, &child_rel, depth - 1)).await;
-                    if let Err(e) = result {
-                        // A broken subdirectory must not sink the whole plan,
-                        // but it DOES make the remote set incomplete — deletes
-                        // are refused by the caller.
-                        tracing::warn!("listing {child_url} failed: {e}");
-                        self.plan.incomplete = true;
-                        self.listing_failed = true;
-                    }
-                }
-                parser::EntryKind::File => {
-                    match entry.size {
-                        Some(s) => self.plan.size_sum += s,
-                        None => self.plan.size_unknown = true,
-                    }
-                    let dest = self.storage.join(&rel);
-                    if local_matches(&dest, &entry).await {
-                        continue;
-                    }
-                    self.plan.downloads.push((join(url, &entry.path), dest));
-                }
-                parser::EntryKind::Symlink => {
-                    // Mirrored as a local symlink, never downloaded; the
-                    // entry stays in the remote set so a matching local
-                    // link is neither re-created nor deleted. The target is
-                    // the listing's target when it has one, else the entry
-                    // name itself (tsumugu's "ignore symlinks" semantics
-                    // with no target info in the listing).
-                    let target = match entry.symlink_target.as_deref() {
-                        Some(t) if is_safe_rel(t) => t.to_string(),
-                        _ => entry.path.trim_end_matches('/').to_string(),
-                    };
-                    self.plan
-                        .symlinks
-                        .push((self.storage.join(&rel_key), target));
-                }
-            }
-        }
-        Ok(())
-    }
 }
 
 /// Compare a remote file against local state: same size → unchanged (the
@@ -601,6 +788,7 @@ async fn local_matches(dest: &Path, entry: &parser::Entry) -> bool {
 async fn local_extras(
     storage: &Path,
     remote: &HashSet<String>,
+    excludes: &[String],
 ) -> Result<Vec<PathBuf>, FetchError> {
     let mut deletes = Vec::new();
     let mut stack = vec![storage.to_path_buf()];
@@ -609,19 +797,36 @@ async fn local_extras(
         while let Some(entry) = rd.next_entry().await? {
             let ft = entry.file_type().await?;
             if ft.is_dir() {
-                stack.push(entry.path());
+                let path = entry.path();
+                let rel = path
+                    .strip_prefix(storage)
+                    .map_err(|_| FetchError::Io("storage walk escaped its root".to_string()))?;
+                if !is_excluded(rel.to_str().unwrap_or_default(), excludes) {
+                    stack.push(path);
+                }
             } else if ft.is_file() || ft.is_symlink() {
                 let path = entry.path();
                 let rel = path
                     .strip_prefix(storage)
                     .map_err(|_| FetchError::Io("storage walk escaped its root".to_string()))?;
-                if !remote.contains(rel.to_str().unwrap_or_default()) {
+                let rel = rel.to_str().unwrap_or_default();
+                if !is_excluded(rel, excludes) && !remote.contains(rel) {
                     deletes.push(path);
                 }
             }
         }
     }
     Ok(deletes)
+}
+
+fn is_excluded(rel: &str, excludes: &[String]) -> bool {
+    let rel = rel.trim_matches('/');
+    excludes.iter().any(|prefix| {
+        rel == prefix
+            || rel
+                .strip_prefix(prefix)
+                .is_some_and(|rest| rest.starts_with('/'))
+    })
 }
 
 /// Download one file to `dest.partial`, then rename over `dest`. Any
@@ -633,8 +838,9 @@ async fn download_one(
     url: &str,
     dest: &Path,
     cancel: &CancellationToken,
+    byte_counter: Option<&std::sync::atomic::AtomicU64>,
 ) -> Result<u64, FetchError> {
-    let result = fetch_to_partial(client, url, dest, cancel).await;
+    let result = fetch_to_partial(client, url, dest, cancel, byte_counter).await;
     match &result {
         Ok(n) => tracing::debug!("downloaded {url} -> {} ({n} bytes)", dest.display()),
         Err(e) => tracing::warn!(
@@ -651,6 +857,7 @@ async fn fetch_to_partial(
     url: &str,
     dest: &Path,
     cancel: &CancellationToken,
+    byte_counter: Option<&std::sync::atomic::AtomicU64>,
 ) -> Result<u64, FetchError> {
     if cancel.is_cancelled() {
         return Err(FetchError::Cancelled);
@@ -688,6 +895,9 @@ async fn fetch_to_partial(
             break Err(FetchError::Io(e.to_string()));
         }
         n += chunk.len() as u64;
+        if let Some(counter) = byte_counter {
+            counter.fetch_add(chunk.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        }
     };
     drop(out);
     match result {
@@ -820,6 +1030,10 @@ mod tests {
         raw: HashMap<String, String>,
         /// Per-file-request delay in ms (cancellation test).
         delay_ms: u64,
+        /// Per-directory-listing delay and concurrency counters.
+        listing_delay_ms: u64,
+        listing_active: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        listing_peak: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl TestMirror {
@@ -831,6 +1045,9 @@ mod tests {
                     .collect(),
                 raw: HashMap::new(),
                 delay_ms: 0,
+                listing_delay_ms: 0,
+                listing_active: Default::default(),
+                listing_peak: Default::default(),
             }
         }
     }
@@ -896,6 +1113,19 @@ mod tests {
         }
         if let Some(bytes) = mirror.files.get(&path) {
             return (StatusCode::OK, Body::from(bytes.clone()));
+        }
+        if mirror.listing_delay_ms > 0 {
+            let active = mirror
+                .listing_active
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                + 1;
+            mirror
+                .listing_peak
+                .fetch_max(active, std::sync::atomic::Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(mirror.listing_delay_ms)).await;
+            mirror
+                .listing_active
+                .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         }
         if let Some(html) = mirror.raw.get(&path) {
             return (StatusCode::OK, Body::from(html.clone()));
@@ -1002,6 +1232,96 @@ mod tests {
         // downloaded via dest.partial → rename; nothing left behind
         assert!(!storage.join("hello.txt.partial").exists());
         assert!(!storage.join("sub/world.txt.partial").exists());
+    }
+
+    #[tokio::test]
+    async fn planning_fetches_directory_indexes_concurrently() {
+        let mut mirror = TestMirror::new(&[
+            ("a/file", "a"),
+            ("b/file", "b"),
+            ("c/file", "c"),
+            ("d/file", "d"),
+        ]);
+        mirror.listing_delay_ms = 50;
+        let peak = mirror.listing_peak.clone();
+        let base = spawn_server(mirror);
+        let storage = unique_dir();
+        let plan = Fetcher::new()
+            .unwrap()
+            .with_threads(4)
+            .plan(&base, "nginx", &storage, false, 2, None)
+            .await
+            .unwrap();
+        assert_eq!(plan.downloads.len(), 4);
+        assert!(
+            peak.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+            "directory listings did not overlap"
+        );
+    }
+
+    #[tokio::test]
+    async fn excludes_skip_remote_subtree_and_protect_local_files_from_delete() {
+        let mirror = TestMirror::new(&[("keep.txt", "new"), ("excluded/remote.txt", "remote")]);
+        let base = spawn_server(mirror);
+        let storage = unique_dir();
+        tokio::fs::create_dir_all(storage.join("excluded"))
+            .await
+            .unwrap();
+        tokio::fs::write(storage.join("excluded/local.txt"), "local")
+            .await
+            .unwrap();
+        tokio::fs::write(storage.join("stale.txt"), "stale")
+            .await
+            .unwrap();
+
+        let stats = Fetcher::new()
+            .unwrap()
+            .with_excludes(vec!["/excluded/".into()])
+            .sync(
+                &base,
+                "nginx",
+                &storage,
+                true,
+                3,
+                &CancellationToken::new(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(stats.files_downloaded, 1);
+        assert!(storage.join("keep.txt").exists());
+        assert!(!storage.join("excluded/remote.txt").exists());
+        assert!(storage.join("excluded/local.txt").exists());
+        assert!(!storage.join("stale.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn transfer_log_names_files_and_reports_speed_live() {
+        let payload = "x".repeat(128 * 1024);
+        let mirror = TestMirror::new(&[("blob.bin", payload.as_str())]);
+        let base = spawn_server(mirror);
+        let storage = unique_dir();
+        let log = storage.join("run.log");
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let cancel = CancellationToken::new();
+        let stats = Fetcher::new()
+            .unwrap()
+            .with_byte_counter(counter.clone())
+            .sync(&base, "nginx", &storage, false, 2, &cancel, Some(&log))
+            .await
+            .unwrap();
+        assert_eq!(stats.downloaded_bytes, payload.len() as u64);
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::Relaxed),
+            payload.len() as u64
+        );
+        let text = std::fs::read_to_string(log).unwrap();
+        assert!(text.contains("downloading "), "{text}");
+        assert!(text.contains("blob.bin"), "{text}");
+        assert!(text.contains("downloaded "), "{text}");
+        assert!(text.contains("/s)"), "{text}");
+        assert!(text.contains("transfer complete:"), "{text}");
     }
 
     #[tokio::test]

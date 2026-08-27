@@ -487,10 +487,12 @@ pub fn build_provider(job: &JobSpec) -> Result<Provider, ProviderError> {
             parser,
             delete,
             threads,
+            exclude,
         } => Ok(Provider::Http(http::HttpProvider {
             parser: parser.clone(),
             delete: *delete,
             threads: *threads,
+            exclude: exclude.clone(),
         })),
     }
 }

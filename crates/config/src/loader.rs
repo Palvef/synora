@@ -1569,6 +1569,7 @@ fn resolve_provider(
                 parser: parser.to_string(),
                 delete: doc.delete,
                 threads: doc.threads,
+                exclude: doc.exclude.clone(),
             })
         }
         other => Err(err(format!(

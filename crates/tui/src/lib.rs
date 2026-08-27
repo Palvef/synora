@@ -1555,9 +1555,7 @@ pub fn run(
                 let name = frozen.or_else(|| s.jobs.get(idx).map(|j| j.name.clone()));
                 if let Some(name) = name {
                     // Only pull logs while the Logs panel is open.
-                    if logs_shared.load(Ordering::Relaxed)
-                        && (s.log_job.as_deref() != Some(name.as_str()) || s.log_lines.is_empty())
-                    {
+                    if logs_shared.load(Ordering::Relaxed) {
                         s.log_job = Some(name.clone());
                         if let Ok(log) = client.job_logs(&name, 200).await {
                             s.log_lines = log.lines().map(String::from).collect();

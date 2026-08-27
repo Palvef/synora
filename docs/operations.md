@@ -152,6 +152,16 @@ journalctl -u synora-manager -f        # 看服务日志
 tail -f /var/log/synora/<job>/current.log   # 看某镜像同步日志
 ```
 
+`systemctl stop/restart synora-worker` 会先把 worker 标记为 `DRAINING`，不再领取新任务，并持续发送心跳，直到所有在途同步自然结束后才退出。systemd unit 使用 `KillMode=mixed` 和 `TimeoutStopSec=infinity`，避免服务停止时向 rsync 等子进程传播 `SIGTERM` 或在固定超时后强杀。只有显式执行 `synora stop <job>`（或 TUI 中的取消操作）才会把任务记为 `Cancelled`。
+
+滚动升级时，可以先执行 `synora worker retire <worker>`，再用 `deploy/graceful-restart-worker.py` 观察该 worker。脚本只会在状态为 `DRAINING` 且 `jobs_running=0` 时重启服务，不会向同步任务发送取消信号：
+
+```sh
+install -m 0755 deploy/graceful-restart-worker.py /usr/local/sbin/synora-graceful-restart-worker
+systemd-run --unit=synora-graceful-upgrade --collect \
+  /usr/local/sbin/synora-graceful-restart-worker
+```
+
 ## 7. 与 tunasync 并行（迁移期）
 
 Synora 与 tunasync 可以同时在一台机器上运行：

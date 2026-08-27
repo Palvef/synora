@@ -190,10 +190,14 @@ pub enum ProviderConfig {
         /// Delete local files absent from the index (like rsync --delete).
         #[serde(default)]
         delete: bool,
-        /// Max concurrent downloads (tunasync `TUNASYNC_TSUMUGU_THREADS`);
-        /// `None` = the httpfetch default (5). `0` is clamped to 1.
+        /// Max concurrent directory-listing requests and downloads (tunasync
+        /// `TUNASYNC_TSUMUGU_THREADS`); `None` = the httpfetch default (5).
+        /// `0` is clamped to 1.
         #[serde(default)]
         threads: Option<u32>,
+        /// Root-relative path prefixes excluded from traversal and deletion.
+        #[serde(default)]
+        exclude: Vec<String>,
     },
 }
 

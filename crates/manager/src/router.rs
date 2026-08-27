@@ -621,6 +621,29 @@ async fn heartbeat(
             }
         }
     }
+    // Persist bounded live log tails only for runs actually owned by this
+    // worker. Completion later upserts the final tail into the same row.
+    for sample in body.logs.iter().take(32) {
+        if sample.content.len() > 512 * 1024 {
+            continue;
+        }
+        let Ok(Some(run)) = state.engine.store.get_run(&sample.run_id).await else {
+            continue;
+        };
+        if run.worker_id.as_deref() != Some(worker_id.as_str()) || run.job_id != sample.job {
+            continue;
+        }
+        let _ = state
+            .engine
+            .store
+            .insert_log_with(
+                &sample.run_id,
+                &sample.job,
+                &format!("/var/log/synora/{}/current.log", sample.job),
+                &sample.content,
+            )
+            .await;
+    }
     apply_repository_sizes(&state, &body.repository_sizes).await;
     if !body.active_jobs.is_empty() {
         let _ = state

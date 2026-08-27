@@ -92,6 +92,17 @@ pub struct HeartbeatRequest {
     /// only refreshes those run leases.
     #[serde(default)]
     pub active_jobs: Vec<String>,
+    /// Bounded tails of active run logs. This lets the manager/TUI show
+    /// distributed-worker logs before a run completes.
+    #[serde(default)]
+    pub logs: Vec<JobLogSample>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct JobLogSample {
+    pub run_id: String,
+    pub job: String,
+    pub content: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
