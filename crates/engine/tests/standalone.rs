@@ -133,6 +133,130 @@ storage = "{}"
 }
 
 #[tokio::test]
+async fn named_storage_mountpoint_is_applied_once() {
+    let dir = temp_dir("named-storage-once");
+    let mountpoint = dir.join("mirror-root");
+    write(
+        &dir,
+        "jobs/named.toml",
+        r#"[[jobs]]
+name = "named"
+schedule = "startup"
+provider = "script"
+command = "printf correct > payload"
+storage = "repo"
+storage_name = "mirror"
+"#,
+    );
+    write(
+        &dir,
+        "synora.toml",
+        &format!(
+            r#"
+include = ["jobs/*.toml"]
+
+[daemon]
+log_dir = "{dir}/logs"
+
+[daemon.db]
+kind = "sqlite"
+path = "{dir}/data/synora.db"
+
+[api]
+listen = "127.0.0.1:0"
+
+[storage.mirror]
+kind = "dir"
+mountpoint = "{mountpoint}"
+"#,
+            dir = dir.display(),
+            mountpoint = mountpoint.display(),
+        ),
+    );
+    let engine = engine_for(&dir).await;
+    engine.sync_config().await.unwrap();
+    let run_id = engine.dispatch("named", true).await.unwrap();
+    let status = wait_terminal(&engine, &run_id, 15).await;
+    assert_eq!(status, synora_core::JobStatus::Success);
+    assert_eq!(
+        std::fs::read_to_string(mountpoint.join("repo/payload")).unwrap(),
+        "correct"
+    );
+    assert!(
+        !mountpoint
+            .join(mountpoint.strip_prefix("/").unwrap())
+            .exists(),
+        "the storage mountpoint was prepended twice"
+    );
+}
+
+#[tokio::test]
+async fn unregister_worker_retains_row_and_reregister_resumes_online() {
+    let dir = temp_dir("worker-unregister");
+    write(
+        &dir,
+        "jobs/dummy.toml",
+        &format!(
+            r#"[[jobs]]
+name = "dummy"
+enabled = false
+schedule = "manual"
+provider = "script"
+command = "true"
+storage = "{}"
+"#,
+            dir.join("dummy").display()
+        ),
+    );
+    write(&dir, "synora.toml", &config_text(&dir));
+    let engine = engine_for(&dir).await;
+    engine
+        .store
+        .upsert_worker(
+            "remote",
+            "remote-host",
+            "",
+            "0.1.8",
+            &["zfs".to_string()],
+            "remote",
+        )
+        .await
+        .unwrap();
+    engine
+        .store
+        .set_worker_status("remote", "DRAINING")
+        .await
+        .unwrap();
+    engine.store.unregister_worker("remote").await.unwrap();
+
+    let row = engine.store.get_worker("remote").await.unwrap().unwrap();
+    let status = row
+        .iter()
+        .find(|(name, _)| name == "status")
+        .and_then(|(_, value)| value.as_str());
+    assert_eq!(status, Some("OFFLINE"));
+
+    engine
+        .store
+        .upsert_worker(
+            "remote",
+            "remote-host",
+            "",
+            "0.1.9",
+            &["zfs".to_string()],
+            "remote",
+        )
+        .await
+        .unwrap();
+    let row = engine.store.get_worker("remote").await.unwrap().unwrap();
+    let status = row
+        .iter()
+        .find(|(name, _)| name == "status")
+        .and_then(|(_, value)| value.as_str());
+    assert_eq!(status, Some("ONLINE"));
+}
+
+#[tokio::test]
 async fn failing_script_retries_then_fails() {
     let dir = temp_dir("retry");
     write(
@@ -240,7 +364,7 @@ command = "echo ok"
 storage = "{}"
 
 [jobs.hooks]
-on_success = ["echo HOOKED > {}/marker"]
+on_success = ["printf '%s|%s' \"$TUNASYNC_MIRROR_NAME\" \"$TUNASYNC_JOB_EXIT_STATUS\" > {}/marker"]
 "#,
             dir.join("repo").display(),
             dir.display()
@@ -255,7 +379,252 @@ on_success = ["echo HOOKED > {}/marker"]
     let status = wait_terminal(&engine, &run_id, 15).await;
     assert_eq!(status, synora_core::job::JobStatus::Success);
     assert!(marker.exists(), "on_success hook must have run");
-    assert_eq!(std::fs::read_to_string(&marker).unwrap().trim(), "HOOKED");
+    assert_eq!(
+        std::fs::read_to_string(&marker).unwrap().trim(),
+        "h|success"
+    );
+}
+
+#[tokio::test]
+async fn configured_global_concurrency_is_used() {
+    let dir = temp_dir("global-concurrency");
+    write(
+        &dir,
+        "jobs/manual.toml",
+        &format!(
+            r#"[[jobs]]
+name = "manual"
+schedule = "manual"
+provider = "script"
+command = "true"
+storage = "{}"
+"#,
+            dir.join("repo/manual").display()
+        ),
+    );
+    let config = config_text(&dir).replacen("[daemon]\n", "[daemon]\nmax_concurrency = 3\n", 1);
+    write(&dir, "synora.toml", &config);
+    let engine = engine_for(&dir).await;
+    assert_eq!(engine.global_sem().available_permits(), 3);
+}
+
+#[tokio::test]
+async fn restart_preserves_overdue_schedule_for_misfire_pass() {
+    let dir = temp_dir("misfire-restart");
+    write(
+        &dir,
+        "jobs/cron.toml",
+        &format!(
+            r#"[[jobs]]
+name = "cron"
+schedule = "cron"
+cron = "* * * * *"
+misfire_policy = "run-immediately"
+provider = "script"
+command = "true"
+storage = "{}"
+"#,
+            dir.join("repo/cron").display()
+        ),
+    );
+    write(&dir, "synora.toml", &config_text(&dir));
+    let first = engine_for(&dir).await;
+    first.sync_config().await.unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let overdue = now - 300;
+    first
+        .store
+        .set_next_run("cron", Some(overdue), None)
+        .await
+        .unwrap();
+    drop(first);
+
+    let restarted = engine_for(&dir).await;
+    restarted.sync_config().await.unwrap();
+    assert_eq!(
+        restarted
+            .store
+            .get_schedule("cron")
+            .await
+            .unwrap()
+            .unwrap()
+            .next_run,
+        Some(overdue),
+        "startup config sync must not erase an overdue schedule"
+    );
+    engine::scheduler::boot_pass(&restarted, now).await;
+    assert_eq!(
+        restarted
+            .store
+            .inflight_runs_of_job("cron")
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "run-immediately misfire should queue a catch-up run"
+    );
+    assert!(restarted
+        .store
+        .get_schedule("cron")
+        .await
+        .unwrap()
+        .unwrap()
+        .next_run
+        .is_some_and(|next| next > now));
+}
+
+#[tokio::test]
+async fn one_shot_dependency_skip_is_terminal() {
+    let dir = temp_dir("one-shot-skipped");
+    write(
+        &dir,
+        "jobs/dependencies.toml",
+        &format!(
+            r#"[[jobs]]
+name = "dependency"
+schedule = "manual"
+provider = "script"
+command = "true"
+storage = "{}"
+
+[[jobs]]
+name = "dependent"
+schedule = "manual"
+provider = "script"
+command = "true"
+storage = "{}"
+depends_on = ["dependency"]
+"#,
+            dir.join("repo/dependency").display(),
+            dir.join("repo/dependent").display()
+        ),
+    );
+    write(&dir, "synora.toml", &config_text(&dir));
+    let engine = engine_for(&dir).await;
+    let status = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        engine.run_once("dependent"),
+    )
+    .await
+    .expect("one-shot skipped run must return promptly")
+    .unwrap();
+    assert_eq!(status, synora_core::JobStatus::Skipped);
+}
+
+#[tokio::test]
+async fn worker_completion_is_atomic_and_idempotent() {
+    let dir = temp_dir("completion-idempotent");
+    write(
+        &dir,
+        "jobs/manual.toml",
+        &format!(
+            r#"[[jobs]]
+name = "manual"
+schedule = "manual"
+provider = "script"
+command = "true"
+storage = "{}"
+"#,
+            dir.join("repo/manual").display()
+        ),
+    );
+    write(&dir, "synora.toml", &config_text(&dir));
+    let engine = engine_for(&dir).await;
+    engine.sync_config().await.unwrap();
+    let run_id = engine.dispatch("manual", true).await.unwrap();
+    assert!(engine
+        .store
+        .claim_run(&run_id, engine::engine::LOCAL_WORKER)
+        .await
+        .unwrap());
+    assert!(engine
+        .store
+        .finish_active_run(
+            &run_id,
+            0,
+            synora_core::JobStatus::Success,
+            Some(0),
+            None,
+            Some(10),
+            Some(10),
+            Some("done"),
+            1,
+        )
+        .await
+        .unwrap());
+    assert!(
+        !engine
+            .store
+            .finish_active_run(
+                &run_id,
+                0,
+                synora_core::JobStatus::Failed,
+                Some(1),
+                None,
+                None,
+                None,
+                Some("late duplicate"),
+                2,
+            )
+            .await
+            .unwrap(),
+        "a late completion must not overwrite the terminal result"
+    );
+    let run = engine.store.get_run(&run_id).await.unwrap().unwrap();
+    assert_eq!(run.status, synora_core::JobStatus::Success);
+    assert_eq!(run.exit_code, Some(0));
+    assert_eq!(run.message.as_deref(), Some("done"));
+
+    // The same run id is reused for retries. Once generation 1 is active,
+    // completion from generation 0 must remain stale even though the status
+    // has become active again.
+    engine
+        .store
+        .set_run_status(&run_id, synora_core::JobStatus::Syncing)
+        .await
+        .unwrap();
+    engine.store.set_retry(&run_id, 0, 1).await.unwrap();
+    engine
+        .store
+        .set_run_status(&run_id, synora_core::JobStatus::Syncing)
+        .await
+        .unwrap();
+    assert!(
+        !engine
+            .store
+            .finish_active_run(
+                &run_id,
+                0,
+                synora_core::JobStatus::Failed,
+                Some(1),
+                None,
+                None,
+                None,
+                Some("stale attempt"),
+                2,
+            )
+            .await
+            .unwrap(),
+        "an older retry generation must not finish the active attempt"
+    );
+    assert!(engine
+        .store
+        .finish_active_run(
+            &run_id,
+            1,
+            synora_core::JobStatus::Success,
+            Some(0),
+            None,
+            Some(20),
+            Some(10),
+            Some("new attempt"),
+            1,
+        )
+        .await
+        .unwrap());
 }
 
 #[tokio::test]

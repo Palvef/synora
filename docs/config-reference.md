@@ -89,7 +89,7 @@
 
 ### rsync 参数（与 tunasync 一致）
 
-默认 argv：`rsync -aH --delete --delete-delay --delay-updates --safe-links --timeout=120 --stats`；
+默认 argv：`rsync -aH --filter 'risk .~tmp~/' --exclude '.~tmp~/' --delete --delete-after --delay-updates --safe-links --timeout=120 --stats`；
 上游为 `rsync://` 时追加 `--contimeout=120`。
 
 ### two-stage-rsync（与 tunasync 的 two-stage-rsync provider 一致）
@@ -110,7 +110,7 @@
 
 ### script provider
 
-Worker 上始终在 `synora-scripts` 容器内执行（`[worker] scripts_image`，默认 `synora-scripts:latest`）。配置仍是 `provider = "script"`。脚本读 `SYNORA_JOB` / `SYNORA_UPSTREAM` / `SYNORA_STORAGE` / `SYNORA_API`。需要固定镜像 argv 的任务（如 `github-release`、`rubygems`）改用 `provider = "docker"` + `docker_command`。
+Worker 上始终在 `synora-scripts` 容器内执行（`[worker] scripts_image`，默认 `synora-scripts:latest`）。配置仍是 `provider = "script"`。脚本读 `SYNORA_JOB` / `SYNORA_UPSTREAM` / `SYNORA_STORAGE` / `SYNORA_API`；迁移脚本也可继续使用兼容的 `TUNASYNC_MIRROR_NAME` / `TUNASYNC_WORKING_DIR` / `TUNASYNC_UPSTREAM_URL` / `TUNASYNC_LOG_*`。需要固定镜像 argv 的任务（如 `github-release`、`rubygems`）改用 `provider = "docker"` + `docker_command`。
 
 | 配置项 | 类型 | 说明 |
 |---|---|---|
@@ -124,6 +124,7 @@ Worker 上始终在 `synora-scripts` 容器内执行（`[worker] scripts_image`�
 |---|---|---|
 | `image` | `string` | 镜像（tunasync-scripts 风格：镜像 entrypoint 读环境变量执行） |
 | `docker_command` | `string[]` | 可选：容器内命令 argv（空 = 镜像自身 entrypoint） |
+| `docker_options` | `string[]` | 追加到 `docker run`、镜像参数之前的 argv（兼容 tunasync） |
 | `env` | `string[]` | `"K=V"` 环境变量 |
 | `volumes` | `string[]` | `"host:container"` 挂载（storage 默认挂到 `/data`；用户显式挂 `/data` 时不重复挂） |
 | `keep_container` | `bool` | `false` 默认 `--rm` |

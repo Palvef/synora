@@ -11,7 +11,11 @@ Mapping:
   storageDir           -> storage
   image                -> provider = "docker", image, env from envs,
                           storage mounted at /data by Synora (Yuki convention)
-  logRotCycle          -> dropped (Synora rotates current.log → YYYY-MM-DD.log)
+  logRotCycle          -> LOG_ROTATE_CYCLE inside the image; the Synora job
+                          log directory is mounted at /log
+  retry                -> RETRY inside the image and Synora retry = 0, avoiding
+                          two nested retry loops
+  network              -> docker_network (Yuki's empty default becomes host)
 
 Usage:
   python3 yuki2synora.py /etc/yuki/repo-configs/ -o config/ [--db data/synora.db]
@@ -21,7 +25,7 @@ key: value mappings with string scalars — no anchors/aliases). Offline-safe.
 """
 
 import argparse
-import re
+import os
 from pathlib import Path
 
 TOML_ESCAPE = str.maketrans({"\\": "\\\\", '"': '\\"'})
@@ -31,17 +35,39 @@ def toml_str(s):
     return '"' + str(s).translate(TOML_ESCAPE) + '"'
 
 
+def strip_yaml_comment(line):
+    """Remove a YAML comment without truncating `#` inside a quoted value."""
+    quote = None
+    escaped = False
+    for index, char in enumerate(line):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\" and quote == '"':
+            escaped = True
+            continue
+        if char in ("'", '"'):
+            if quote == char:
+                quote = None
+            elif quote is None:
+                quote = char
+            continue
+        if char == "#" and quote is None and (index == 0 or line[index - 1].isspace()):
+            return line[:index]
+    return line
+
+
 def parse_yaml_simple(text):
     """Parse the flat `key: value` YAML subset Yuki uses.
 
     Values: quoted strings, unquoted scalars, and inline lists [a, b].
-    Nested maps are not used by Yuki repo configs.
+    Nested maps support Yuki's `envs` and `volumes` blocks.
     """
     out = {}
     nested_key = None
     nested = None
     for line in text.splitlines():
-        line = line.split("#", 1)[0].rstrip()
+        line = strip_yaml_comment(line).rstrip()
         if not line.strip():
             continue
         stripped = line.strip()
@@ -76,16 +102,25 @@ def parse_yaml_simple(text):
     return out
 
 
-def render_job(repo):
+def render_job(
+    repo,
+    log_dir="/var/log/synora",
+    sync_timeout=None,
+    default_owner=None,
+    default_bind_ip=None,
+):
     name = str(repo.get("name", ""))
     if not name:
         raise SystemExit("repo config without `name`")
     lines = ["[[jobs]]", f"name = {toml_str(name)}", "enabled = true", ""]
 
-    cron = repo.get("cron")
-    if cron:
+    cron = str(repo.get("cron") or "").strip()
+    if cron.startswith("@every "):
+        lines.append('schedule = "interval"')
+        lines.append(f"every = {toml_str(cron.removeprefix('@every ').strip())}")
+    elif cron:
         lines.append('schedule = "cron"')
-        lines.append(f"cron = {toml_str(str(cron))}")
+        lines.append(f"cron = {toml_str(cron)}")
     else:
         lines.append('schedule = "manual"  # no cron in Yuki config')
 
@@ -95,13 +130,29 @@ def render_job(repo):
     if image:
         lines.append('provider = "docker"')
         lines.append(f"image = {toml_str(str(image))}")
-        envs = repo.get("envs")
-        if isinstance(envs, dict):
-            envs = [f"{k}={v}" for k, v in envs.items()]
-        elif not isinstance(envs, list):
-            envs = []
+        env_map = dict(repo.get("envs") or {}) if isinstance(repo.get("envs"), dict) else {}
+        # Yuki injects these fields before starting every image. Preserve
+        # them because ustcmirror images consume RETRY/OWNER internally.
+        env_map.setdefault("REPO", name)
+        env_map.setdefault("RETRY", str(repo.get("retry", 0)))
+        env_map.setdefault("LOG_ROTATE_CYCLE", str(repo.get("logRotCycle", 0)))
+        owner = repo.get("user") or default_owner
+        bind_ip = repo.get("bindIP") or default_bind_ip
+        if owner:
+            env_map.setdefault("OWNER", str(owner))
+        if bind_ip:
+            env_map.setdefault("BIND_ADDRESS", str(bind_ip))
+        envs = [f"{key}={value}" for key, value in env_map.items()]
         if envs:
             lines.append(f"env = {toml_list(envs)}")
+        volumes = repo.get("volumes")
+        volume_list = [f"{log_dir.rstrip('/')}/{name}:/log"]
+        if isinstance(volumes, dict):
+            volume_list.extend(f"{source}:{target}" for source, target in volumes.items())
+        lines.append(f"volumes = {toml_list(volume_list)}")
+        # Yuki treats an empty network as host networking, not Docker's
+        # bridge default.
+        lines.append(f"docker_network = {toml_str(repo.get('network') or 'host')}")
     else:
         # Yuki always syncs via an image; without one, fall back to script.
         lines.append('provider = "script"')
@@ -112,6 +163,11 @@ def render_job(repo):
         lines.append(f"storage = {toml_str(str(storage))}")
     else:
         raise SystemExit(f"repo {name}: missing storageDir")
+    # Yuki's RETRY is consumed inside the image. A second orchestration retry
+    # loop would multiply attempts after migration.
+    lines.append("retry = 0")
+    if sync_timeout:
+        lines.append(f"timeout = {toml_str(sync_timeout)}")
     return "\n".join(lines) + "\n"
 
 
@@ -125,6 +181,16 @@ def main():
     ap.add_argument("-o", "--out", default="config", help="output config dir (default: config)")
     ap.add_argument("--log-dir", default="/var/log/synora", help="synora log dir")
     ap.add_argument("--db", default="data/synora.db", help="synora sqlite db path")
+    ap.add_argument(
+        "--sync-timeout",
+        help="Yuki daemon sync_timeout to apply to every generated job (for example 48h)",
+    )
+    ap.add_argument(
+        "--owner",
+        default=f"{os.getuid()}:{os.getgid()}",
+        help="Yuki daemon owner injected as OWNER (default: current uid:gid)",
+    )
+    ap.add_argument("--bind-ip", help="Yuki daemon bind_ip fallback")
     args = ap.parse_args()
 
     src = Path(args.dir)
@@ -143,7 +209,16 @@ def main():
             print(f"skip {f}: no `name` key")
             continue
         target = jobs_dir / f"{repo['name']}.toml"
-        target.write_text(render_job(repo), encoding="utf-8")
+        target.write_text(
+            render_job(
+                repo,
+                log_dir=args.log_dir,
+                sync_timeout=args.sync_timeout,
+                default_owner=args.owner,
+                default_bind_ip=args.bind_ip,
+            ),
+            encoding="utf-8",
+        )
         print(f"  {repo['name']}: {target}")
         count += 1
 

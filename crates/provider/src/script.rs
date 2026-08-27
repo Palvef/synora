@@ -50,6 +50,7 @@ impl ScriptProvider {
                 crate::docker::DockerRunSpec {
                     image: image.to_string(),
                     command: crate::docker::docker_exec_args(std::slice::from_ref(&self.command)),
+                    extra_options: Vec::new(),
                     extra_env: self.env.clone(),
                     extra_volumes: Vec::new(),
                     keep_container: false,
@@ -67,8 +68,13 @@ impl ScriptProvider {
         cmd.arg("-c").arg(&self.command);
         cmd.current_dir(&ctx.storage);
         cmd.env("SYNORA_JOB", &ctx.job_name);
+        // Keep tunasync's command-provider contract so migrated scripts and
+        // images do not need an all-at-once environment-variable rewrite.
+        cmd.env("TUNASYNC_MIRROR_NAME", &ctx.job_name);
+        cmd.env("TUNASYNC_WORKING_DIR", ctx.storage.display().to_string());
         if let Some(up) = &ctx.upstream {
             cmd.env("SYNORA_UPSTREAM", up);
+            cmd.env("TUNASYNC_UPSTREAM_URL", up);
         }
         cmd.env("SYNORA_STORAGE", ctx.storage.display().to_string());
         if let Some(w) = &ctx.worker {
@@ -96,6 +102,14 @@ impl ScriptProvider {
             "SYNORA_LOG_DIR",
             format!("{}/.synora-log", ctx.storage.display()),
         );
+        let compat_log_dir = format!("{}/.synora-log", ctx.storage.display());
+        cmd.env("TUNASYNC_LOG_DIR", &compat_log_dir);
+        cmd.env(
+            "TUNASYNC_LOG_FILE",
+            ctx.log_file
+                .as_deref()
+                .unwrap_or_else(|| std::path::Path::new("/dev/null")),
+        );
         for e in &self.env {
             if let Some((k, v)) = e.split_once('=') {
                 cmd.env(k, v);
@@ -105,7 +119,7 @@ impl ScriptProvider {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let (mut child, _guard) = spawn_group(&mut cmd, ctx)
+        let (mut child, guard) = spawn_group(&mut cmd, ctx)
             .map_err(|e| ProviderError::Spawn(format!("`{}`: {e}", self.command)))?;
         // Read pipes and wait for exit concurrently with cancellation: a
         // long-running child keeps its pipes open, so a plain read_to_end
@@ -143,6 +157,7 @@ impl ScriptProvider {
             r = child.wait() => r.map_err(|e| ProviderError::Other(e.to_string()))?,
         };
         cancelled_after_wait(ctx, &mut child).await?;
+        guard.disarm();
 
         let parsed = parse_output(&stdout);
         let result = SyncResult {

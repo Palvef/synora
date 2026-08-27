@@ -163,6 +163,7 @@ impl GitProvider {
                 crate::docker::DockerRunSpec {
                     image: image.to_string(),
                     command: git_container_args(self.branch.as_deref()),
+                    extra_options: Vec::new(),
                     extra_env,
                     extra_volumes: Vec::new(),
                     keep_container: false,
@@ -216,7 +217,7 @@ impl GitProvider {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
-        let (mut child, _guard) =
+        let (mut child, guard) =
             spawn_group(&mut cmd, ctx).map_err(|e| ProviderError::Spawn(format!("git: {e}")))?;
         let stdout_pipe = child.stdout.take();
         let stderr_pipe = child.stderr.take();
@@ -251,6 +252,7 @@ impl GitProvider {
             r = child.wait() => r.map_err(|e| ProviderError::Other(e.to_string()))?,
         };
         cancelled_after_wait(ctx, &mut child).await?;
+        guard.disarm();
         let code = status.code().unwrap_or(-1);
         if code != 0 {
             let err = String::from_utf8_lossy(&stderr);
@@ -272,7 +274,7 @@ impl GitProvider {
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
-            let (mut child, _guard) = spawn_group(&mut reset, ctx)?;
+            let (mut child, guard) = spawn_group(&mut reset, ctx)?;
             let status = tokio::select! {
                 _ = ctx.cancel.cancelled() => {
                     kill_group(&mut child).await;
@@ -280,6 +282,8 @@ impl GitProvider {
                 }
                 r = child.wait() => r.map_err(|e| ProviderError::Other(e.to_string()))?,
             };
+            cancelled_after_wait(ctx, &mut child).await?;
+            guard.disarm();
             if !status.success() {
                 return Err(ProviderError::Other(format!(
                     "git reset exited with {}",

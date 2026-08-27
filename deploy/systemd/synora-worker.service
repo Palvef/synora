@@ -25,6 +25,5 @@ User=root
 Group=root
 LimitNOFILE=65536
 Delegate=yes
-DelegateControllers=cpu memory pids
 [Install]
 WantedBy=multi-user.target

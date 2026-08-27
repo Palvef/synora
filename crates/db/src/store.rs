@@ -413,9 +413,16 @@ impl Store {
         Ok(())
     }
 
-    pub async fn delete_worker(&self, id: &str) -> DbResult<()> {
+    /// Retire a worker without deleting its row. `job_runs.worker_id` keeps
+    /// historical foreign-key references to workers, so DELETE fails as soon
+    /// as a worker has completed its first run. OFFLINE is also the correct
+    /// state for a clean shutdown: a later upsert promotes it to ONLINE.
+    pub async fn unregister_worker(&self, id: &str) -> DbResult<()> {
         self.db
-            .execute("DELETE FROM workers WHERE id = ?", &[id.into()])
+            .execute(
+                "UPDATE workers SET status = 'OFFLINE', jobs_running = 0 WHERE id = ?",
+                &[id.into()],
+            )
             .await?;
         Ok(())
     }
@@ -838,6 +845,53 @@ impl Store {
         self.set_job_status_for_run(id, status).await
     }
 
+    /// Finish a worker-owned run only while it is still active. Completion
+    /// requests are retried over HTTP; the status predicate makes those
+    /// retries idempotent and prevents a stale worker from overwriting a run
+    /// that the manager has already marked LOST or re-queued.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn finish_active_run(
+        &self,
+        id: &str,
+        expected_retry_count: u32,
+        status: JobStatus,
+        exit_code: Option<i32>,
+        size_before: Option<i64>,
+        size_after: Option<i64>,
+        bytes_transferred: Option<i64>,
+        message: Option<&str>,
+        duration_secs: i64,
+    ) -> DbResult<bool> {
+        let changed = self
+            .db
+            .execute(
+                "UPDATE job_runs SET status = ?, finished_at = ?, duration_secs = ?,
+                        exit_code = ?, size_before = ?, size_after = ?,
+                        bytes_transferred = ?, message = ?, lease_expires_at = NULL
+                 WHERE id = ?
+                   AND retry_count = ?
+                   AND status IN ('STARTING','SYNCING','RUNNING','CANCELLING')",
+                &[
+                    status.to_db().into(),
+                    unix_now().into(),
+                    duration_secs.into(),
+                    exit_code.map(|v| v as i64).into(),
+                    size_before.into(),
+                    size_after.into(),
+                    bytes_transferred.into(),
+                    message.map(|m| m.to_string()).into(),
+                    id.into(),
+                    (expected_retry_count as i64).into(),
+                ],
+            )
+            .await?;
+        if changed == 0 {
+            return Ok(false);
+        }
+        self.set_job_status_for_run(id, status).await?;
+        Ok(true)
+    }
+
     async fn set_job_status_for_run(&self, id: &str, status: JobStatus) -> DbResult<()> {
         let job = self
             .db
@@ -862,6 +916,38 @@ impl Store {
             )
             .await?;
         self.set_job_status_for_run(id, JobStatus::Retrying).await
+    }
+
+    /// Retry transition paired with [`finish_active_run`]: only the first
+    /// completion of an active attempt may schedule its retry.
+    pub async fn set_retry_from_active(
+        &self,
+        id: &str,
+        expected_retry_count: u32,
+        next_retry_at: i64,
+        retry_count: u32,
+    ) -> DbResult<bool> {
+        let changed = self
+            .db
+            .execute(
+                "UPDATE job_runs SET status = 'RETRYING', next_retry_at = ?, retry_count = ?,
+                        lease_expires_at = NULL
+                 WHERE id = ?
+                   AND retry_count = ?
+                   AND status IN ('STARTING','SYNCING','RUNNING','CANCELLING')",
+                &[
+                    next_retry_at.into(),
+                    (retry_count as i64).into(),
+                    id.into(),
+                    (expected_retry_count as i64).into(),
+                ],
+            )
+            .await?;
+        if changed == 0 {
+            return Ok(false);
+        }
+        self.set_job_status_for_run(id, JobStatus::Retrying).await?;
+        Ok(true)
     }
 
     /// Retries whose wait elapsed: back to the queue.

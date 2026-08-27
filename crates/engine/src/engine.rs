@@ -182,6 +182,7 @@ impl Engine {
         }
 
         let run_storage = RunStorageCtx::from_config(&cfg);
+        let max_concurrency = cfg.daemon.max_concurrency.max(1) as usize;
         let netroute = std::sync::RwLock::new(netroute::NetRoute::build_optional(
             &cfg.proxies,
             &cfg.proxy_groups,
@@ -201,7 +202,7 @@ impl Engine {
             metrics: Arc::new(Metrics::new()),
             live_jobs: std::sync::RwLock::new(live_jobs),
             job_locks: std::sync::RwLock::new(job_locks),
-            global_sem: Arc::new(tokio::sync::Semaphore::new(16)),
+            global_sem: Arc::new(tokio::sync::Semaphore::new(max_concurrency)),
             active: std::sync::Mutex::new(HashMap::new()),
             active_runs: std::sync::Mutex::new(HashMap::new()),
             config_source: std::sync::RwLock::new(None),
@@ -282,33 +283,36 @@ impl Engine {
             .get_schedule(&job.name)
             .await
             .map_err(|e| e.to_string())?;
-        let is_first_sync = existing.is_none();
-        let (next_run, anchor) = match &job.schedule.kind {
-            synora_core::ScheduleKind::Manual | synora_core::ScheduleKind::Startup => (None, None),
-            synora_core::ScheduleKind::Interval { .. } => {
-                let anchor = existing
-                    .as_ref()
-                    .and_then(|r| r.anchor_at)
-                    .map(|a| time::OffsetDateTime::from_unix_timestamp(a).unwrap_or(now_dt))
-                    .unwrap_or(now_dt);
-                let next = job
-                    .schedule
-                    .next_after(now_dt, tz, Some(anchor))
-                    .map(|t| t.unix_timestamp());
-                (next, Some(anchor.unix_timestamp()))
+        let unchanged = existing
+            .as_ref()
+            .is_some_and(|row| row.schedule_json == schedule_json && row.timezone == job.timezone);
+        // Preserve the persisted due time for an unchanged schedule.  Startup
+        // calls sync_config before boot_pass; recomputing from `now` here used
+        // to hide every overdue row, making run-immediately misfires
+        // impossible after a restart.
+        let (next_run, anchor) = if unchanged {
+            let row = existing
+                .as_ref()
+                .expect("unchanged requires an existing row");
+            (row.next_run, row.anchor_at)
+        } else {
+            match &job.schedule.kind {
+                synora_core::ScheduleKind::Manual | synora_core::ScheduleKind::Startup => {
+                    (None, None)
+                }
+                synora_core::ScheduleKind::Interval { .. } => {
+                    // A new/changed interval gets a new grid. The first point
+                    // is due immediately; subsequent points remain anchored.
+                    (Some(now), Some(now))
+                }
+                _ => {
+                    let next = job
+                        .schedule
+                        .next_after(now_dt, tz, None)
+                        .map(|t| t.unix_timestamp());
+                    (next, None)
+                }
             }
-            _ => {
-                let next = job
-                    .schedule
-                    .next_after(now_dt, tz, None)
-                    .map(|t| t.unix_timestamp());
-                (next, None)
-            }
-        };
-        // Interval first sync: run right away so the grid starts now.
-        let next_run = match (&job.schedule.kind, is_first_sync) {
-            (synora_core::ScheduleKind::Interval { .. }, true) => Some(now),
-            _ => next_run,
         };
         self.store
             .sync_schedule(
@@ -574,6 +578,13 @@ impl Engine {
         if old.daemon.db != new_cfg.daemon.db {
             return reject("daemon.db", &old.daemon.db, &new_cfg.daemon.db);
         }
+        if old.daemon.max_concurrency != new_cfg.daemon.max_concurrency {
+            return reject(
+                "daemon.max_concurrency",
+                &old.daemon.max_concurrency,
+                &new_cfg.daemon.max_concurrency,
+            );
+        }
         if old.daemon.log_dir != new_cfg.daemon.log_dir {
             return reject(
                 "daemon.log_dir",
@@ -581,11 +592,31 @@ impl Engine {
                 &new_cfg.daemon.log_dir,
             );
         }
-        if old.api.listen != new_cfg.api.listen {
-            return reject("api.listen", &old.api.listen, &new_cfg.api.listen);
+        if old.api != new_cfg.api {
+            return reject("api", &old.api, &new_cfg.api);
         }
-        if old.api.tls != new_cfg.api.tls {
-            return reject("api.tls", &old.api.tls, &new_cfg.api.tls);
+        if old.storages != new_cfg.storages {
+            return reject("storage", &old.storages, &new_cfg.storages);
+        }
+        if old.cgroup != new_cfg.cgroup {
+            return reject("cgroup", &old.cgroup, &new_cfg.cgroup);
+        }
+        if old.snapshot_retention != new_cfg.snapshot_retention {
+            return reject(
+                "snapshot.retention",
+                &old.snapshot_retention,
+                &new_cfg.snapshot_retention,
+            );
+        }
+        if old.min_free_bytes != new_cfg.min_free_bytes {
+            return reject(
+                "storage.min_free_bytes",
+                &old.min_free_bytes,
+                &new_cfg.min_free_bytes,
+            );
+        }
+        if old.notifications != new_cfg.notifications {
+            return reject("notification", &old.notifications, &new_cfg.notifications);
         }
 
         // Apply job changes: upsert changed jobs + schedules, disable removed.
@@ -674,20 +705,16 @@ impl Engine {
         }
         // Proxy/egress changes: rebuild the NetRoute (user: TUI-registered
         // proxies apply on reload).
-        if old.proxies != new_cfg.proxies
-            || old.egresses != new_cfg.egresses
-            || old.proxy_groups != new_cfg.proxy_groups
-            || old.egress_groups != new_cfg.egress_groups
-            || old.daemon.default_proxy != new_cfg.daemon.default_proxy
-        {
-            *self.netroute.write().unwrap() = netroute::NetRoute::build_optional(
-                &new_cfg.proxies,
-                &new_cfg.proxy_groups,
-                &new_cfg.egresses,
-                &new_cfg.egress_groups,
-                new_cfg.daemon.default_proxy.as_deref(),
-            );
-        }
+        // Always rebuild from the just-loaded snapshot. Comparing against
+        // `self.cfg` (the immutable startup config) made A -> B -> A reloads
+        // leave routing stuck on B.
+        *self.netroute.write().unwrap() = netroute::NetRoute::build_optional(
+            &new_cfg.proxies,
+            &new_cfg.proxy_groups,
+            &new_cfg.egresses,
+            &new_cfg.egress_groups,
+            new_cfg.daemon.default_proxy.as_deref(),
+        );
         let changed = new_cfg.jobs.len() + removed.len();
         let _ = self
             .store
@@ -790,26 +817,27 @@ impl Engine {
     pub async fn run_once(self: Arc<Self>, job_name: &str) -> Result<JobStatus, String> {
         self.sync_config().await?;
         let run_id = self.dispatch(job_name, true).await?;
-        // Spin until the run row reaches a terminal state (bounded).
-        for _ in 0..600 {
+        // Wait for the configured provider lifetime. An unconditional five
+        // minute cap here used to kill otherwise-unlimited one-shot runs when
+        // the CLI runtime exited, contradicting the optional job timeout.
+        loop {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             crate::scheduler::execute_queued(&self).await;
-            if let Some(run) = self
+            let run = self
                 .store
                 .get_run(&run_id)
                 .await
                 .map_err(|e| e.to_string())?
-            {
-                match run.status {
-                    JobStatus::Success
-                    | JobStatus::Failed
-                    | JobStatus::Cancelled
-                    | JobStatus::Lost => return Ok(run.status),
-                    _ => continue,
-                }
+                .ok_or_else(|| format!("run `{run_id}` disappeared while waiting"))?;
+            match run.status {
+                JobStatus::Success
+                | JobStatus::Failed
+                | JobStatus::Cancelled
+                | JobStatus::Lost
+                | JobStatus::Skipped => return Ok(run.status),
+                _ => continue,
             }
         }
-        Err("run did not finish in time".to_string())
     }
 }
 

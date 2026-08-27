@@ -148,6 +148,9 @@ pub enum ProviderConfig {
     Docker {
         /// Image to run (spec §18).
         image: String,
+        /// Additional `docker run` arguments before mounts/environment.
+        #[serde(default)]
+        options: Vec<String>,
         /// "KEY=VALUE" environment lines.
         #[serde(default)]
         env: Vec<String>,

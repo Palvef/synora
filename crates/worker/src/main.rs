@@ -399,6 +399,7 @@ async fn main() -> Result<(), String> {
                         .await;
                         let req = outcome_to_complete(
                             &worker_id,
+                            a.attempt,
                             &job,
                             &outcome,
                             &log_dir,
@@ -456,6 +457,7 @@ async fn main() -> Result<(), String> {
 /// ZFS used on the resolved worker path).
 fn outcome_to_complete(
     worker_id: &str,
+    attempt: u32,
     job: &JobSpec,
     outcome: &engine::RunOutcome,
     log_dir: &std::path::Path,
@@ -493,6 +495,7 @@ fn outcome_to_complete(
     );
     CompleteRequest {
         worker_id: worker_id.to_string(),
+        attempt: Some(attempt),
         status: status.to_string(),
         exit_code: result.and_then(|r| r.exit_code).map(|v| v as i64),
         size_before: None,

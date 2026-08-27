@@ -154,32 +154,89 @@ pub async fn run_once(
     scripts_image: Option<String>,
     manager_url: Option<String>,
 ) -> RunOutcome {
-    let started = unix_now();
-    // Multi-machine storage layouts: a job referencing a [storage.<name>]
-    // section resolves to THIS machine's local mountpoint + the job's
-    // relative path.
-    let job = if let Some(ctx) = storage_ctx {
-        if job.storage_name.is_some() {
-            let resolved = ctx.resolve_storage_path(job);
-            if resolved != job.storage {
-                let mut j = job.clone();
-                tracing::info!(
-                    "job `{}`: storage resolved to {} (local storage section)",
-                    job.name,
-                    resolved.display()
-                );
-                j.storage = resolved;
-                j
-            } else {
-                job.clone()
-            }
-        } else {
-            job.clone()
-        }
+    let hook_job = resolve_local_job(job, storage_ctx);
+    let hook_ctx = hook_ctx(
+        &hook_job,
+        run_id,
+        worker,
+        manager_proxy_env.clone().unwrap_or_default(),
+        manager_url.clone(),
+    );
+    let outcome = run_once_inner(
+        &hook_job,
+        run_id,
+        worker,
+        cancel,
+        log_dir,
+        storage_ctx,
+        netroute,
+        manager_proxy_env,
+        shared_usage,
+        scripts_image,
+        manager_url,
+    )
+    .await;
+    // Terminal hooks belong to the execution side. Keeping them in the
+    // standalone DB tail meant distributed workers never ran on_success or
+    // on_failure at all.
+    let succeeded = outcome
+        .result
+        .as_ref()
+        .is_ok_and(|result| sync_result_failure_reason(&hook_job, result).is_none());
+    let hooks = if succeeded {
+        &hook_job.hooks.on_success
     } else {
-        job.clone()
+        &hook_job.hooks.on_failure
     };
-    let job = &job;
+    run_hooks(
+        hooks,
+        &hook_ctx,
+        None,
+        Some(if succeeded { "success" } else { "failure" }),
+    )
+    .await;
+    outcome
+}
+
+fn resolve_local_job(job: &JobSpec, storage_ctx: Option<&crate::engine::RunStorageCtx>) -> JobSpec {
+    let Some(ctx) = storage_ctx else {
+        return job.clone();
+    };
+    if job.storage_name.is_none() {
+        return job.clone();
+    }
+    let resolved = ctx.resolve_storage_path(job);
+    if resolved == job.storage {
+        return job.clone();
+    }
+    let mut job = job.clone();
+    tracing::info!(
+        "job `{}`: storage resolved to {} (local storage section)",
+        job.name,
+        resolved.display()
+    );
+    job.storage = resolved;
+    job
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_once_inner(
+    job: &JobSpec,
+    run_id: &str,
+    worker: &str,
+    cancel: CancellationToken,
+    log_dir: &Path,
+    storage_ctx: Option<&crate::engine::RunStorageCtx>,
+    netroute: Option<&netroute::NetRoute>,
+    manager_proxy_env: Option<Vec<(String, String)>>,
+    shared_usage: Option<provider::UsageSink>,
+    scripts_image: Option<String>,
+    manager_url: Option<String>,
+) -> RunOutcome {
+    let started = unix_now();
+    // `run_once` resolves named storage before constructing hook/provider
+    // contexts. Resolving again here would prepend the worker mountpoint a
+    // second time (for example /datas/anthon -> /datas/datas/anthon).
     let mut logger = RunLogger::open(log_dir, &job.name).ok();
     if let Some(l) = logger.as_mut() {
         let _ = l.line(&format!(
@@ -450,7 +507,7 @@ pub async fn run_once(
         });
     }
 
-    run_hooks(&job.hooks.before_sync, &ctx, logger.as_mut()).await;
+    run_hooks(&job.hooks.before_sync, &ctx, logger.as_mut(), None).await;
 
     // Delete/size protection baseline (spec §52-53): measured around the
     // provider run, enforced after — a mirror that shrinks too much is
@@ -472,25 +529,31 @@ pub async fn run_once(
     // the provider and kills its process group only when explicitly set;
     // omitted means wait for natural completion.
     let outcome = if let Some(timeout) = job.timeout {
+        let sync = provider.sync(&ctx);
+        tokio::pin!(sync);
         tokio::select! {
-            r = tokio::time::timeout(
-                std::time::Duration::from_secs(timeout.whole_seconds().max(1) as u64),
-                provider.sync(&ctx),
-            ) => {
-                match r {
-                    Err(_) => {
-                        cancel.cancel();
-                        Err(ProviderError::Timeout)
-                    }
-                    Ok(r) => r,
-                }
+            result = &mut sync => result,
+            _ = tokio::time::sleep(std::time::Duration::from_secs(
+                timeout.whole_seconds().max(1) as u64,
+            )) => {
+                // Wake the provider's cancellation branch and give it time
+                // to kill and reap its process group/container. Dropping the
+                // timed-out future immediately only sent SIGKILL from a Drop
+                // guard and could leave a zombie behind.
+                cancel.cancel();
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    &mut sync,
+                )
+                .await;
+                Err(ProviderError::Timeout)
             }
         }
     } else {
         provider.sync(&ctx).await
     };
 
-    run_hooks(&job.hooks.after_sync, &ctx, logger.as_mut()).await;
+    run_hooks(&job.hooks.after_sync, &ctx, logger.as_mut(), None).await;
 
     // Enforce delete/size protection (spec §52-53). Runs only on a provider
     // success: a failed sync already fails the run.
@@ -879,7 +942,6 @@ async fn finish_run(engine: &Arc<Engine>, run_id: &str, job: &JobSpec, outcome: 
             .store
             .insert_event(Some(&job.name), Some(run_id), "WARN", "run cancelled")
             .await;
-        run_hooks(&job.hooks.on_failure, &hook_ctx(job, run_id), None).await;
         metrics_tail(
             engine,
             job,
@@ -903,7 +965,6 @@ async fn finish_run(engine: &Arc<Engine>, run_id: &str, job: &JobSpec, outcome: 
     };
 
     if success {
-        run_hooks(&job.hooks.on_success, &hook_ctx(job, run_id), None).await;
         let result = outcome.result.as_ref().ok();
         let _ = engine
             .store
@@ -1024,7 +1085,6 @@ async fn finish_run(engine: &Arc<Engine>, run_id: &str, job: &JobSpec, outcome: 
                 engine
                     .notify("sync_failed", Some(&job.name), &message)
                     .await;
-                run_hooks(&job.hooks.on_failure, &hook_ctx(job, run_id), None).await;
             }
         }
     }
@@ -1095,17 +1155,36 @@ fn metrics_tail(
 
 /// Run a hook list via the same process machinery as the script provider.
 /// Hook failures are warnings — they never change the run verdict (spec §50).
-async fn run_hooks(hooks: &[String], ctx: &SyncContext, mut logger: Option<&mut RunLogger>) {
+async fn run_hooks(
+    hooks: &[String],
+    ctx: &SyncContext,
+    mut logger: Option<&mut RunLogger>,
+    terminal_status: Option<&str>,
+) {
     for hook in hooks {
         let mut cmd = tokio::process::Command::new("/bin/sh");
         cmd.arg("-c").arg(hook);
         cmd.current_dir(&ctx.storage);
         cmd.env("SYNORA_JOB", &ctx.job_name);
+        cmd.env("TUNASYNC_MIRROR_NAME", &ctx.job_name);
+        cmd.env("TUNASYNC_WORKING_DIR", ctx.storage.display().to_string());
         if let Some(up) = &ctx.upstream {
             cmd.env("SYNORA_UPSTREAM", up);
+            cmd.env("TUNASYNC_UPSTREAM_URL", up);
         }
         cmd.env("SYNORA_STORAGE", ctx.storage.display().to_string());
         cmd.env("SYNORA_RUN_ID", &ctx.run_id);
+        let fallback_log_dir = ctx.storage.join(".synora-log");
+        let log_file = ctx
+            .log_file
+            .clone()
+            .unwrap_or_else(|| fallback_log_dir.join("current.log"));
+        let log_dir = log_file.parent().unwrap_or(&fallback_log_dir);
+        cmd.env("TUNASYNC_LOG_DIR", log_dir);
+        cmd.env("TUNASYNC_LOG_FILE", &log_file);
+        if let Some(status) = terminal_status {
+            cmd.env("TUNASYNC_JOB_EXIT_STATUS", status);
+        }
         if let Some(api) = ctx.manager_url.as_deref().filter(|s| !s.trim().is_empty()) {
             cmd.env("SYNORA_API", api);
         }
@@ -1130,25 +1209,31 @@ async fn run_hooks(hooks: &[String], ctx: &SyncContext, mut logger: Option<&mut 
 }
 
 /// Minimal context for hooks called after the run (no provider cancel).
-fn hook_ctx(job: &JobSpec, run_id: &str) -> SyncContext {
+fn hook_ctx(
+    job: &JobSpec,
+    run_id: &str,
+    worker: &str,
+    proxy_env: Vec<(String, String)>,
+    manager_url: Option<String>,
+) -> SyncContext {
     SyncContext {
         run_id: run_id.to_string(),
         job_name: job.name.clone(),
         upstream: job.upstream.clone(),
         storage: job.storage.clone(),
-        worker: Some(LOCAL_WORKER.to_string()),
+        worker: Some(worker.to_string()),
         proxy: job.proxy.clone(),
         egress: job.egress.clone(),
         job: job.clone(),
         cancel: CancellationToken::new(),
         cgroup: None,
-        proxy_env: Vec::new(),
+        proxy_env,
         egress_address: None,
         family: job.family.clone(),
         usage: None,
         log_file: None,
         scripts_image: None,
-        manager_url: None,
+        manager_url,
     }
 }
 

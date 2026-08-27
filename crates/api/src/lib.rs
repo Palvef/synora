@@ -149,6 +149,11 @@ impl HeartbeatResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunAssignment {
     pub run_id: String,
+    /// Retry generation of this assignment. Workers echo it in completion
+    /// requests so a delayed response from an older attempt cannot finish a
+    /// newer execution that reuses the same run id.
+    #[serde(default)]
+    pub attempt: u32,
     pub job: JobSpec,
     /// Proxy environment resolved by the MANAGER (authoritative — the
     /// worker executes with exactly these settings, never its own local
@@ -162,6 +167,10 @@ pub struct CompleteRequest {
     /// Worker id of the caller (identity check on the manager).
     #[serde(default)]
     pub worker_id: String,
+    /// Retry generation received in [`RunAssignment`]. `None` is accepted
+    /// for rolling compatibility with older workers.
+    #[serde(default)]
+    pub attempt: Option<u32>,
     pub status: String, // "success" | "failed" | "cancelled"
     pub exit_code: Option<i64>,
     pub size_before: Option<i64>,
@@ -411,7 +420,7 @@ impl Client {
     }
 
     pub async fn drain_worker(&self, worker_id: &str) -> Result<(), ApiError> {
-        self.json(
+        self.send_ok(
             reqwest::Method::POST,
             &format!("{API_V1}/workers/{worker_id}/drain"),
             None::<&()>,

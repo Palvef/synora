@@ -16,6 +16,7 @@ use tokio::sync::Mutex;
 
 pub struct DockerProvider {
     pub image: String,
+    pub options: Vec<String>,
     pub env: Vec<String>,
     pub volumes: Vec<String>,
     pub keep_container: bool,
@@ -146,6 +147,7 @@ pub fn scripts_image_name(value: Option<&str>) -> Option<&str> {
 pub struct DockerRunSpec {
     pub image: String,
     pub command: Vec<String>,
+    pub extra_options: Vec<String>,
     pub extra_env: Vec<String>,
     pub extra_volumes: Vec<String>,
     pub keep_container: bool,
@@ -303,6 +305,7 @@ impl DockerProvider {
             DockerRunSpec {
                 image: self.image.clone(),
                 command: docker_exec_args(&self.command),
+                extra_options: self.options.clone(),
                 extra_env: self.env.clone(),
                 extra_volumes: self.volumes.clone(),
                 keep_container: self.keep_container,
@@ -348,6 +351,9 @@ pub async fn run_named_container(
     }
     if !spec.keep_container {
         cmd.arg("--rm");
+    }
+    for option in &spec.extra_options {
+        cmd.arg(option);
     }
     // Resource limits via docker's own cgroup integration.
     if let Some(mem) = ctx.job.memory_limit {
@@ -398,8 +404,11 @@ pub async fn run_named_container(
     }
     cmd.arg("-e").arg("PYTHONUNBUFFERED=1");
     cmd.arg("-e").arg(format!("SYNORA_JOB={}", ctx.job_name));
+    cmd.arg("-e")
+        .arg(format!("TUNASYNC_MIRROR_NAME={}", ctx.job_name));
     if let Some(up) = &ctx.upstream {
         cmd.arg("-e").arg(format!("SYNORA_UPSTREAM={up}"));
+        cmd.arg("-e").arg(format!("TUNASYNC_UPSTREAM_URL={up}"));
         if let Some(rest) = up.strip_prefix("rsync://") {
             let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
             cmd.arg("-e").arg(format!("RSYNC_HOST={host}"));
@@ -413,10 +422,17 @@ pub async fn run_named_container(
         storage_in_container.to_string()
     };
     cmd.arg("-w").arg(&workdir);
+    cmd.arg("-e").arg(format!("TUNASYNC_WORKING_DIR={workdir}"));
     cmd.arg("-e")
         .arg(format!("SYNORA_STORAGE={storage_in_container}"));
     cmd.arg("-e")
         .arg(format!("SYNORA_LOG_DIR={storage_in_container}/.synora-log"));
+    cmd.arg("-e").arg(format!(
+        "TUNASYNC_LOG_DIR={storage_in_container}/.synora-log"
+    ));
+    cmd.arg("-e").arg(format!(
+        "TUNASYNC_LOG_FILE={storage_in_container}/.synora-log/current.log"
+    ));
     cmd.arg("-e").arg(format!("SYNORA_RUN_ID={}", ctx.run_id));
     if let Some(w) = &ctx.worker {
         cmd.arg("-e").arg(format!("SYNORA_WORKER={w}"));
@@ -447,7 +463,7 @@ pub async fn run_named_container(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    let (mut child, _guard) =
+    let (mut child, guard) =
         spawn_group(&mut cmd, ctx).map_err(|e| ProviderError::Spawn(format!("docker run: {e}")))?;
     async fn stop_container(name: &str) {
         let mut rm = Command::new("docker");
@@ -498,6 +514,7 @@ pub async fn run_named_container(
         r = child.wait() => r.map_err(|e| ProviderError::Other(e.to_string()))?,
     };
     cancelled_after_wait(ctx, &mut child).await?;
+    guard.disarm();
     let code = status.code().unwrap_or(-1);
     let combined = format!(
         "{}

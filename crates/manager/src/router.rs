@@ -375,11 +375,13 @@ fn proxy_env_for(state: &AppState, job: &synora_core::job::JobSpec) -> Vec<(Stri
 fn run_assignment(
     state: &AppState,
     run_id: String,
+    attempt: u32,
     job: synora_core::job::JobSpec,
 ) -> RunAssignment {
     let proxy_env = proxy_env_for(state, &job);
     RunAssignment {
         run_id,
+        attempt,
         job,
         proxy_env,
     }
@@ -675,18 +677,37 @@ async fn heartbeat(
         cancel_run: None,
         offline_grace_secs: 45,
     };
-    // Offer enough queued runs to fill free slots in one beat (old workers
-    // still claim `assignment` only).
-    if let Ok(runs) = state.engine.store.assigned_runs(&worker_id).await {
-        for run in runs.into_iter().take(32) {
-            let Some(job) = state.engine.job(&run.job_id) else {
-                continue;
-            };
-            let offered = run_assignment(&state, run.id.clone(), job);
-            if response.assignment.is_none() {
-                response.assignment = Some(offered.clone());
+    // A draining/maintenance worker keeps heartbeating its active runs but
+    // must never receive new assignments. Without this gate a restarted
+    // draining worker immediately filled its slots again and could never
+    // complete a graceful upgrade.
+    let accepts_assignments = state
+        .engine
+        .store
+        .get_worker(&worker_id)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|row| {
+            row.into_iter()
+                .find(|(name, _)| name == "status")
+                .and_then(|(_, value)| value.as_str().map(str::to_owned))
+        })
+        .is_some_and(|status| status == "ONLINE");
+    if accepts_assignments {
+        // Offer enough queued runs to fill free slots in one beat (old
+        // workers still claim `assignment` only).
+        if let Ok(runs) = state.engine.store.assigned_runs(&worker_id).await {
+            for run in runs.into_iter().take(32) {
+                let Some(job) = state.engine.job(&run.job_id) else {
+                    continue;
+                };
+                let offered = run_assignment(&state, run.id.clone(), run.retry_count, job);
+                if response.assignment.is_none() {
+                    response.assignment = Some(offered.clone());
+                }
+                response.assignments.push(offered);
             }
-            response.assignments.push(offered);
         }
     }
     // Ask the worker to cancel any CANCELLING runs it holds.
@@ -763,6 +784,7 @@ async fn claim(
     );
     Ok(axum::Json(RunAssignment {
         run_id,
+        attempt: run.retry_count,
         job,
         proxy_env,
     }))
@@ -800,7 +822,7 @@ async fn complete(
     // Metric labels use the run's worker (named workers register as their
     // own id; auth.name is only the token name).
     let worker_label = run.worker_id.clone().unwrap_or_else(|| auth.name.clone());
-    let mut new_status = JobStatus::Success;
+    let new_status;
     // Treat the process exit status as authoritative at the manager boundary too.
     // This protects the database from old, buggy, or custom workers that report
     // `status=success` together with a failed process exit code.
@@ -821,29 +843,24 @@ async fn complete(
     let completion_message = completion_validation_error
         .as_deref()
         .or(body.message.as_deref());
-    // Store the worker-reported log (distributed runs: the log lives on the
-    // worker host; the manager keeps the text for job_logs).
-    if let Some(log) = body.log.as_deref().filter(|l| !l.is_empty()) {
-        let _ = state
-            .engine
-            .store
-            .insert_log_with(
-                &run_id,
-                &job.name,
-                &format!("/var/log/synora/{}/current.log", job.name),
-                log,
-            )
-            .await;
+    // New workers bind completion to the retry generation they claimed.
+    // Legacy workers omit it and remain accepted during rolling upgrades.
+    let expected_attempt = body.attempt.unwrap_or(run.retry_count);
+    if body
+        .attempt
+        .is_some_and(|attempt| attempt != run.retry_count)
+    {
+        return Ok(StatusCode::OK);
     }
-
-    match effective_status {
+    let applied = match effective_status {
         "cancelled" => {
             new_status = JobStatus::Cancelled;
-            let _ = state
+            state
                 .engine
                 .store
-                .finish_run(
+                .finish_active_run(
                     &run_id,
+                    expected_attempt,
                     JobStatus::Cancelled,
                     None,
                     None,
@@ -852,14 +869,17 @@ async fn complete(
                     completion_message,
                     duration,
                 )
-                .await;
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         }
         "success" => {
-            let _ = state
+            new_status = JobStatus::Success;
+            let applied = state
                 .engine
                 .store
-                .finish_run(
+                .finish_active_run(
                     &run_id,
+                    expected_attempt,
                     JobStatus::Success,
                     body.exit_code.map(|v| v as i32),
                     body.size_before,
@@ -868,30 +888,34 @@ async fn complete(
                     completion_message,
                     duration,
                 )
-                .await;
-            if let Some(size) = body.size_after {
-                persist_repository_size(&state, &job, size).await;
-            }
-            if let Some(bytes) = body.bytes_transferred {
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            if applied {
+                if let Some(size) = body.size_after {
+                    persist_repository_size(&state, &job, size).await;
+                }
+                if let Some(bytes) = body.bytes_transferred {
+                    state.engine.metrics.inc_counter(
+                        "synora_job_bytes_transferred_total",
+                        &[
+                            ("job", job.name.as_str()),
+                            ("worker", worker_label.as_str()),
+                        ],
+                        bytes as f64,
+                    );
+                }
+                state.engine.metrics.set_gauge(
+                    "synora_job_last_success_timestamp",
+                    &[("job", job.name.as_str())],
+                    ended as f64,
+                );
                 state.engine.metrics.inc_counter(
-                    "synora_job_bytes_transferred_total",
-                    &[
-                        ("job", job.name.as_str()),
-                        ("worker", worker_label.as_str()),
-                    ],
-                    bytes as f64,
+                    "synora_job_success_total",
+                    &[("job", job.name.as_str())],
+                    1.0,
                 );
             }
-            state.engine.metrics.set_gauge(
-                "synora_job_last_success_timestamp",
-                &[("job", job.name.as_str())],
-                ended as f64,
-            );
-            state.engine.metrics.inc_counter(
-                "synora_job_success_total",
-                &[("job", job.name.as_str())],
-                1.0,
-            );
+            applied
         }
         "failed" => {
             let kind = synora_core::ErrorKind::ProviderError; // worker-reported failure
@@ -905,29 +929,34 @@ async fn complete(
             match decision {
                 synora_core::RetryDecision::Retry { delay_secs } => {
                     new_status = JobStatus::Retrying;
-                    let _ = state
+                    let applied = state
                         .engine
                         .store
-                        .set_retry(&run_id, ended + delay_secs as i64, run.retry_count + 1)
-                        .await;
-                    let _ = state
-                        .engine
-                        .store
-                        .set_run_status(&run_id, JobStatus::Retrying)
-                        .await;
-                    state.engine.metrics.inc_counter(
-                        "synora_job_retries_total",
-                        &[("job", job.name.as_str())],
-                        1.0,
-                    );
+                        .set_retry_from_active(
+                            &run_id,
+                            expected_attempt,
+                            ended + delay_secs as i64,
+                            run.retry_count + 1,
+                        )
+                        .await
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                    if applied {
+                        state.engine.metrics.inc_counter(
+                            "synora_job_retries_total",
+                            &[("job", job.name.as_str())],
+                            1.0,
+                        );
+                    }
+                    applied
                 }
                 synora_core::RetryDecision::NoRetry => {
                     new_status = JobStatus::Failed;
-                    let _ = state
+                    let applied = state
                         .engine
                         .store
-                        .finish_run(
+                        .finish_active_run(
                             &run_id,
+                            expected_attempt,
                             JobStatus::Failed,
                             body.exit_code.map(|v| v as i32),
                             None,
@@ -936,16 +965,40 @@ async fn complete(
                             completion_message,
                             duration,
                         )
-                        .await;
-                    state.engine.metrics.inc_counter(
-                        "synora_job_failures_total",
-                        &[("job", job.name.as_str())],
-                        1.0,
-                    );
+                        .await
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                    if applied {
+                        state.engine.metrics.inc_counter(
+                            "synora_job_failures_total",
+                            &[("job", job.name.as_str())],
+                            1.0,
+                        );
+                    }
+                    applied
                 }
             }
         }
         _ => return Err(StatusCode::BAD_REQUEST),
+    };
+    if !applied {
+        // Acknowledge duplicate/late completion so the worker stops retrying,
+        // but do not overwrite state or double-count metrics.
+        return Ok(StatusCode::OK);
+    }
+    // Store the worker-reported log only after winning the active -> finished
+    // transition. A stale completion from an earlier retry must not replace
+    // the live attempt's log.
+    if let Some(log) = body.log.as_deref().filter(|l| !l.is_empty()) {
+        let _ = state
+            .engine
+            .store
+            .insert_log_with(
+                &run_id,
+                &job.name,
+                &format!("/var/log/synora/{}/current.log", job.name),
+                log,
+            )
+            .await;
     }
     if body.memory_bytes.is_some() || body.cpu_seconds.is_some() {
         let _ = state
@@ -1039,11 +1092,11 @@ async fn unregister(
     state
         .engine
         .store
-        .delete_worker(&worker_id)
+        .unregister_worker(&worker_id)
         .await
         .map_err(|_| StatusCode::NOT_FOUND)?;
     state.picker.refresh().await;
-    tracing::info!("worker `{worker_id}` unregistered");
+    tracing::info!("worker `{worker_id}` unregistered (history retained)");
     Ok(axum::Json(serde_json::json!({"ok": true})))
 }
 

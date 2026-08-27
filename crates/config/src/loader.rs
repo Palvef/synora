@@ -1550,6 +1550,7 @@ fn resolve_provider(
                 .ok_or_else(|| err("provider = \"docker\" requires `image`".into()))?;
             Ok(ProviderConfig::Docker {
                 image: image.clone(),
+                options: doc.docker_options.clone(),
                 env: doc.env.clone(),
                 volumes: doc.volumes.clone(),
                 keep_container: doc.keep_container,

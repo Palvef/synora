@@ -1,361 +1,269 @@
 #!/usr/bin/env python3
-"""tunasync2synora — migrate a tunasync workers.conf to Synora job TOML files.
+"""Migrate tunasync worker TOML into Synora job TOML files.
 
-Reads a tunasync worker config (INI: [global], [manager], [[mirrors]] sections,
-see tunasync docs/configs.md) and writes one TOML file per mirror into the
-target directory, plus a main synora.toml with daemon settings + include.
-
-Mapping:
-  provider "rsync"            -> provider = "rsync" (+ options from rsync_options,
-                                 success_exit_codes from rsync_success_exit_codes /
-                                 success_exit_codes)
-  provider "command"          -> provider = "docker" when docker_image is set
-                                 (synora-scripts:latest + docker_command),
-                                 else provider = "script"
-                                 git.sh stays provider = "git"
-  interval (minutes)          -> schedule = "interval", every = "<N>m"
-                                 (Synora is anchor-based/no-drift, unlike tunasync's
-                                 completion+interval)
-  timeout / retry             -> timeout / retry
-  exec_on_success / exec_on_failure -> [jobs.hooks] on_success / on_failure
-  size_pattern                -> dropped (Synora reads SYNORA_SIZE= lines; add
-                                 `echo SYNORA_SIZE=...` to the script if needed)
-  docker_image                -> provider = "docker" with image/volumes/env
-  env                         -> job-level env is injected by the provider;
-                                 docker env entries are copied to the docker block
-
-Usage:
-  python3 tunasync2synora.py workers.conf -o config/ [--log-dir /var/log/synora]
-
-Only the Python standard library. Offline-safe.
+The converter reads the same TOML shape as tunasync, including files selected
+by ``[include].include_mirrors``. It uses only the Python 3.11+ standard
+library.
 """
 
 import argparse
-import shlex
-import re
-import configparser
 import glob
-import os
-import sys
+import shlex
 from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError as exc:  # pragma: no cover - Python < 3.11
+    raise SystemExit("tunasync2synora requires Python 3.11 or newer") from exc
+
 
 TOML_ESCAPE = str.maketrans({"\\": "\\\\", '"': '\\"'})
 
 
-def toml_str(s):
-    return '"' + str(s).translate(TOML_ESCAPE) + '"'
+def toml_str(value):
+    return '"' + str(value).translate(TOML_ESCAPE) + '"'
 
 
 def toml_list(items):
-    return "[" + ", ".join(toml_str(i) for i in items) + "]"
+    return "[" + ", ".join(toml_str(item) for item in items) + "]"
 
 
 def parse_list(value):
-    """tunasync array syntax: ["a","b"] or bare values — be lenient."""
-    value = (value or "").strip()
-    if not value:
+    """Return a lenient string list for already-decoded TOML values."""
+    if value is None:
         return []
-    if value.startswith("["):
-        import ast
-        try:
-            return [str(x) for x in ast.literal_eval(value)]
-        except (ValueError, SyntaxError):
-            pass
-    return [v.strip().strip('"\'') for v in value.split(",") if v.strip()]
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value]
+    if isinstance(value, dict):
+        return [f"{key}={item}" for key, item in value.items()]
+    value = str(value).strip()
+    return [value] if value else []
 
 
-def strip_tsumugu_threads(env_list):
-    """TUNASYNC_TSUMUGU_THREADS=N is tsumugu's download-concurrency knob; it
-    leaves the env list and becomes the http provider's `threads` field
-    instead. Returns (threads_value_or_None, env_without_it)."""
-    threads = None
-    kept = []
-    for e in env_list:
-        k, _, v = e.partition("=")
-        if k.strip().upper() == "TUNASYNC_TSUMUGU_THREADS":
-            threads = v.strip()
-        else:
-            kept.append(e)
-    return threads, kept
+def env_list(value):
+    if isinstance(value, dict):
+        return [f"{key}={item}" for key, item in value.items()]
+    return parse_list(value)
 
 
-def render_job(m, log_dir, storage_dir, global_docker_volumes, global_interval):
-    lines = ["[[jobs]]", f"name = {toml_str(m['name'])}", "enabled = true", ""]
-    provider = m.get("provider", "rsync")
-    # tsumugu's concurrency knob must not linger in the docker env: it
-    # becomes the job-level `threads` field (http provider).
-    threads, stripped_env = strip_tsumugu_threads(
-        parse_list(m.get("env")) + m.get("env_table", [])
-    )
+def int_codes(*values):
+    result = []
+    for value in values:
+        for item in parse_list(value):
+            try:
+                code = int(item)
+            except (TypeError, ValueError) as exc:
+                raise SystemExit(f"invalid tunasync success exit code {item!r}") from exc
+            if code not in result:
+                result.append(code)
+    return result
 
-    # --- schedule: tunasync interval (minutes) → Synora no-drift interval ---
-    # A mirror without its own interval inherits the worker-level global
-    # `interval` (tunasync semantics), not "manual".
-    interval = m.get("interval")
+
+def effective_hooks(mirror, global_cfg, key):
+    base = parse_list(mirror[key]) if key in mirror else parse_list(global_cfg.get(key))
+    base.extend(parse_list(mirror.get(f"{key}_extra")))
+    return base
+
+
+def docker_volumes(mirror, docker_cfg):
+    volumes = parse_list(docker_cfg.get("volumes"))
+    volumes.extend(parse_list(mirror.get("docker_volumes")))
+    exclude_file = mirror.get("exclude_file")
+    if exclude_file:
+        volumes.append(f"{exclude_file}:{exclude_file}:ro")
+    return volumes
+
+
+def storage_lines(mirror):
+    # A per-mirror mirror_dir is the complete destination in tunasync and
+    # overrides global mirror_dir/mirror_subdir/name composition.
+    if mirror.get("mirror_dir"):
+        return [f"storage = {toml_str(mirror['mirror_dir'])}"]
+    relative = str(mirror["name"])
+    if mirror.get("mirror_subdir"):
+        relative = f"{mirror['mirror_subdir']}/{relative}"
+    return [f"storage = {toml_str(relative)}", 'storage_name = "mirror"']
+
+
+def render_job(mirror, global_cfg, docker_cfg):
+    name = str(mirror.get("name", "")).strip()
+    if not name:
+        raise SystemExit("tunasync mirror without `name`")
+    lines = ["[[jobs]]", f"name = {toml_str(name)}", "enabled = true", ""]
+
+    interval = mirror.get("interval") or global_cfg.get("interval")
     if interval:
-        lines.append('schedule = "interval"')
-        lines.append(f"every = {toml_str(f'{int(interval)}m')}")
-    elif global_interval:
-        lines.append('schedule = "interval"')
-        lines.append(f"every = {toml_str(f'{int(global_interval)}m')}")
-        lines.append("  # inherited from the tunasync global interval")
+        lines.extend(['schedule = "interval"', f"every = {toml_str(f'{int(interval)}m')}"])
     else:
         lines.append('schedule = "manual"  # no interval configured in tunasync')
-
     lines.append("")
 
-    # --- provider ---
-    if provider == "rsync":
-        lines.append('provider = "rsync"')
-        lines.append(f"upstream = {toml_str(m.get('upstream', ''))}")
-        options = parse_list(m.get("rsync_options"))
-        exclude = m.get("exclude_file")
-        if exclude:
-            options.append(f"--exclude-from={exclude}")
+    provider = str(mirror.get("provider", "rsync"))
+    environment = env_list(mirror.get("env"))
+
+    if provider in ("rsync", "two-stage-rsync"):
+        lines.append(f"provider = {toml_str(provider)}")
+        lines.append(f"upstream = {toml_str(mirror.get('upstream', ''))}")
+        if provider == "two-stage-rsync":
+            lines.append(f"stage1_profile = {toml_str(mirror.get('stage1_profile') or 'debian')}")
+
+        options = parse_list(global_cfg.get("rsync_options"))
+        options.extend(parse_list(mirror.get("rsync_options")))
+        if mirror.get("rsync_no_timeout"):
+            options.append("--timeout=0")
+        elif mirror.get("rsync_timeout"):
+            options.append(f"--timeout={int(mirror['rsync_timeout'])}")
+        if mirror.get("exclude_file"):
+            options.append(f"--exclude-from={mirror['exclude_file']}")
         options = [
-            o.replace("/etc/tunasync/syncpassword/", "/etc/synora/syncpassword/")
+            option.replace("/etc/tunasync/syncpassword/", "/etc/synora/syncpassword/")
             .replace("/etc/tunasync/excludes/", "/etc/synora/excludes/")
-            for o in options
+            for option in options
         ]
         if options:
             lines.append(f"options = {toml_list(options)}")
-        codes = parse_list(m.get("rsync_success_exit_codes")) or parse_list(
-            m.get("success_exit_codes")
+        if mirror.get("use_ipv6"):
+            lines.append('family = "ipv6"')
+        elif mirror.get("use_ipv4"):
+            lines.append('family = "ipv4"')
+
+        # tunasync merges all four lists. Emit [] explicitly when empty so
+        # Synora's permissive 23/24 default does not alter migrated behavior.
+        codes = int_codes(
+            global_cfg.get("dangerous_global_success_exit_codes"),
+            mirror.get("success_exit_codes"),
+            global_cfg.get("dangerous_global_rsync_success_exit_codes"),
+            mirror.get("rsync_success_exit_codes"),
         )
-        if codes:
-            lines.append(f"success_exit_codes = {codes}")
+        lines.append("success_exit_codes = [" + ", ".join(map(str, codes)) + "]")
     elif provider == "command":
-        command = m.get("command", "") or ""
-        command = command.replace("/home/tunasync-scripts/", "/usr/lib/synora/scripts/")
-        env = list(stripped_env)
-        proxy_env = [e for e in env if any(k in e.upper() for k in ("PROXY",))]
-        env = [e for e in env if e not in proxy_env]
-        # Native git jobs: tunasync wrapped git.sh in a container.
-        if command.rstrip().endswith("/git.sh") or command.strip() in (
-            "/usr/lib/synora/scripts/git.sh",
-            "/home/tunasync-scripts/git.sh",
-            "git.sh",
-        ):
-            # Native git still runs inside scripts_image.
-            lines.append('provider = "git"')
-            lines.append(f"upstream = {toml_str(m.get('upstream', ''))}")
-        elif m.get("docker_image"):
-            # tunasync command+docker_image jobs stay docker in Synora.
+        command = str(mirror.get("command", ""))
+        migrated_command = command.replace(
+            "/home/tunasync-scripts/", "/usr/lib/synora/scripts/"
+        )
+        is_git = command.rstrip().endswith("/git.sh") or command.strip() == "git.sh"
+        if is_git and not mirror.get("docker_image") and not environment:
+            lines.extend(
+                ['provider = "git"', f"upstream = {toml_str(mirror.get('upstream', ''))}"]
+            )
+        elif mirror.get("docker_image"):
+            lines.extend(
+                [
+                    'provider = "docker"',
+                    f"image = {toml_str(mirror['docker_image'])}",
+                    f"upstream = {toml_str(mirror.get('upstream', ''))}",
+                ]
+            )
+            # Keep the original in-container path: tunasync's global volume
+            # commonly mounts /home/tunasync-scripts into a custom image.
             args = shlex.split(command) if command.strip() else []
-            lines.append('provider = "docker"')
-            lines.append('image = "synora-scripts:latest"')
             if args:
                 lines.append(f"docker_command = {toml_list(args)}")
-            lines.append(f"upstream = {toml_str(m.get('upstream', ''))}")
-            if env:
-                lines.append(f"env = {toml_list(env)}")
-            if m.get("fail_on_match"):
-                lines.append(f"fail_on_match = {toml_str(m['fail_on_match'])}")
+            if environment:
+                lines.append(f"env = {toml_list(environment)}")
+            docker_options = parse_list(docker_cfg.get("options"))
+            docker_options.extend(parse_list(mirror.get("docker_options")))
+            if docker_options:
+                lines.append(f"docker_options = {toml_list(docker_options)}")
+            volumes = docker_volumes(mirror, docker_cfg)
+            if volumes:
+                lines.append(f"volumes = {toml_list(volumes)}")
         else:
-            lines.append('provider = "script"')
-            lines.append(f"command = {toml_str(command)}")
-            lines.append(f"upstream = {toml_str(m.get('upstream', ''))}")
-            if env:
-                lines.append(f"env = {toml_list(env)}")
-            if m.get("fail_on_match"):
-                lines.append(f"fail_on_match = {toml_str(m['fail_on_match'])}")
-        if proxy_env:
-            lines.append('proxy = "cf-warp"')
-    elif provider == "two-stage-rsync":
-        # Native two-stage rsync (stage 1 subset profile, stage 2 full sync).
-        lines.append('provider = "two-stage-rsync"')
-        lines.append(f"upstream = {toml_str(m.get('upstream', ''))}")
-        sp = m.get("stage1_profile") or "debian"
-        lines.append(f"stage1_profile = {toml_str(sp)}")
-        # Same extra rsync fields as the plain rsync branch.
-        opts = parse_list(m.get("rsync_options")) or parse_list(m.get("options"))
-        if opts:
-            lines.append(f"options = {toml_list(opts)}")
-        excl = parse_list(m.get("exclude"))
-        if excl:
-            lines.append(f"exclude = {toml_list(excl)}")
-        codes = m.get("success_exit_codes")
-        if codes:
-            lines.append(f"success_exit_codes = {toml_str(codes)}")
-    elif provider in ("docker",):
-        image = m.get("docker_image", "ustcmirror/rsync:latest")
-        lines.append('provider = "docker"')
-        lines.append(f"image = {toml_str(image)}")
-        lines.append(f"upstream = {toml_str(m.get('upstream', ''))}")
-        env = list(stripped_env)
-        # Fixed proxy envs migrate to the worker docker-bridge HTTP proxy.
-        proxy_env = [e for e in env if any(k in e.upper() for k in ("PROXY",))]
-        if proxy_env:
-            lines.append('proxy = "cf-warp"')
-        env = [e for e in env if e not in proxy_env]
-        if env:
-            lines.append(f"env = {toml_list(env)}")
-        volumes = ["/data"]  # storage is mounted at /data by Synora
-        volumes.extend(parse_list(m.get("docker_volumes")))
-        if len(volumes) > 1:
-            lines.append(f"volumes = {toml_list(volumes[1:])}")
+            lines.extend(
+                [
+                    'provider = "script"',
+                    f"command = {toml_str(migrated_command)}",
+                    f"upstream = {toml_str(mirror.get('upstream', ''))}",
+                ]
+            )
+            if environment:
+                lines.append(f"env = {toml_list(environment)}")
+        if mirror.get("fail_on_match"):
+            lines.append(f"fail_on_match = {toml_str(mirror['fail_on_match'])}")
     else:
-        raise SystemExit(f"unsupported provider {provider!r} for mirror {m['name']}")
+        raise SystemExit(f"unsupported provider {provider!r} for mirror {name}")
 
-    # tsumugu download concurrency -> http provider `threads` (job-level;
-    # ignored by non-http providers).
-    if threads is not None:
-        lines.append(f"threads = {threads}")
+    lines.extend(storage_lines(mirror))
+    # tunasync's value is the total number of attempts (its loop is
+    # `retry < provider.Retry()`); Synora's value is retries after the first
+    # attempt. tunasync also defaults zero/missing global retry to 2.
+    tunasync_attempts = int(mirror.get("retry") or global_cfg.get("retry") or 2)
+    retry = max(tunasync_attempts - 1, 0)
+    timeout = mirror.get("timeout") or global_cfg.get("timeout")
+    lines.append(f"retry = {retry}")
+    if timeout:
+        lines.append(f"timeout = {int(timeout)}")
+    if mirror.get("memory_limit"):
+        lines.append(f"memory_limit = {toml_str(mirror['memory_limit'])}")
 
-    # --- storage: relative path + storage section reference ---------------
-    # tunasync semantics: the mirror lives under the worker's storage_dir
-    # (which differs per machine: /datas here, /data elsewhere). Jobs write
-    # the RELATIVE path and reference the worker's [storage.mirror] section,
-    # so one config works on every machine's local pool/mountpoint.
-    if m.get("mirror_subdir"):
-        # tunasync places the mirror at mirror_dir/<mirror_subdir>/<name>
-        # (e.g. /datas/git/AOSP, one ZFS dataset per mirror).
-        rel = f"{m['mirror_subdir']}/{m['name']}"
-    else:
-        rel = m["name"]
-    lines.append(f"storage = {toml_str(rel)}")
-    lines.append('storage_name = "mirror"')
-
-    # --- retry / timeout ---
-    if m.get("retry"):
-        lines.append(f"retry = {int(m['retry'])}")
-    if m.get("timeout"):
-        lines.append(f"timeout = {int(m['timeout'])}")
-
-    # --- hooks (tunasync exec_on_*) ---
-    hooks = {}
-    for src, dst in (("exec_on_success", "on_success"), ("exec_on_failure", "on_failure")):
-        items = parse_list(m.get(src))
-        if items:
-            hooks[dst] = items
-    if hooks:
-        lines.append("")
-        lines.append("[jobs.hooks]")
-        for dst, items in hooks.items():
-            lines.append(f"{dst} = {toml_list(items)}")
-
-    mem = m.get("memory_limit")
-    if mem:
-        lines.append(f"memory_limit = {toml_str(str(mem))}")
-
+    on_success = effective_hooks(mirror, global_cfg, "exec_on_success")
+    on_failure = effective_hooks(mirror, global_cfg, "exec_on_failure")
+    if on_success or on_failure:
+        lines.extend(["", "[jobs.hooks]"])
+        if on_success:
+            lines.append(f"on_success = {toml_list(on_success)}")
+        if on_failure:
+            lines.append(f"on_failure = {toml_list(on_failure)}")
     return "\n".join(lines) + "\n"
 
 
-def main():
-    ap = argparse.ArgumentParser(description="migrate tunasync workers.conf to Synora config")
-    ap.add_argument("conf", help="tunasync workers.conf path")
-    ap.add_argument("-o", "--out", default="config", help="output config dir (default: config)")
-    ap.add_argument("--log-dir", default="/var/log/synora", help="synora log dir")
-    ap.add_argument("--db", default="data/synora.db", help="synora sqlite db path")
-    args = ap.parse_args()
-
-def preprocess(text):
-    """Join multi-line arrays (`x = [\n "a",\n]`) onto one line —
-    configparser cannot read those."""
-    lines = []
-    buf = None
-    for line in text.splitlines():
-        if buf is not None:
-            buf += " " + line.strip()
-            if line.rstrip().endswith("]") or line.rstrip().endswith("}"):
-                lines.append(buf)
-                buf = None
-        elif line.rstrip().endswith("[") or line.rstrip().endswith("{"):
-            buf = line
-        else:
-            lines.append(line)
-    if buf is not None:
-        lines.append(buf)
-    return "\n".join(lines)
+def load_tunasync(path):
+    with path.open("rb") as source:
+        root = tomllib.load(source)
+    mirrors = list(root.get("mirrors", []))
+    include_value = root.get("include", {}).get("include_mirrors")
+    for pattern in parse_list(include_value):
+        candidate = Path(pattern)
+        if not candidate.is_absolute():
+            candidate = path.parent / candidate
+        for included in sorted(glob.glob(str(candidate))):
+            with open(included, "rb") as source:
+                child = tomllib.load(source)
+            mirrors.extend(child.get("mirrors", []))
+    return root, mirrors
 
 
 def main():
-    ap = argparse.ArgumentParser(description="migrate tunasync workers.conf to Synora config")
-    ap.add_argument("conf", help="tunasync workers.conf path")
-    ap.add_argument("-o", "--out", default="config", help="output config dir (default: config)")
-    ap.add_argument("--log-dir", default="/var/log/synora", help="synora log dir")
-    ap.add_argument("--db", default="data/synora.db", help="synora sqlite db path")
-    args = ap.parse_args()
+    parser = argparse.ArgumentParser(description="migrate tunasync workers.conf to Synora")
+    parser.add_argument("conf", help="tunasync workers.conf path")
+    parser.add_argument("-o", "--out", default="config", help="output config directory")
+    parser.add_argument("--log-dir", default="/var/log/synora")
+    parser.add_argument("--db", default="data/synora.db")
+    args = parser.parse_args()
 
-    cp = configparser.ConfigParser(interpolation=None, strict=False)
-    cp.optionxform = str  # preserve key case
-    with open(args.conf, encoding="utf-8") as f:
-        cp.read_string(preprocess(f.read()))
-
-    if not cp.has_section("global"):
-        raise SystemExit(f"{args.conf}: missing [global] section — not a tunasync worker conf?")
-
-    global_sec = dict(cp.items("global"))
-    storage_dir = global_sec.get("mirror_dir", "/srv/mirror").strip('"').strip("'")
-    global_interval = global_sec.get("interval")
-    zpool = ""
-    if cp.has_section("zfs"):
-        zpool = dict(cp.items("zfs")).get("zpool", "").strip('"').strip("'")
-    # [docker] section: shared volumes added to every docker job (TUNA
-    # production mounts the tunasync-scripts checkout read-only).
-    global_docker_volumes = []
-    if cp.has_section("docker"):
-        global_docker_volumes = [
-            v.strip().strip('"').strip("'")
-            for v in dict(cp.items("docker")).get("volumes", "").replace("[", "").replace("]", "").split(",")
-            if v.strip()
-        ]
+    source = Path(args.conf)
+    root, mirrors = load_tunasync(source)
+    if "global" not in root:
+        raise SystemExit(f"{source}: missing [global] section")
+    global_cfg = root["global"]
+    docker_cfg = root.get("docker", {})
+    storage_dir = str(global_cfg.get("mirror_dir", "/srv/mirror"))
 
     out = Path(args.out)
     jobs_dir = out / "jobs"
     jobs_dir.mkdir(parents=True, exist_ok=True)
+    for mirror in mirrors:
+        target = jobs_dir / f"{mirror['name']}.toml"
+        target.write_text(render_job(mirror, global_cfg, docker_cfg), encoding="utf-8")
+        print(f"  {mirror['name']}: {target}")
 
-    count = 0
-    # configparser merges repeated [[mirrors]] sections (same-name keys
-    # overwrite each other), so parse mirror blocks manually.
-    mirrors = []
-    with open(args.conf, encoding="utf-8") as f:
-        raw = preprocess(f.read())
-    blocks = re.split(r"\[\[mirrors\]\]", raw)
-    # the first block is everything before the first [[mirrors]] (global etc.)
-    for block in blocks[1:]:
-        m = {}
-        in_env = False
-        env_table = []
-        for line in block.splitlines():
-            line = line.split("#", 1)[0].strip()
-            if not line:
-                continue
-            if line.startswith("["):
-                if line == "[mirrors.env]" or line.startswith("[mirrors.env]"):
-                    in_env = True
-                    continue
-                if m:
-                    break  # next section header ends this mirror block
-                continue
-            if "=" not in line:
-                continue
-            k, _, v = line.partition("=")
-            k, v = k.strip(), v.strip().strip('"').strip("'")
-            if in_env:
-                env_table.append(f"{k}={v}")
-            else:
-                m[k] = v
-        if env_table:
-            m["env_table"] = env_table
-        if m.get("name"):
-            mirrors.append(m)
-    for m in mirrors:
-        target = jobs_dir / f"{m['name']}.toml"
-        target.write_text(
-            render_job(m, args.log_dir, storage_dir, global_docker_volumes, global_interval),
-            encoding="utf-8",
-        )
-        print(f"  {m['name']}: {target}")
-        count += 1
-
-    if count == 0:
-        print(f"warning: no [[mirrors]] entries found in {args.conf}")
-
-    main_toml = f'''# Generated by tunasync2synora from {args.conf}
+    zfs_cfg = root.get("zfs", {})
+    if zfs_cfg.get("enable"):
+        storage = f'''kind = "zfs"
+pool = {toml_str(zfs_cfg.get("zpool") or "data")}
+dataset = "mirror"
+mountpoint = {toml_str(storage_dir)}
+auto_create = false'''
+    else:
+        storage = f'''kind = "dir"
+mountpoint = {toml_str(storage_dir)}
+auto_create = true'''
+    concurrency = int(global_cfg.get("concurrent") or 8)
+    main_toml = f'''# Generated by tunasync2synora from {source}
 include = ["jobs/*.toml"]
 
 [daemon]
+max_concurrency = {concurrency}
 log_dir = {toml_str(args.log_dir)}
 
 [daemon.db]
@@ -365,21 +273,12 @@ path = {toml_str(args.db)}
 [api]
 listen = "127.0.0.1:8100"
 
-# Worker-local mirror storage: the pool/dataset and mountpoint follow the
-# tunasync zpool + mirror_dir settings. Jobs reference this section by name
-# and write relative paths, so the same job config works on machines with
-# different pools/mounts.
 [storage.mirror]
-kind = "zfs"
-pool = {toml_str(zpool or "data")}
-dataset = "mirror"
-mountpoint = {toml_str(storage_dir)}
-auto_create = true
-zfs_options = "-o recordsize=1M -o xattr=off -o atime=off -o setuid=off -o exec=off -o devices=off -o sync=disabled -o secondarycache=metadata -o redundant_metadata=most"
+{storage}
 '''
     (out / "synora.toml").write_text(main_toml, encoding="utf-8")
-    print(f"wrote {out / 'synora.toml'} ({count} job(s))")
-    print("next: `synora check -c {}/synora.toml`".format(out))
+    print(f"wrote {out / 'synora.toml'} ({len(mirrors)} job(s))")
+    print(f"next: `synora check -c {out}/synora.toml`")
 
 
 if __name__ == "__main__":

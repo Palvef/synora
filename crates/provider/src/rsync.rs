@@ -84,6 +84,27 @@ fn apply_rsync_proxy_env(cmd: &mut Command, proxy_env: &[(String, String)]) {
     }
 }
 
+/// Defaults shared with tunasync's rsync providers.  In particular,
+/// `.~tmp~` must be both protected from deletion and excluded from transfer:
+/// tunasync scripts use it as the staging directory for atomic publication.
+fn apply_tunasync_defaults(cmd: &mut Command, delete: bool) {
+    cmd.args([
+        "-aH",
+        "-v",
+        "-h",
+        "--no-o",
+        "--no-g",
+        "--filter",
+        "risk .~tmp~/",
+        "--exclude",
+        ".~tmp~/",
+    ]);
+    if delete {
+        cmd.args(["--delete", "--delete-after", "--delay-updates"]);
+    }
+    cmd.args(["--safe-links", "--timeout=120"]);
+}
+
 impl RsyncProvider {
     /// Parse a rsync size figure: "1,645,311,660,221", "1.5G", "37 bytes" —
     /// commas ignored, K/M/G/T suffixes honored.
@@ -159,25 +180,11 @@ impl RsyncProvider {
         }
 
         let mut cmd = Command::new("rsync");
-        // tunasync-aligned defaults (same argv as tunasync's rsync provider:
-        // `-aH --delete --delete-delay --delay-updates --safe-links
-        //  --timeout=600 --contimeout=120`), then exclude, then job options,
-        // then --stats.
+        // tunasync-aligned defaults, then excludes, job options and --stats.
         // -vh --no-o --no-g = tunasync's rsync verbosity: per-file transfer
         // lines (-v, human sizes -h) without owner/group noise. The run log
         // carries the same detail tunasync operators are used to.
-        cmd.args([
-            "-aH",
-            "-v",
-            "-h",
-            "--no-o",
-            "--no-g",
-            "--delete",
-            "--delete-delay",
-            "--delay-updates",
-            "--safe-links",
-            "--timeout=600",
-        ]);
+        apply_tunasync_defaults(&mut cmd, true);
         // --contimeout is daemon-connection only (rsync errors on local
         // paths); tunasync passes it because its upstreams are rsync://.
         if upstream.starts_with("rsync://") {
@@ -406,19 +413,7 @@ impl TwoStageRsyncProvider {
         // Stage 1: the publishable subset (tunasync stage1Options + profile).
         let mut cmd = Command::new("rsync");
         // -vh = per-file transfer lines, same detail as the single provider.
-        cmd.args([
-            "-aH",
-            "-v",
-            "-h",
-            "--no-o",
-            "--no-g",
-            "--filter",
-            "risk .~tmp~/",
-            "--exclude",
-            ".~tmp~/",
-            "--safe-links",
-            "--timeout=600",
-        ]);
+        apply_tunasync_defaults(&mut cmd, false);
         for f in profile {
             cmd.arg(f);
         }
@@ -438,22 +433,7 @@ impl TwoStageRsyncProvider {
 
         // Stage 2: the full mirror (tunasync stage2Options + job options).
         let mut cmd = Command::new("rsync");
-        cmd.args([
-            "-aH",
-            "-v",
-            "-h",
-            "--no-o",
-            "--no-g",
-            "--filter",
-            "risk .~tmp~/",
-            "--exclude",
-            ".~tmp~/",
-            "--delete",
-            "--delete-after",
-            "--delay-updates",
-            "--safe-links",
-            "--timeout=600",
-        ]);
+        apply_tunasync_defaults(&mut cmd, true);
         tail(&mut cmd, true);
         // Options come after excludes: a user --include can still pull a
         // path back in (same order as the single rsync provider).
@@ -502,7 +482,23 @@ impl TwoStageRsyncProvider {
 
 #[cfg(test)]
 mod tests {
-    use super::{rewrite_worker_local_path, rsync_proxy_hostport};
+    use super::{apply_tunasync_defaults, rewrite_worker_local_path, rsync_proxy_hostport};
+
+    #[test]
+    fn defaults_match_tunasync_and_protect_staging_dir() {
+        let mut cmd = tokio::process::Command::new("rsync");
+        apply_tunasync_defaults(&mut cmd, true);
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.windows(2).any(|w| w == ["--filter", "risk .~tmp~/"]));
+        assert!(args.windows(2).any(|w| w == ["--exclude", ".~tmp~/"]));
+        assert!(args.iter().any(|arg| arg == "--delete-after"));
+        assert!(!args.iter().any(|arg| arg == "--delete-delay"));
+        assert!(args.iter().any(|arg| arg == "--timeout=120"));
+    }
 
     #[test]
     fn rsync_proxy_hostport_strips_scheme_and_userinfo() {

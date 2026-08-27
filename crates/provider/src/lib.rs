@@ -458,6 +458,7 @@ pub fn build_provider(job: &JobSpec) -> Result<Provider, ProviderError> {
         }
         synora_core::ProviderConfig::Docker {
             image,
+            options,
             env,
             volumes,
             keep_container,
@@ -465,6 +466,7 @@ pub fn build_provider(job: &JobSpec) -> Result<Provider, ProviderError> {
             command,
         } => Ok(Provider::Docker(docker::DockerProvider {
             image: image.clone(),
+            options: options.clone(),
             env: env.clone(),
             volumes: volumes.clone(),
             keep_container: *keep_container,

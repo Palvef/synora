@@ -165,6 +165,9 @@ pub struct JobDoc {
     pub command: Option<String>,
     // docker
     pub image: Option<String>,
+    /// Additional docker run argv (tunasync `docker_options`).
+    #[serde(default)]
+    pub docker_options: Vec<String>,
     #[serde(default)]
     pub env: Vec<String>,
     #[serde(default)]
