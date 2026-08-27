@@ -339,20 +339,6 @@ async fn main() -> Result<(), String> {
                                 d as f64,
                             );
                         }
-                        if let Some(mem) = st.memory_bytes {
-                            reaper_engine.metrics.set_gauge(
-                                "synora_job_memory_bytes",
-                                &[("job", name.as_str()), ("worker", worker.as_str())],
-                                mem as f64,
-                            );
-                        }
-                        if let Some(cpu) = st.cpu_seconds {
-                            reaper_engine.metrics.set_gauge(
-                                "synora_job_cpu_seconds",
-                                &[("job", name.as_str()), ("worker", worker.as_str())],
-                                cpu,
-                            );
-                        }
                     }
                 }
             }

@@ -468,13 +468,13 @@ pub async fn run_once(
         (0, 0)
     };
 
-    // Timeout wraps the provider; cancel kills the child process group.
-    // Unlimited unless the job sets a real timeout (user requirement).
-    let enforce_timeout = job.timeout.whole_seconds() < i64::MAX / 8;
-    let outcome = if enforce_timeout {
+    // A timeout is part of the job assignment sent by the manager. It wraps
+    // the provider and kills its process group only when explicitly set;
+    // omitted means wait for natural completion.
+    let outcome = if let Some(timeout) = job.timeout {
         tokio::select! {
             r = tokio::time::timeout(
-                std::time::Duration::from_secs(job.timeout.whole_seconds().max(1) as u64),
+                std::time::Duration::from_secs(timeout.whole_seconds().max(1) as u64),
                 provider.sync(&ctx),
             ) => {
                 match r {
@@ -936,13 +936,6 @@ async fn finish_run(engine: &Arc<Engine>, run_id: &str, job: &JobSpec, outcome: 
                 bytes as f64,
             );
         }
-        if let Some(mem) = outcome.mem_peak {
-            engine.metrics.set_gauge(
-                "synora_job_memory_bytes",
-                &[("job", job.name.as_str()), ("worker", LOCAL_WORKER)],
-                mem as f64,
-            );
-        }
         if let Some(cpu) = outcome.cpu_seconds {
             engine.metrics.inc_counter(
                 "synora_job_cpu_usage_seconds_total",
@@ -1036,6 +1029,16 @@ async fn finish_run(engine: &Arc<Engine>, run_id: &str, job: &JobSpec, outcome: 
         }
     }
 
+    for metric in [
+        "synora_job_memory_bytes",
+        "synora_job_cpu_seconds",
+        "synora_job_cpu_percent",
+        "synora_job_bandwidth_bytes",
+    ] {
+        engine
+            .metrics
+            .remove_job_worker_metric(metric, &job.name, LOCAL_WORKER);
+    }
     metrics_tail(engine, job, final_status, started, ended, duration, success);
     if outcome.mem_peak.is_some() || outcome.cpu_seconds.is_some() {
         let _ = engine

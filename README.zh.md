@@ -81,9 +81,14 @@ WARP、添加代理、TUI 键位、命令对照、systemd 部署、与 tunasync 
 `synora_job_status`（0-11 状态映射）、`synora_job_runs_total`、
 `synora_job_failures_total`、`synora_job_retries_total`、
 `synora_job_bytes_transferred_total`、`synora_job_duration_seconds`、
-`synora_job_memory_bytes`、`synora_job_cpu_usage_seconds_total`、
+`synora_job_memory_bytes`、`synora_job_cpu_seconds`、
+`synora_job_cpu_percent`、`synora_job_cpu_usage_seconds_total`、
 `synora_repository_size_bytes`、`synora_job_next_run_timestamp`、
 `synora_worker_status`（0 离线/1 在线/2 停接/3 维护）、`synora_worker_jobs_running`。
+
+任务内存、当前 CPU、CPU 百分比和带宽是运行期指标，任务结束后会从当前
+Prometheus exposition 中删除；`synora_job_cpu_usage_seconds_total` 是累计
+counter，用于保留历史 CPU 消耗，不会在任务结束时删除。
 
 Grafana 面板模板：`deploy/grafana-synora.json`（导入后选择 Prometheus 数据源）。
 

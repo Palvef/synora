@@ -103,7 +103,12 @@ impl Store {
             .map_err(|e| DbError::Sql(e.to_string()))?;
         let resources =
             serde_json::to_string(&job.resources).map_err(|e| DbError::Sql(e.to_string()))?;
-        let timeout_secs = job.timeout.whole_seconds().max(1);
+        // The config is authoritative. Zero in this denormalized column means
+        // the job did not configure a forced-stop timeout.
+        let timeout_secs = job
+            .timeout
+            .map(|timeout| timeout.whole_seconds().max(1))
+            .unwrap_or(0);
         let retry_delay_secs = job.retry_delay.whole_seconds().max(1);
         self.db
             .execute(

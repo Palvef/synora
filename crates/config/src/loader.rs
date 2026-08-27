@@ -1232,14 +1232,14 @@ fn resolve_job(doc: &JobDoc, file: &str, line: usize) -> Result<JobSpec, ConfigE
     }
 
     let timeout = match &doc.timeout {
-        Some(TomlDuration::Seconds(s)) => Duration::seconds(*s as i64),
-        Some(TomlDuration::Human(s)) => Duration::seconds(
+        Some(TomlDuration::Seconds(s)) => Some(Duration::seconds(*s as i64)),
+        Some(TomlDuration::Human(s)) => Some(Duration::seconds(
             schedule::parse_duration_human(s)
                 .map_err(|e| err(format!("invalid timeout: {e}")))?
                 .whole_seconds(),
-        ),
-        // No timeout configured = unlimited.
-        None => Duration::seconds(i64::MAX / 4),
+        )),
+        // No timeout configured = no worker-side forced stop timer.
+        None => None,
     };
     let retry_delay = schedule::parse_duration_human(&doc.retry_delay)
         .map_err(|e| err(format!("invalid retry_delay: {e}")))?;

@@ -95,6 +95,43 @@ impl Metrics {
         );
     }
 
+    /// Remove all series for one metric carrying the given job label.
+    /// Used for run-scoped gauges when a job leaves RUNNING.
+    pub fn remove_job_metric(&self, name: &str, job: &str) {
+        let mut entries = self.entries.lock().unwrap();
+        entries.retain(|key, _| {
+            !(key.name == name && key.labels.iter().any(|(n, v)| n == "job" && v == job))
+        });
+    }
+
+    /// Remove one run-scoped job/worker series without disturbing the same
+    /// job executing on another worker.
+    pub fn remove_job_worker_metric(&self, name: &str, job: &str, worker: &str) {
+        let mut entries = self.entries.lock().unwrap();
+        entries.retain(|key, _| {
+            let has_job = key.labels.iter().any(|(n, v)| n == "job" && v == job);
+            let has_worker = key
+                .labels
+                .iter()
+                .any(|(n, v)| n == "worker" && v == worker);
+            !(key.name == name && has_job && has_worker)
+        });
+    }
+
+    /// Clear run-scoped series reported by a worker before applying its next
+    /// heartbeat snapshot. The heartbeat is authoritative, so a missing job
+    /// must not leave its previous CPU/memory value behind.
+    pub fn remove_worker_metrics(&self, names: &[&str], worker: &str) {
+        let mut entries = self.entries.lock().unwrap();
+        entries.retain(|key, _| {
+            !(names.contains(&key.name.as_str())
+                && key
+                    .labels
+                    .iter()
+                    .any(|(n, v)| n == "worker" && v == worker))
+        });
+    }
+
     pub fn inc_counter(&self, name: &str, labels: &[(&str, &str)], delta: f64) {
         let mut sorted: Vec<(String, String)> = labels
             .iter()
@@ -250,5 +287,24 @@ mod tests {
         assert!(out.contains("worker=\"mirror-zfs\""), "{out}");
         assert_eq!(out.matches("synora_job_status{").count(), 1, "{out}");
         assert!(out.contains("} 4"), "{out}");
+    }
+
+    #[test]
+    fn run_scoped_metrics_can_be_cleared_by_worker() {
+        let m = Metrics::new();
+        m.set_gauge(
+            "synora_job_memory_bytes",
+            &[("job", "done"), ("worker", "w1")],
+            1024.0,
+        );
+        m.set_gauge(
+            "synora_job_memory_bytes",
+            &[("job", "running"), ("worker", "w2")],
+            2048.0,
+        );
+        m.remove_worker_metrics(&["synora_job_memory_bytes"], "w1");
+        let out = m.render();
+        assert!(!out.contains("job=\"done\""), "{out}");
+        assert!(out.contains("job=\"running\""), "{out}");
     }
 }

@@ -588,6 +588,18 @@ async fn heartbeat(
         &[("worker", worker_id.as_str())],
         1.0,
     );
+    // Resource samples are a snapshot, not historical gauges. Clear the
+    // previous heartbeat for this worker first so finished jobs disappear
+    // from Prometheus even if their completion callback was interrupted.
+    state.engine.metrics.remove_worker_metrics(
+        &[
+            "synora_job_memory_bytes",
+            "synora_job_cpu_seconds",
+            "synora_job_cpu_percent",
+            "synora_job_bandwidth_bytes",
+        ],
+        &worker_id,
+    );
     for sample in &body.resources {
         if let Some(mem) = sample.memory_bytes {
             state.engine.metrics.set_gauge(
@@ -942,16 +954,6 @@ async fn complete(
             .set_run_resources(&run_id, body.memory_bytes, body.cpu_seconds)
             .await;
     }
-    if let Some(mem) = body.memory_bytes {
-        state.engine.metrics.set_gauge(
-            "synora_job_memory_bytes",
-            &[
-                ("job", job.name.as_str()),
-                ("worker", worker_label.as_str()),
-            ],
-            mem as f64,
-        );
-    }
     if let Some(cpu) = body.cpu_seconds {
         state.engine.metrics.inc_counter(
             "synora_job_cpu_usage_seconds_total",
@@ -961,23 +963,18 @@ async fn complete(
             ],
             cpu,
         );
-        state.engine.metrics.set_gauge(
-            "synora_job_cpu_seconds",
-            &[
-                ("job", job.name.as_str()),
-                ("worker", worker_label.as_str()),
-            ],
-            cpu,
-        );
     }
-    state.engine.metrics.set_gauge(
+    for metric in [
+        "synora_job_memory_bytes",
+        "synora_job_cpu_seconds",
+        "synora_job_cpu_percent",
         "synora_job_bandwidth_bytes",
-        &[
-            ("job", job.name.as_str()),
-            ("worker", worker_label.as_str()),
-        ],
-        0.0,
-    );
+    ] {
+        state
+            .engine
+            .metrics
+            .remove_job_worker_metric(metric, &job.name, &worker_label);
+    }
     state.engine.metrics.set_job_gauge(
         "synora_job_status",
         &job.name,

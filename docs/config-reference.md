@@ -69,7 +69,7 @@
 | `every` | `string` | — | `interval` 的间隔：`30m`/`6h`/`1d`（不漂移：从固定锚点算） |
 | `timezone` | `string` | `UTC` | 任务时区（IANA 名，如 `Asia/Shanghai`；DST 正确） |
 | `misfire_policy` | `"skip"`/`"run-immediately"`/`"run-next"` | `"skip"` | 机器离线错过调度点时的策略 |
-| `timeout` | `int`/`string` | 不限制 | 任务超时：秒数或 `1m`/`1h`/`1d`（**默认不限制**） |
+| `timeout` | `int`/`string` | 不配置 | 可选的单次任务强制停止超时：秒数或 `1m`/`1h`/`1d`；由 Manager 随任务下发给 Worker，未配置时一直等待任务自然完成 |
 | `retry` | `int` | 3 | 失败重试次数 |
 | `retry_delay` | `string` | `30s` | 首次重试等待 |
 | `retry_backoff` | `float` | 2.0 | 退避倍数（封顶 24h） |

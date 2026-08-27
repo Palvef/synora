@@ -312,8 +312,9 @@ pub struct JobSpec {
     /// Mirror sync uses the machine's direct network by default; proxies are
     /// opt-in per job.
     pub family: String,
-    /// Hard wall-clock limit for one run.
-    pub timeout: Duration,
+    /// Optional hard wall-clock limit for one run. `None` means that the
+    /// worker waits for the provider to finish naturally.
+    pub timeout: Option<Duration>,
     pub retry: u32,
     pub retry_delay: Duration,
     /// Multiplier: delay * backoff^attempt, capped at 24h.

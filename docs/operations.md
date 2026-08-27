@@ -152,7 +152,7 @@ journalctl -u synora-manager -f        # 看服务日志
 tail -f /var/log/synora/<job>/current.log   # 看某镜像同步日志
 ```
 
-`systemctl stop/restart synora-worker` 会先把 worker 标记为 `DRAINING`，不再领取新任务，并持续发送心跳，直到所有在途同步自然结束后才退出。systemd unit 使用 `KillMode=mixed` 和 `TimeoutStopSec=infinity`，避免服务停止时向 rsync 等子进程传播 `SIGTERM` 或在固定超时后强杀。只有显式执行 `synora stop <job>`（或 TUI 中的取消操作）才会把任务记为 `Cancelled`。
+`systemctl stop/restart synora-worker` 会先把 worker 标记为 `DRAINING`，不再领取新任务，并持续发送心跳，直到所有在途同步自然结束后才退出。systemd unit 使用 `KillMode=mixed` 和 `TimeoutStopSec=infinity`，因此服务层不设置统一的强停时间，也不会把 `SIGTERM` 传播给 rsync 等子进程。需要限制某个任务的最长执行时间时，在该 Job 的配置文件中显式设置 `timeout = "2h"`；Manager 会随任务将这个可选值下发给 Worker，未配置时不启用超时。超时任务记为 `Failed`，只有显式执行 `synora stop <job>`（或 TUI 中的取消操作）才会记为 `Cancelled`。
 
 滚动升级时，可以先执行 `synora worker retire <worker>`，再用 `deploy/graceful-restart-worker.py` 观察该 worker。脚本只会在状态为 `DRAINING` 且 `jobs_running=0` 时重启服务，不会向同步任务发送取消信号：
 
@@ -224,5 +224,9 @@ storage = "/datas/debian-security"   # = mountpoint + 镜像目录名
 - Grafana 导入 `deploy/grafana-synora.json`（uid synora-mirror）：
   「所有任务状态」表（状态/是否成功/失败/重试/耗时/传输量/仓库大小/
   下次运行/上次同步）+ 带宽曲线 + Worker 状态与负载 + CPU/内存。
+- `synora_job_memory_bytes`、`synora_job_cpu_seconds`、
+  `synora_job_cpu_percent` 和 `synora_job_bandwidth_bytes` 只表示当前运行任务；
+  Worker 每次心跳会替换完整资源快照，任务结束后相应 series 会被删除。
+  历史 CPU 总量使用 `synora_job_cpu_usage_seconds_total` counter 查询。
 - 注意：Prometheus 会保留 `job`/`instance` 标签，任务名在查询里是
   `exported_job`（面板已处理）。

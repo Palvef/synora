@@ -10,7 +10,7 @@ CREATE TABLE jobs (
     provider_config TEXT NOT NULL,        -- JSON
     upstream TEXT,
     storage_path TEXT NOT NULL,
-    timeout_secs INTEGER NOT NULL DEFAULT 7200,
+    timeout_secs INTEGER NOT NULL DEFAULT 0,  -- 0 = not configured / unlimited
     retry INTEGER NOT NULL DEFAULT 3,
     retry_delay_secs INTEGER NOT NULL DEFAULT 300,
     retry_backoff REAL NOT NULL DEFAULT 2.0,

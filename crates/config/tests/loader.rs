@@ -442,8 +442,24 @@ fn timeout_accepts_seconds_and_human() {
         ),
     );
     let cfg = load(&dir).unwrap();
-    assert_eq!(cfg.jobs[0].timeout.whole_seconds(), 7200);
-    assert_eq!(cfg.jobs[1].timeout.whole_seconds(), 7200);
+    assert_eq!(cfg.jobs[0].timeout.unwrap().whole_seconds(), 7200);
+    assert_eq!(cfg.jobs[1].timeout.unwrap().whole_seconds(), 7200);
+}
+
+#[test]
+fn timeout_is_absent_by_default() {
+    let dir = temp_dir("timeout-default");
+    write(
+        &dir,
+        "synora.toml",
+        &job(
+            "unlimited",
+            "schedule = \"manual\"",
+            "provider = \"script\"\ncommand = \"true\"\nstorage = \"/srv/unlimited\"",
+        ),
+    );
+    let cfg = load(&dir).unwrap();
+    assert_eq!(cfg.jobs[0].timeout, None);
 }
 
 #[test]
