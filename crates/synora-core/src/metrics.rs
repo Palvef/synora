@@ -110,10 +110,7 @@ impl Metrics {
         let mut entries = self.entries.lock().unwrap();
         entries.retain(|key, _| {
             let has_job = key.labels.iter().any(|(n, v)| n == "job" && v == job);
-            let has_worker = key
-                .labels
-                .iter()
-                .any(|(n, v)| n == "worker" && v == worker);
+            let has_worker = key.labels.iter().any(|(n, v)| n == "worker" && v == worker);
             !(key.name == name && has_job && has_worker)
         });
     }
@@ -125,10 +122,7 @@ impl Metrics {
         let mut entries = self.entries.lock().unwrap();
         entries.retain(|key, _| {
             !(names.contains(&key.name.as_str())
-                && key
-                    .labels
-                    .iter()
-                    .any(|(n, v)| n == "worker" && v == worker))
+                && key.labels.iter().any(|(n, v)| n == "worker" && v == worker))
         });
     }
 
