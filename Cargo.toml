@@ -49,8 +49,8 @@ rustls = "0.23"
 rustls-pemfile = "2"
 rusqlite = { version = "0.34", features = ["bundled"] }
 clap = { version = "4", features = ["derive"] }
-ratatui = "0.29"
-crossterm = "0.28"
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "underline-color"] }
+crossterm = "0.29"
 cron = "0.17"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 time-tz = "2"

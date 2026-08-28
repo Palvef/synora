@@ -20,6 +20,18 @@ CACHE_LOCK = threading.Lock()
 CACHE_MAX = 8 * 1024 * 1024
 
 
+def curl_config_value(value: str) -> str:
+    """Quote one value for curl's config-file syntax.
+
+    Request paths are remote-controlled, so they must never be interpolated
+    into curl's argv. Reject control characters and quote the two characters
+    that have meaning inside a double-quoted curl config value.
+    """
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in value):
+        raise ValueError("curl config value contains a control character")
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
 def map_official_path(path: str) -> str:
     """Map rustup-mirror request paths onto static.rust-lang.org.
 
@@ -53,7 +65,13 @@ def fetch(path: str) -> bytes:
     for attempt in range(1, 7):
         fd, out = tempfile.mkstemp(prefix="rustup-fetch-")
         os.close(fd)
+        config_fd, config_path = tempfile.mkstemp(prefix="rustup-curl-", text=True)
         try:
+            with os.fdopen(config_fd, "w", encoding="utf-8") as config:
+                config.write("url = %s\n" % curl_config_value(url))
+                config.write("output = %s\n" % curl_config_value(out))
+                if proxy_url:
+                    config.write("proxy = %s\n" % curl_config_value(proxy_url))
             cmd = [
                 "/usr/bin/curl",
                 "-fsS",
@@ -69,12 +87,9 @@ def fetch(path: str) -> bytes:
                 "120",
                 "-A",
                 "synora-rustup",
-                "-o",
-                out,
+                "--config",
+                config_path,
             ]
-            if proxy_url:
-                cmd.extend(["-x", proxy_url])
-            cmd.append(url)
             sys.stderr.write("sidecar curl %s attempt %s\n" % (url, attempt))
             proc = subprocess.run(cmd, stderr=subprocess.PIPE, env=env)
             err = proc.stderr.decode("utf-8", "replace").strip()
@@ -95,6 +110,10 @@ def fetch(path: str) -> bytes:
         finally:
             try:
                 os.unlink(out)
+            except OSError:
+                pass
+            try:
+                os.unlink(config_path)
             except OSError:
                 pass
         sys.stderr.write("sidecar fetch %s attempt %s: %s\n" % (path, attempt, last))
@@ -134,6 +153,15 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def _selftest():
+    assert curl_config_value('https://example.invalid/a\\b"c') == (
+        '"https://example.invalid/a\\\\b\\"c"'
+    )
+    try:
+        curl_config_value("https://example.invalid/a\nnext-option")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("curl config control characters must be rejected")
     assert map_official_path("/dist/channel-rust-stable.toml") == (
         "/dist/channel-rust-stable.toml"
     )
