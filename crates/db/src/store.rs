@@ -3,7 +3,7 @@
 
 use crate::sqlite::{DbError, DbResult, DbValue, Param};
 use crate::Db;
-use synora_core::job::{JobSpec, JobStatus, RUN_LEASE_SECS, WORKER_HEARTBEAT_GRACE_SECS};
+use synora_core::job::{JobSpec, JobStatus, RUN_LEASE_SECS};
 
 #[derive(Debug, Clone)]
 pub struct ScheduleRow {
@@ -34,6 +34,7 @@ pub struct RunRow {
     pub worker_id: Option<String>,
     pub status: JobStatus,
     pub retry_count: u32,
+    pub lease_token: Option<String>,
     pub next_retry_at: Option<i64>,
     pub created_at: i64,
     pub started_at: Option<i64>,
@@ -375,32 +376,25 @@ impl Store {
                 &[unix_now().into(), (jobs_running as i64).into(), id.into()],
             )
             .await?;
-        // Refresh leases only for jobs this worker is actually running.
-        // Refreshing every SYNCING/RUNNING row kept cancelled ghosts alive
-        // after a missed complete_run (GXDE/ceph stayed syncing forever).
-        let lease = unix_now() + RUN_LEASE_SECS;
-        if !active_jobs.is_empty() {
-            for job in active_jobs {
-                self.db
-                    .execute(
-                        "UPDATE job_runs SET lease_expires_at = ?
-                         WHERE worker_id = ? AND job_id = ? AND status IN ('STARTING','SYNCING','RUNNING')",
-                        &[lease.into(), id.into(), job.clone().into()],
-                    )
-                    .await?;
-            }
-        } else if jobs_running > 0 {
-            // Legacy worker without active_jobs: keep the old refresh so a
-            // rolling upgrade does not lease-expire a live run.
-            self.db
-                .execute(
-                    "UPDATE job_runs SET lease_expires_at = ?
-                     WHERE worker_id = ? AND status IN ('STARTING','SYNCING','RUNNING')",
-                    &[lease.into(), id.into()],
-                )
-                .await?;
-        }
+        let _ = active_jobs; // Renewal requires a run lease token via renew_run_lease.
         Ok(())
+    }
+
+    pub async fn renew_run_lease(&self, id: &str, worker: &str, token: &str) -> DbResult<bool> {
+        if token.is_empty() {
+            return Ok(false);
+        }
+        let now = unix_now();
+        Ok(self.db.execute("UPDATE job_runs SET lease_expires_at = ? WHERE id = ? AND worker_id = ? AND lease_token = ? AND lease_expires_at > ? AND status IN ('STARTING','SYNCING','RUNNING','CANCELLING')",
+            &[(now + RUN_LEASE_SECS).into(), id.into(), worker.into(), token.into(), now.into()]).await? > 0)
+    }
+
+    pub async fn expire_run(&self, id: &str, now: i64) -> DbResult<bool> {
+        let changed = self.db.execute("UPDATE job_runs SET status = 'LOST', finished_at = ?, message = 'lease expired (worker lost)' WHERE id = ? AND lease_expires_at <= ? AND status IN ('STARTING','SYNCING','RUNNING','CANCELLING')", &[now.into(), id.into(), now.into()]).await?;
+        if changed > 0 {
+            self.set_job_status_for_run(id, JobStatus::Lost).await?;
+        }
+        Ok(changed > 0)
     }
 
     pub async fn set_worker_status(&self, id: &str, status: &str) -> DbResult<()> {
@@ -460,7 +454,7 @@ impl Store {
         // Offer runs one job at a time: skip jobs that already have an
         // active run, or a queued run behind an active one would be offered
         // forever and block everything after it.
-        let sql = "SELECT id, job_id, worker_id, status, retry_count, next_retry_at, created_at,
+        let sql = "SELECT id, job_id, worker_id, status, lease_token, retry_count, next_retry_at, created_at,
                           started_at, finished_at, duration_secs, exit_code, message
                    FROM job_runs
                    WHERE status = 'QUEUED' AND worker_id = ?
@@ -607,15 +601,7 @@ impl Store {
 
     /// Runs whose lease expired (worker vanished) — the reaper marks LOST.
     pub async fn expired_runs(&self, now: i64) -> DbResult<Vec<RunRow>> {
-        // A live worker (recent heartbeat) still owns the run even if a
-        // lease row was not refreshed in time — do not mark LOST / re-dispatch
-        // and docker-rm a still-running job.
-        let alive_after = now - WORKER_HEARTBEAT_GRACE_SECS;
-        self.runs_where(
-            "status IN ('STARTING','SYNCING','RUNNING','CANCELLING')              AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?              AND (worker_id IS NULL OR worker_id NOT IN (                  SELECT id FROM workers                  WHERE last_heartbeat IS NOT NULL                    AND last_heartbeat >= ?                    AND status IN ('ONLINE','DRAINING')              ))",
-            &[now.into(), alive_after.into()],
-        )
-        .await
+        self.runs_where("worker_id != 'local' AND status IN ('STARTING','SYNCING','RUNNING','CANCELLING') AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?", &[now.into()]).await
     }
 
     pub async fn set_run_lost(&self, id: &str) -> DbResult<()> {
@@ -649,11 +635,11 @@ impl Store {
         let n = self
             .db
             .execute(
-                "INSERT INTO job_runs (id, job_id, worker_id, status, lost_count, created_at)
+                "INSERT INTO job_runs (id, job_id, worker_id, status, lost_count, created_at, config_generation)
                  SELECT ?, job_id, ?, 'QUEUED',
                         COALESCE((SELECT lost_count FROM job_runs WHERE id = ?), 0) + 1,
-                        ?
-                 FROM job_runs WHERE id = ?
+                        ?, config_generation
+                 FROM job_runs WHERE id = ? AND status = 'LOST'
                    AND NOT EXISTS (
                        SELECT 1 FROM (
                            SELECT 1 FROM job_runs jr
@@ -690,8 +676,8 @@ impl Store {
     ) -> DbResult<()> {
         self.db
             .execute(
-                "INSERT INTO job_runs (id, job_id, worker_id, status, created_at, priority)
-                 VALUES (?,?,?,?,?,?)",
+                "INSERT INTO job_runs (id, job_id, worker_id, status, created_at, priority, config_generation)
+                 VALUES (?,?,?,?,?,?,(SELECT config_generation FROM jobs WHERE name = ?))",
                 &[
                     id.into(),
                     job_name.into(),
@@ -699,6 +685,7 @@ impl Store {
                     status.to_db().into(),
                     unix_now().into(),
                     priority.into(),
+                    job_name.into(),
                 ],
             )
             .await?;
@@ -720,7 +707,7 @@ impl Store {
             .db
             .execute(
                 "UPDATE job_runs SET status = 'SYNCING', worker_id = ?, started_at = ?,
-                        lease_expires_at = ?
+                        lease_expires_at = ?, lease_token = ?
                  WHERE id = ? AND status = 'QUEUED' AND (worker_id IS NULL OR worker_id = ?)
                    AND job_id NOT IN (
                        SELECT job_id FROM (
@@ -732,11 +719,17 @@ impl Store {
                     worker.into(),
                     unix_now().into(),
                     (unix_now() + RUN_LEASE_SECS).into(),
+                    synora_core::RunId::new().to_string().into(),
                     id.into(),
                     worker.into(),
                 ],
             )
-            .await?;
+            .await;
+        let n = match n {
+            Ok(n) => n,
+            Err(DbError::Conflict) => return Ok(false),
+            Err(e) => return Err(e),
+        };
         if n > 0 {
             let job = self
                 .db
@@ -862,6 +855,34 @@ impl Store {
         message: Option<&str>,
         duration_secs: i64,
     ) -> DbResult<bool> {
+        self.finish_active_run_fenced(
+            id,
+            expected_retry_count,
+            status,
+            exit_code,
+            size_before,
+            size_after,
+            bytes_transferred,
+            message,
+            duration_secs,
+            None,
+        )
+        .await
+    }
+
+    pub async fn finish_active_run_fenced(
+        &self,
+        id: &str,
+        expected_retry_count: u32,
+        status: JobStatus,
+        exit_code: Option<i32>,
+        size_before: Option<i64>,
+        size_after: Option<i64>,
+        bytes_transferred: Option<i64>,
+        message: Option<&str>,
+        duration_secs: i64,
+        fence: Option<(&str, &str)>,
+    ) -> DbResult<bool> {
         let changed = self
             .db
             .execute(
@@ -870,6 +891,7 @@ impl Store {
                         bytes_transferred = ?, message = ?, lease_expires_at = NULL
                  WHERE id = ?
                    AND retry_count = ?
+                   AND (? = '' OR (worker_id = ? AND lease_token = ? AND lease_expires_at > ?))
                    AND status IN ('STARTING','SYNCING','RUNNING','CANCELLING')",
                 &[
                     status.to_db().into(),
@@ -882,6 +904,10 @@ impl Store {
                     message.map(|m| m.to_string()).into(),
                     id.into(),
                     (expected_retry_count as i64).into(),
+                    fence.map(|f| f.0).unwrap_or("").into(),
+                    fence.map(|f| f.0).unwrap_or("").into(),
+                    fence.map(|f| f.1).unwrap_or("").into(),
+                    unix_now().into(),
                 ],
             )
             .await?;
@@ -892,17 +918,10 @@ impl Store {
         Ok(true)
     }
 
-    async fn set_job_status_for_run(&self, id: &str, status: JobStatus) -> DbResult<()> {
-        let job = self
-            .db
-            .query("SELECT job_id FROM job_runs WHERE id = ?", &[id.into()])
-            .await?;
-        if let Some(name) = job
-            .first()
-            .and_then(|r| cell(r, "job_id").and_then(|v| v.as_str()))
-        {
-            self.set_job_status(name, status).await?;
-        }
+    async fn set_job_status_for_run(&self, id: &str, _status: JobStatus) -> DbResult<()> {
+        // Read the current run status inside the update: a delayed previous
+        // attempt cannot overwrite a newer retry/claim's denormalized status.
+        self.db.execute("UPDATE jobs SET status = (SELECT status FROM job_runs WHERE id = ?) WHERE name = (SELECT job_id FROM job_runs WHERE id = ?) AND NOT EXISTS (SELECT 1 FROM job_runs r WHERE r.job_id = jobs.name AND r.id != ? AND r.status IN ('STARTING','SYNCING','RUNNING','CANCELLING'))", &[id.into(), id.into(), id.into()]).await?;
         Ok(())
     }
 
@@ -927,6 +946,24 @@ impl Store {
         next_retry_at: i64,
         retry_count: u32,
     ) -> DbResult<bool> {
+        self.set_retry_from_active_fenced(
+            id,
+            expected_retry_count,
+            next_retry_at,
+            retry_count,
+            None,
+        )
+        .await
+    }
+
+    pub async fn set_retry_from_active_fenced(
+        &self,
+        id: &str,
+        expected_retry_count: u32,
+        next_retry_at: i64,
+        retry_count: u32,
+        fence: Option<(&str, &str)>,
+    ) -> DbResult<bool> {
         let changed = self
             .db
             .execute(
@@ -934,12 +971,17 @@ impl Store {
                         lease_expires_at = NULL
                  WHERE id = ?
                    AND retry_count = ?
+                   AND (? = '' OR (worker_id = ? AND lease_token = ? AND lease_expires_at > ?))
                    AND status IN ('STARTING','SYNCING','RUNNING','CANCELLING')",
                 &[
                     next_retry_at.into(),
                     (retry_count as i64).into(),
                     id.into(),
                     (expected_retry_count as i64).into(),
+                    fence.map(|f| f.0).unwrap_or("").into(),
+                    fence.map(|f| f.0).unwrap_or("").into(),
+                    fence.map(|f| f.1).unwrap_or("").into(),
+                    unix_now().into(),
                 ],
             )
             .await?;
@@ -970,7 +1012,7 @@ impl Store {
 
     async fn runs_where(&self, cond: &str, params: &[Param]) -> DbResult<Vec<RunRow>> {
         let sql = format!(
-            "SELECT id, job_id, worker_id, status, retry_count, next_retry_at, created_at,
+            "SELECT id, job_id, worker_id, status, lease_token, retry_count, next_retry_at, created_at,
                     started_at, finished_at, duration_secs, exit_code, message
              FROM job_runs WHERE {cond} ORDER BY priority DESC, created_at"
         );
@@ -981,7 +1023,7 @@ impl Store {
     /// Run history for one job, newest first (by creation time only —
     /// priority must not reorder history).
     pub async fn run_history(&self, job_name: &str, limit: u32) -> DbResult<Vec<RunRow>> {
-        let sql = "SELECT id, job_id, worker_id, status, retry_count, next_retry_at, created_at,
+        let sql = "SELECT id, job_id, worker_id, status, lease_token, retry_count, next_retry_at, created_at,
                           started_at, finished_at, duration_secs, exit_code, message
                    FROM job_runs WHERE job_id = ? ORDER BY created_at DESC LIMIT ?";
         let rows = self
@@ -1132,6 +1174,18 @@ impl Store {
                 ],
             )
             .await?;
+        Ok(())
+    }
+
+    pub async fn insert_log_fenced(
+        &self,
+        run_id: &str,
+        worker: &str,
+        token: &str,
+        job: &str,
+        content: &str,
+    ) -> DbResult<()> {
+        self.db.execute("INSERT INTO job_logs (run_id,job_id,log_path,created_at,content) SELECT id,job_id,'',?,? FROM job_runs WHERE id = ? AND worker_id = ? AND lease_token = ? AND lease_expires_at > ? AND status IN ('STARTING','SYNCING','RUNNING','CANCELLING') ON CONFLICT(run_id) DO UPDATE SET content = excluded.content WHERE EXISTS (SELECT 1 FROM job_runs WHERE id = ? AND worker_id = ? AND lease_token = ? AND lease_expires_at > ? AND job_id = ? AND status IN ('STARTING','SYNCING','RUNNING','CANCELLING'))", &[unix_now().into(), content.into(), run_id.into(), worker.into(), token.into(), unix_now().into(), run_id.into(), worker.into(), token.into(), unix_now().into(), job.into()]).await?;
         Ok(())
     }
 
@@ -1473,6 +1527,9 @@ fn run_row(r: &[(String, DbValue)]) -> RunRow {
                 .and_then(|v| v.as_str())
                 .unwrap_or("PENDING"),
         ),
+        lease_token: cell(r, "lease_token")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned),
         retry_count: cell(r, "retry_count").and_then(|v| v.as_i64()).unwrap_or(0) as u32,
         next_retry_at: cell(r, "next_retry_at").and_then(|v| v.as_i64()),
         created_at: cell(r, "created_at").and_then(|v| v.as_i64()).unwrap_or(0),

@@ -96,6 +96,8 @@ impl Default for DbDoc {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApiDoc {
+    #[serde(default = "yes")]
+    pub metrics_auth: bool,
     #[serde(default = "default_api_listen")]
     pub listen: String,
     #[serde(default)]
@@ -116,6 +118,7 @@ pub struct ApiDoc {
 impl Default for ApiDoc {
     fn default() -> Self {
         Self {
+            metrics_auth: true,
             listen: default_api_listen(),
             tls: TlsDoc::default(),
             tokens: Vec::new(),
@@ -279,12 +282,15 @@ pub struct SnapshotJobDoc {
     /// after-success | before-sync | before-and-after | manual | never
     #[serde(default = "default_snapshot_policy")]
     pub policy: String,
+    #[serde(default)]
+    pub failure: synora_core::job::SnapshotFailure,
 }
 
 impl Default for SnapshotJobDoc {
     fn default() -> Self {
         Self {
             policy: default_snapshot_policy(),
+            failure: Default::default(),
         }
     }
 }
@@ -343,7 +349,7 @@ fn default_backoff() -> f64 {
     2.0
 }
 fn default_success_exit_codes() -> Vec<i32> {
-    vec![23, 24]
+    vec![24]
 }
 
 fn default_one() -> u32 {
@@ -353,7 +359,7 @@ fn default_misfire() -> String {
     "skip".into()
 }
 fn default_worker_lost() -> String {
-    "retry".into()
+    "fail".into()
 }
 fn default_timezone() -> String {
     "UTC".into()

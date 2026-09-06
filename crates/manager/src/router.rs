@@ -80,7 +80,7 @@ impl WorkerPicker {
                 );
             }
         }
-        *self.snapshot.write().unwrap() = map;
+        *self.snapshot.write().unwrap_or_else(|e| e.into_inner()) = map;
     }
 
     /// Pick a worker for a job (spec §8/§10): explicit worker id, else a
@@ -88,7 +88,7 @@ impl WorkerPicker {
     /// job's resource tags. Least-loaded first; workers at their cap are
     /// skipped. `None` = stay QUEUED (visible, no crash loop).
     pub fn pick(&self, job: &JobSpec) -> Option<String> {
-        let snap = self.snapshot.read().unwrap();
+        let snap = self.snapshot.read().unwrap_or_else(|e| e.into_inner());
         let online: Vec<(&String, &WorkerInfo)> = snap
             .iter()
             .filter(|(_, w)| w.status == "ONLINE" && w.jobs_running < w.max_concurrency)
@@ -380,6 +380,7 @@ fn run_assignment(
 ) -> RunAssignment {
     let proxy_env = proxy_env_for(state, &job);
     RunAssignment {
+        lease_token: String::new(),
         run_id,
         attempt,
         job,
@@ -425,45 +426,8 @@ async fn register(
         )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    // The worker process restarted: claimed runs cannot be resumed.
-    // Mark them LOST and honor on_worker_lost=retry here — the reaper
-    // only re-queues runs that *it* expires, so a register-path LOST
-    // would otherwise sit until the next interval.
-    let lost = state
-        .engine
-        .store
-        .mark_worker_runs_lost(&worker_id)
-        .await
-        .unwrap_or_default();
-    for run in lost {
-        tracing::warn!(
-            "run {} (job {}) lost: worker `{worker_id}` re-registered",
-            run.id,
-            run.job_id
-        );
-        let job = state.engine.job(&run.job_id);
-        let retry = job
-            .as_ref()
-            .map(|j| matches!(j.on_worker_lost, synora_core::OnWorkerLost::Retry))
-            .unwrap_or(false);
-        if !retry {
-            continue;
-        }
-        let worker = job.as_ref().and_then(|j| state.picker.pick(j));
-        match state
-            .engine
-            .store
-            .create_lost_requeue(&run.id, &run.job_id, worker.as_deref())
-            .await
-        {
-            Ok(Some(new_id)) => tracing::info!(
-                "job `{}`: re-queued as {new_id} after worker re-register",
-                run.job_id
-            ),
-            Ok(None) => {}
-            Err(e) => tracing::warn!("job `{}`: lost re-queue failed: {e}", run.job_id),
-        }
-    }
+    // Registration is not evidence that an old process stopped. Only the
+    // assignment lease reaper may release its run for redispatch.
     // Persist capabilities (incl. max_concurrency).
     let _ = state
         .engine
@@ -527,36 +491,6 @@ async fn persist_repository_size(state: &AppState, job: &synora_core::job::JobSp
     );
 }
 
-async fn apply_repository_sizes(state: &AppState, samples: &[api::RepoSizeSample]) {
-    if samples.is_empty() {
-        return;
-    }
-    let jobs = state.engine.jobs();
-    for job in &jobs {
-        let raw = job.storage.display().to_string();
-        let resolved = state
-            .engine
-            .run_storage
-            .as_ref()
-            .map(|c| c.resolve_storage_path(job).display().to_string())
-            .unwrap_or_else(|| raw.clone());
-        let wants = [
-            resolved.trim_end_matches('/'),
-            raw.trim_end_matches('/'),
-            job.name.as_str(),
-        ];
-        // Exact mountpoint / storage path only. A prefix match would assign
-        // the whole pool (70T+) to every job.
-        let hit = samples.iter().find(|s| {
-            let p = s.path.trim_end_matches('/');
-            wants.iter().any(|want| !want.is_empty() && p == *want)
-        });
-        if let Some(sample) = hit {
-            persist_repository_size(state, job, sample.bytes as i64).await;
-        }
-    }
-}
-
 async fn heartbeat(
     State(state): State<AppState>,
     axum::Extension(auth): axum::Extension<AuthUser>,
@@ -578,6 +512,34 @@ async fn heartbeat(
         )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut valid_runs = std::collections::HashSet::new();
+    let mut valid_jobs = std::collections::HashSet::new();
+    for lease in body.active_runs.iter().take(256) {
+        if state
+            .engine
+            .store
+            .renew_run_lease(&lease.run_id, &worker_id, &lease.lease_token)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        {
+            if let Some(run) = state
+                .engine
+                .store
+                .get_run(&lease.run_id)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            {
+                valid_jobs.insert(run.job_id);
+                valid_runs.insert(lease.run_id.clone());
+            }
+        }
+    }
+    let invalid_runs = body
+        .active_runs
+        .iter()
+        .filter(|r| !valid_runs.contains(&r.run_id))
+        .map(|r| r.run_id.clone())
+        .collect();
     state.engine.metrics.set_gauge(
         "synora_worker_jobs_running",
         &[("worker", worker_id.as_str())],
@@ -603,6 +565,9 @@ async fn heartbeat(
         &worker_id,
     );
     for sample in &body.resources {
+        if !valid_jobs.contains(&sample.job) {
+            continue;
+        }
         if let Some(mem) = sample.memory_bytes {
             state.engine.metrics.set_gauge(
                 "synora_job_memory_bytes",
@@ -638,7 +603,7 @@ async fn heartbeat(
     // Persist bounded live log tails only for runs actually owned by this
     // worker. Completion later upserts the final tail into the same row.
     for sample in body.logs.iter().take(32) {
-        if sample.content.len() > 512 * 1024 {
+        if !valid_runs.contains(&sample.run_id) || sample.content.len() > 512 * 1024 {
             continue;
         }
         let Ok(Some(run)) = state.engine.store.get_run(&sample.run_id).await else {
@@ -647,31 +612,23 @@ async fn heartbeat(
         if run.worker_id.as_deref() != Some(worker_id.as_str()) || run.job_id != sample.job {
             continue;
         }
-        let _ = state
-            .engine
-            .store
-            .insert_log_with(
-                &sample.run_id,
-                &sample.job,
-                &format!("/var/log/synora/{}/current.log", sample.job),
-                &sample.content,
-            )
-            .await;
+        if let Some(lease) = body.active_runs.iter().find(|r| r.run_id == sample.run_id) {
+            let _ = state
+                .engine
+                .store
+                .insert_log_fenced(
+                    &sample.run_id,
+                    &worker_id,
+                    &lease.lease_token,
+                    &sample.job,
+                    &sample.content,
+                )
+                .await;
+        }
     }
-    apply_repository_sizes(&state, &body.repository_sizes).await;
-    if !body.active_jobs.is_empty() {
-        let _ = state
-            .engine
-            .store
-            .mark_jobs_running(&worker_id, &body.active_jobs)
-            .await;
-        // Do not overwrite job_status from the heartbeat. A worker can
-        // still list a job for one tick after complete_run marked it
-        // RETRYING/FAILED; the reaper and complete/claim handlers own
-        // the gauge.
-    }
-
+    // Unfenced repository inventory must not overwrite completion sizes.
     let mut response = HeartbeatResponse {
+        cancel_runs: invalid_runs,
         assignment: None,
         assignments: Vec::new(),
         cancel_run: None,
@@ -725,6 +682,10 @@ async fn claim(
     Path(run_id): Path<String>,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<axum::Json<RunAssignment>, StatusCode> {
+    if params.get("protocol").map(String::as_str) != Some("2") {
+        return Err(StatusCode::UPGRADE_REQUIRED);
+    }
+    let _config = state.engine.config_gate.read().await;
     require(&auth, "runs.manage")?;
     // Per-job concurrency gate: never claim a run while another run of the
     // same job is active (prevents two workers — or two claims — racing on
@@ -783,6 +744,7 @@ async fn claim(
         engine::status_value(JobStatus::Syncing),
     );
     Ok(axum::Json(RunAssignment {
+        lease_token: run.lease_token.unwrap_or_default(),
         run_id,
         attempt: run.retry_count,
         job,
@@ -810,7 +772,13 @@ async fn complete(
     if !token_owns_worker(&state, &auth, &run_worker).await {
         return Err(StatusCode::FORBIDDEN);
     }
-    let _ = &body.worker_id;
+    if body.worker_id != run_worker
+        || body.lease_token.is_empty()
+        || run.lease_token.as_deref() != Some(body.lease_token.as_str())
+        || body.attempt != Some(run.retry_count)
+    {
+        return Err(StatusCode::CONFLICT);
+    }
     let Some(job) = state.engine.job(&run.job_id) else {
         return Err(StatusCode::NOT_FOUND);
     };
@@ -845,7 +813,7 @@ async fn complete(
         .or(body.message.as_deref());
     // New workers bind completion to the retry generation they claimed.
     // Legacy workers omit it and remain accepted during rolling upgrades.
-    let expected_attempt = body.attempt.unwrap_or(run.retry_count);
+    let expected_attempt = run.retry_count;
     if body
         .attempt
         .is_some_and(|attempt| attempt != run.retry_count)
@@ -858,7 +826,7 @@ async fn complete(
             state
                 .engine
                 .store
-                .finish_active_run(
+                .finish_active_run_fenced(
                     &run_id,
                     expected_attempt,
                     JobStatus::Cancelled,
@@ -868,6 +836,7 @@ async fn complete(
                     None,
                     completion_message,
                     duration,
+                    Some((&body.worker_id, &body.lease_token)),
                 )
                 .await
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -877,7 +846,7 @@ async fn complete(
             let applied = state
                 .engine
                 .store
-                .finish_active_run(
+                .finish_active_run_fenced(
                     &run_id,
                     expected_attempt,
                     JobStatus::Success,
@@ -887,6 +856,7 @@ async fn complete(
                     body.bytes_transferred,
                     completion_message,
                     duration,
+                    Some((&body.worker_id, &body.lease_token)),
                 )
                 .await
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -932,11 +902,12 @@ async fn complete(
                     let applied = state
                         .engine
                         .store
-                        .set_retry_from_active(
+                        .set_retry_from_active_fenced(
                             &run_id,
                             expected_attempt,
                             ended + delay_secs as i64,
                             run.retry_count + 1,
+                            Some((&body.worker_id, &body.lease_token)),
                         )
                         .await
                         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -954,7 +925,7 @@ async fn complete(
                     let applied = state
                         .engine
                         .store
-                        .finish_active_run(
+                        .finish_active_run_fenced(
                             &run_id,
                             expected_attempt,
                             JobStatus::Failed,
@@ -964,6 +935,7 @@ async fn complete(
                             None,
                             completion_message,
                             duration,
+                            Some((&body.worker_id, &body.lease_token)),
                         )
                         .await
                         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -1437,7 +1409,7 @@ async fn list_proxies(
     let proxies: Vec<serde_json::Value> = proxy_cfgs
         .iter()
         .map(|(name, p)| {
-            let probe = state.proxy_probes.read().unwrap().get(name).cloned().unwrap_or_default();
+            let probe = state.proxy_probes.read().unwrap_or_else(|e| e.into_inner()).get(name).cloned().unwrap_or_default();
             serde_json::json!({
                 "name": name,
                 "type": match &p.kind {
@@ -1462,7 +1434,7 @@ async fn reload(
     State(state): State<AppState>,
     axum::Extension(auth): axum::Extension<AuthUser>,
 ) -> Result<axum::Json<ReloadResponse>, StatusCode> {
-    require(&auth, "jobs.write")?;
+    require(&auth, "config.reload")?;
     let applied = state
         .engine
         .reload()
@@ -1471,8 +1443,15 @@ async fn reload(
     Ok(axum::Json(ReloadResponse { applied }))
 }
 
-async fn metrics(State(state): State<AppState>) -> String {
-    state.engine.metrics().render()
+async fn metrics(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> Result<String, StatusCode> {
+    if state.engine.cfg.api.metrics_auth {
+        let user = crate::auth::authenticate(&state.engine.cfg.api, &headers)?;
+        require(&user, "metrics.read")?;
+    }
+    Ok(state.engine.metrics().render())
 }
 
 fn run_dto(run: db::store::RunRow) -> RunDTO {
@@ -1590,5 +1569,195 @@ mod tests {
         let tail = tail_of_file(&path, 3).unwrap();
         assert_eq!(tail, "line-99997\nline-99998\nline-99999");
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod protocol_tests {
+    use super::*;
+    use axum::{body::Body, http::Request};
+    use tower::ServiceExt;
+    async fn request(
+        router: &Router,
+        method: &str,
+        uri: &str,
+        token: Option<&str>,
+        body: serde_json::Value,
+    ) -> axum::response::Response {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json");
+        if let Some(token) = token {
+            request = request.header("authorization", format!("Bearer {token}"));
+        }
+        router
+            .clone()
+            .oneshot(request.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap()
+    }
+    #[tokio::test]
+    async fn authenticated_metrics_and_fenced_worker_protocol() {
+        let dir = std::env::temp_dir().join(format!("synora-api-{}", synora_core::RunId::new()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let token = synora_core::RunId::new().to_string();
+        let operator = synora_core::RunId::new().to_string();
+        let path = dir.join("synora.toml");
+        std::fs::write(
+            &path,
+            format!(
+                r#"
+[daemon.db]
+path = "{}"
+[api]
+listen = "127.0.0.1:0"
+[[api.tokens]]
+name = "admin"
+token = "{token}"
+role = "admin"
+[[api.tokens]]
+name = "operator"
+token = "{operator}"
+role = "operator"
+[[jobs]]
+name = "test"
+provider = "script"
+command = "true"
+schedule = "manual"
+storage = "/tmp/test"
+retry = 0
+"#,
+                dir.join("db.sqlite").display()
+            ),
+        )
+        .unwrap();
+        let cfg = config::ConfigLoader::load(&path, &config::CliOverrides::default()).unwrap();
+        let engine = Engine::new(cfg, std::path::Path::new("/embedded"), false)
+            .await
+            .unwrap();
+        engine.sync_config().await.unwrap();
+        let (router, _) = build(
+            engine.clone(),
+            WorkerPicker::new(engine.clone()),
+            Arc::new(RwLock::new(HashMap::new())),
+        );
+        assert_eq!(
+            request(&router, "GET", "/metrics", None, serde_json::Value::Null)
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            request(
+                &router,
+                "GET",
+                "/metrics",
+                Some(&token),
+                serde_json::Value::Null
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            request(
+                &router,
+                "POST",
+                "/api/v1/reload",
+                Some(&operator),
+                serde_json::Value::Null
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+        engine
+            .store
+            .upsert_worker("worker", "host", "", "test", &[], "admin")
+            .await
+            .unwrap();
+        engine
+            .store
+            .create_run("run", "test", None, JobStatus::Queued, 0)
+            .await
+            .unwrap();
+        assert_eq!(
+            request(
+                &router,
+                "POST",
+                "/api/v1/runs/run/claim?worker=worker",
+                Some(&token),
+                serde_json::Value::Null
+            )
+            .await
+            .status(),
+            StatusCode::UPGRADE_REQUIRED
+        );
+        let response = request(
+            &router,
+            "POST",
+            "/api/v1/runs/run/claim?worker=worker&protocol=2",
+            Some(&token),
+            serde_json::Value::Null,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let assignment: RunAssignment = serde_json::from_slice(&body).unwrap();
+        assert!(!assignment.lease_token.is_empty());
+        let mut completion = serde_json::json!({"worker_id":"worker", "attempt":0,"status":"success", "exit_code":0,"lease_token":"wrong"});
+        assert_eq!(
+            request(
+                &router,
+                "POST",
+                "/api/v1/runs/run/complete",
+                Some(&token),
+                completion.clone()
+            )
+            .await
+            .status(),
+            StatusCode::CONFLICT
+        );
+        completion["lease_token"] = serde_json::json!(assignment.lease_token);
+        assert_eq!(
+            request(
+                &router,
+                "POST",
+                "/api/v1/runs/run/complete",
+                Some(&token),
+                completion.clone()
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        completion["status"] = serde_json::json!("failed");
+        assert_eq!(
+            request(
+                &router,
+                "POST",
+                "/api/v1/runs/run/complete",
+                Some(&token),
+                completion
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            engine.store.get_run("run").await.unwrap().unwrap().status,
+            JobStatus::Success
+        );
+        let response = request(&router, "POST", "/api/v1/workers/worker/heartbeat", Some(&token), serde_json::json!({"status":"running","jobs_running":1,"active_runs":[{"run_id":"run","lease_token":assignment.lease_token}]})).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let heartbeat: HeartbeatResponse = serde_json::from_slice(&body).unwrap();
+        assert_eq!(heartbeat.cancel_runs, vec!["run"]);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

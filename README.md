@@ -28,10 +28,10 @@ to TUNA and to the authors and maintainers of these projects.
   persistent anchor — next runs are computed from the wall clock, never from
   "last run end + interval" (misfire policies: skip / run-immediately / run-next).
 - **Six providers**: rsync (tunasync-aligned defaults, `success_exit_codes`
-  23/24), two-stage-rsync (tunasync two-pass: a fast stage-1 subset by
+  `[24]`; exit 23 fails unless explicitly enabled), two-stage-rsync (tunasync two-pass: a fast stage-1 subset by
   profile, then the full sync), script (`SYNORA_*` env, `SYNORA_SIZE=` size reporting; workers always run these in `synora-scripts`), docker (`docker run`, storage mounted at /data,
   optional in-container command), git (`clone --mirror` + `remote update --prune`, same `synora-scripts` image on workers),
-  and HTTP directory mirroring (tsumugu-style: per-file failures are skipped,
+  and HTTP directory mirroring (tsumugu-style: failed files/incomplete listings fail the run,
   local symlinks left alone, listing-marked symlinks mirrored as local links,
   configurable download concurrency, 30 s connect / 120 s idle-read timeout,
   unlimited run
@@ -40,8 +40,9 @@ to TUNA and to the authors and maintainers of these projects.
   `synora-manager` + N × `synora-worker` form a pull-model cluster (workers
   register, heartbeat every 15 s, claim assigned runs). PostgreSQL optional.
 - **Crash safety**: every run has a 60 s lease; lease expiry → LOST →
-  automatic re-dispatch (`on_worker_lost = "retry"`). No run stays RUNNING
-  forever.
+  a scheduled-dispatch hold (default `on_worker_lost = "fail"`; retry is opt-in). Claims issue fencing tokens and workers
+  cancel on lease loss. Shared-storage/container takeover also needs infrastructure
+  fencing; see the [configuration reference](docs/config-reference.md) before enabling automatic recovery.
 - **Hot reload**: manager API / SIGHUP (`/run/synora/*.pid`) / `POST /api/v1/reload` — job and
   schedule changes apply live; invalid or non-reloadable changes are rejected
   as a whole; changed jobs get a catch-up run queued automatically.
@@ -138,7 +139,7 @@ provider = "rsync"               # rsync | two-stage-rsync | http | git | docker
 upstream = "rsync://archive.ubuntu.com/ubuntu/"
 storage = "/srv/mirror/ubuntu"
 options = ["--delete", "--delay-updates"]
-success_exit_codes = [23, 24]   # rsync exit codes counted as success (tunasync convention)
+success_exit_codes = [24]       # 0 always succeeds; opt into [23,24] only for tunasync compatibility
 exclude = ["*.tmp"]             # rsync --exclude=PATTERN entries (tunasync `exclude`)
 
 retry = 3
@@ -189,15 +190,13 @@ admin / operator / viewer; permission keys: `jobs.read`, `jobs.write`,
 | GET | `/jobs/{name}/history` | jobs.read | run history |
 | GET | `/jobs/{name}/logs?tail=200` | logs.read | tail of current.log |
 | GET | `/workers` | workers.read | worker list |
-| POST | `/reload` | jobs.write | hot-reload config |
-| GET | `/metrics` | (open) | Prometheus text format |
+| POST | `/reload` | config.reload | hot-reload config |
+| GET | `/metrics` | metrics.read | Prometheus text format |
 
-**Unauthenticated endpoints** — `/metrics`, `/healthz`, and the two status
-JSONs (`synora_json_path` / `tunasync_json_path`, both configurable, empty =
-disabled) are public by design so scrapers and mirror-web frontends can
-reach them without a token. They expose only aggregate telemetry and
-mirror status, never job definitions or run logs — but keep the listen
-address loopback or firewall the port if that is still too much.
+`/metrics` requires a Bearer token with `metrics.read` by default; explicitly
+set `[api] metrics_auth = false` for a trusted private scraper.
+`/healthz` and mirror-web status JSON remain public. Empty JSON paths disable
+those endpoints. Reload requires `config.reload`, granted to admins by default.
 
 ## Metrics
 
@@ -217,9 +216,11 @@ bytes + human form (KiB/MiB/GiB/TiB).
 
 Scheduler ↔ Executor decoupled · Provider ↔ Storage decoupled ·
 Manager ↔ Worker decoupled · DB is the source of truth · all states
-observable · all tasks recoverable. See the full spec in the project plan
-for phases beyond P0+P1 (proxy/egress, ZFS/Btrfs snapshots, HTTP provider,
-HA, Provider SDK).
+observable. Proxy/egress, snapshots, HTTP, Manager/Worker and TUI are implemented.
+ZFS/Btrfs rollback and cross-host shared-storage takeover require deployment
+validation; HA multi-manager and a general Provider SDK are not production claims.
+See the [configuration reference](docs/config-reference.md) for new defaults and
+Manager/Worker upgrade requirements.
 
 ## Development
 

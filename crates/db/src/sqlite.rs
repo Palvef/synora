@@ -92,6 +92,8 @@ impl From<Option<f64>> for Param {
 
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
+    #[error("concurrent database constraint conflict")]
+    Conflict,
     #[error("database error: {0}")]
     Sql(String),
 }
@@ -133,7 +135,13 @@ impl SqliteDb {
         let values: Vec<rusqlite::types::Value> = params.iter().map(to_sql_value).collect();
         let n = stmt
             .execute(rusqlite::params_from_iter(values.iter()))
-            .map_err(|e| DbError::Sql(e.to_string()))?;
+            .map_err(|e| {
+                if e.sqlite_error_code() == Some(rusqlite::ErrorCode::ConstraintViolation) {
+                    DbError::Conflict
+                } else {
+                    DbError::Sql(e.to_string())
+                }
+            })?;
         Ok(n)
     }
 

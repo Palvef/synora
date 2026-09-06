@@ -62,6 +62,20 @@ pub(crate) fn spawn_group(
         // a new process group without a console is fine for tree killing.
         cmd.creation_flags(0x01000000);
     }
+    if let Some(lock) = &ctx.storage_lock {
+        use std::os::fd::AsRawFd;
+        let fd = lock.as_raw_fd();
+        // Only this run's lock survives exec. A worker crash must not unlock
+        // storage while rsync or a shell child continues writing.
+        unsafe {
+            cmd.pre_exec(move || {
+                if libc::fcntl(fd, libc::F_SETFD, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
     let child = cmd
         .spawn()
         .map_err(|e| ProviderError::Spawn(e.to_string()))?;
@@ -70,7 +84,7 @@ pub(crate) fn spawn_group(
             cg.attach(pid);
         }
         if let Some(usage) = &ctx.usage {
-            usage.lock().unwrap().child_pgid = Some(pid);
+            usage.lock().unwrap_or_else(|e| e.into_inner()).child_pgid = Some(pid);
         }
     }
     let guard = KillOnDrop::arm(&child);
@@ -141,7 +155,14 @@ pub(crate) async fn tee_log(path: &Option<std::path::PathBuf>, data: &[u8]) {
         .await
     {
         use tokio::io::AsyncWriteExt;
-        let _ = f.write_all(data).await;
+        let remaining = 16 * 1024 * 1024u64
+            - f.metadata()
+                .await
+                .map(|m| m.len().min(16 * 1024 * 1024))
+                .unwrap_or(16 * 1024 * 1024);
+        let _ = f
+            .write_all(&data[..data.len().min(remaining as usize)])
+            .await;
     }
 }
 
@@ -187,6 +208,7 @@ use synora_core::job::{ErrorKind, JobSpec};
 /// Everything a provider needs for one run.
 #[derive(Clone)]
 pub struct SyncContext {
+    pub storage_lock: Option<std::sync::Arc<std::fs::File>>,
     pub run_id: String,
     pub job_name: String,
     pub upstream: Option<String>,

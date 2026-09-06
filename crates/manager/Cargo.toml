@@ -25,3 +25,6 @@ rustls.workspace = true
 rustls-pemfile.workspace = true
 clap.workspace = true
 netroute.workspace = true
+
+[dev-dependencies]
+tower = { workspace = true, features = ["util"] }

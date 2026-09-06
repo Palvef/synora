@@ -20,6 +20,8 @@ use synora_core::schedule::{self, Schedule, ScheduleKind};
 use time::Duration;
 
 const MAX_INCLUDE_DEPTH: usize = 32;
+const MAX_CONFIG_FILES: usize = 1024;
+const MAX_CONFIG_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug)]
 pub struct ResolvedConfig {
@@ -154,6 +156,7 @@ pub enum DbKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiConfig {
+    pub metrics_auth: bool,
     pub listen: SocketAddr,
     pub tls: TlsConfig,
     pub tokens: Vec<ApiToken>,
@@ -196,6 +199,8 @@ struct JobEntry {
 }
 
 struct LoadState {
+    files: usize,
+    bytes: usize,
     /// Files on the current include path (for cycle detection).
     stack: HashSet<PathBuf>,
     jobs: Vec<JobEntry>,
@@ -216,6 +221,8 @@ impl ConfigLoader {
             )
         })?;
         let mut state = LoadState {
+            files: 0,
+            bytes: 0,
             stack: HashSet::new(),
             jobs: Vec::new(),
         };
@@ -230,11 +237,19 @@ impl ConfigLoader {
     }
 }
 
+/// Validate an editor's bare job document before replacing its config file.
+pub fn validate_job_text(text: &str) -> Result<(), ConfigError> {
+    let doc: JobDoc = toml::from_str(text)
+        .map_err(|e| ConfigError::new("<editor>", 1, safe_parse_error(e.message())))?;
+    resolve_job(&doc, "<editor>", 1).map(|_| ())
+}
+
 fn deserialize_root(doc: Option<&toml_edit::DocumentMut>) -> Result<RootDoc, ConfigError> {
     let text = doc.map(|d| d.to_string()).unwrap_or_default();
     // serde errors here lack file:line (the doc is a merge of many files);
     // the message names the offending field, which is actionable.
-    toml::from_str(&text).map_err(|e| ConfigError::new("<config>", 0, e.message().to_string()))
+    toml::from_str(&text)
+        .map_err(|e| ConfigError::new("<config>", 0, safe_parse_error(e.message())))
 }
 
 /// Load one file: env-expand → parse → extract include + jobs → merge own
@@ -263,9 +278,39 @@ fn load_file(
     }
     state.stack.insert(path.to_path_buf());
 
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| ConfigError::new(&file, 0, format!("cannot read file: {e}")))?;
+    state.files += 1;
+    if state.files > MAX_CONFIG_FILES {
+        return Err(ConfigError::new(
+            &file,
+            0,
+            "too many included files (limit 1024)",
+        ));
+    }
+    use std::io::Read;
+    let mut text = String::new();
+    std::fs::File::open(path)
+        .and_then(|f| {
+            f.take((MAX_CONFIG_BYTES + 1) as u64)
+                .read_to_string(&mut text)
+        })
+        .map_err(|_| ConfigError::new(&file, 0, "cannot read config file"))?;
+    state.bytes = state.bytes.saturating_add(text.len());
+    if state.bytes > MAX_CONFIG_BYTES {
+        return Err(ConfigError::new(&file, 0, "configuration exceeds 16 MiB"));
+    }
+    let original_len = text.len();
     let text = expand_env(&text, &file)?;
+    state.bytes = state
+        .bytes
+        .saturating_sub(original_len)
+        .saturating_add(text.len());
+    if state.bytes > MAX_CONFIG_BYTES {
+        return Err(ConfigError::new(
+            &file,
+            0,
+            "expanded configuration exceeds 16 MiB",
+        ));
+    }
 
     // First parse: immutable doc — spans survive, giving us file:line for jobs.
     let im_parsed: Result<toml_edit::ImDocument<String>, toml_edit::TomlError> = text.parse();
@@ -273,7 +318,7 @@ fn load_file(
         ConfigError::new(
             &file,
             line_of(&text, e.span()),
-            format!("TOML syntax error: {e}"),
+            "TOML syntax error (source omitted to protect secrets)",
         )
     })?;
     let job_lines = job_line_numbers(&im, &text);
@@ -289,7 +334,7 @@ fn load_file(
         ConfigError::new(
             &file,
             line_of(&text, e.span()),
-            format!("TOML syntax error: {e}"),
+            "TOML syntax error (source omitted to protect secrets)",
         )
     })?;
 
@@ -332,6 +377,13 @@ fn expand_env(text: &str, file: &str) -> Result<String, ConfigError> {
     let mut escaped = false;
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
+        if out.len() > MAX_CONFIG_BYTES {
+            return Err(ConfigError::new(
+                file,
+                line,
+                "expanded configuration exceeds 16 MiB",
+            ));
+        }
         match state {
             State::BasicString => {
                 if escaped {
@@ -522,9 +574,8 @@ fn extract_jobs(
         // Serialize the whole doc back and deserialize as a job.
         let s = doc.to_string();
         let entry = JobEntry {
-            doc: toml::from_str::<JobDoc>(&s).map_err(|e| {
-                ConfigError::new(file, line, format!("invalid job: {}", e.message()))
-            })?,
+            doc: toml::from_str::<JobDoc>(&s)
+                .map_err(|e| ConfigError::new(file, line, safe_parse_error(e.message())))?,
             file: file.to_string(),
             line,
         };
@@ -534,13 +585,26 @@ fn extract_jobs(
     Ok(())
 }
 
+fn safe_parse_error(message: &str) -> String {
+    // Field names remain actionable; values and source excerpts never escape.
+    for prefix in ["unknown field `", "missing field `"] {
+        if let Some(rest) = message.split_once(prefix).map(|(_, s)| s) {
+            let field = rest.split('`').next().unwrap_or("");
+            if field.len() < 128 && field.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                return format!("{prefix}{field}`");
+            }
+        }
+    }
+    "invalid configuration value (source omitted to protect secrets)".into()
+}
+
 fn parse_job_table(t: &toml_edit::Table, file: &str, line: usize) -> Result<JobDoc, ConfigError> {
     // `Table::to_string()` does not render sub-tables ([jobs.hooks] would be
     // silently dropped) — round-trip through a DocumentMut instead.
     let mut doc = toml_edit::DocumentMut::new();
     *doc.as_table_mut() = t.clone();
     toml_edit::de::from_document(doc)
-        .map_err(|e| ConfigError::new(file, line, format!("invalid job: {e}")))
+        .map_err(|e| ConfigError::new(file, line, safe_parse_error(&e.to_string())))
 }
 
 /// Expand an include entry: glob or plain path, relative to `base`.
@@ -566,6 +630,13 @@ fn resolve_include(pattern: &str, base: &Path, file: &str) -> Result<Vec<PathBuf
             let p = entry.map_err(|e| {
                 ConfigError::new(file, 0, format!("include pattern `{pattern}`: {e}"))
             })?;
+            if out.len() >= MAX_CONFIG_FILES {
+                return Err(ConfigError::new(
+                    file,
+                    0,
+                    "include pattern exceeds 1024 files",
+                ));
+            }
             out.push(p);
         }
         if out.is_empty() {
@@ -714,6 +785,7 @@ fn resolve(root: &RootDoc, jobs: Vec<JobEntry>) -> Result<ResolvedConfig, Config
         });
     }
     let api = ApiConfig {
+        metrics_auth: root.api.metrics_auth,
         listen,
         tls,
         tokens,
@@ -1391,6 +1463,7 @@ fn resolve_job(doc: &JobDoc, file: &str, line: usize) -> Result<JobSpec, ConfigE
         cpu_limit: doc.cpu_limit,
         depends_on: doc.depends_on.clone(),
         snapshot_policy,
+        snapshot_failure: doc.snapshot.failure,
         verify: synora_core::VerifyConfig {
             enabled: doc.verify.enabled,
             checks: doc.verify.checks.clone(),

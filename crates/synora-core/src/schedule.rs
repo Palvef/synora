@@ -704,3 +704,71 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod calendar_edges {
+    use super::*;
+    use time::macros::{datetime, time};
+    #[test]
+    fn dst_gaps_and_repeated_hours() {
+        let ny = time_tz::timezones::get_by_name("America/New_York").unwrap();
+        let berlin = time_tz::timezones::get_by_name("Europe/Berlin").unwrap();
+        let daily = Schedule {
+            kind: ScheduleKind::Daily { at: time!(02:30) },
+        };
+        assert_eq!(
+            daily.next_after(datetime!(2026-03-08 00:00 UTC), ny, None),
+            Some(datetime!(2026-03-09 06:30 UTC))
+        );
+        assert_eq!(
+            daily.next_after(datetime!(2026-03-29 00:00 UTC), berlin, None),
+            Some(datetime!(2026-03-30 00:30 UTC))
+        );
+        let repeat = Schedule {
+            kind: ScheduleKind::Daily { at: time!(01:30) },
+        };
+        assert_eq!(
+            repeat.next_after(datetime!(2026-11-01 00:00 UTC), ny, None),
+            Some(datetime!(2026-11-01 05:30 UTC))
+        );
+        assert_eq!(
+            repeat.next_after(datetime!(2026-11-01 05:30 UTC), ny, None),
+            Some(datetime!(2026-11-02 06:30 UTC))
+        );
+    }
+    #[test]
+    fn leap_day_year_end_and_clock_corrections() {
+        let tz = time_tz::timezones::get_by_name("UTC").unwrap();
+        let leap = Schedule {
+            kind: ScheduleKind::Cron {
+                expr: "0 0 0 29 2 *".into(),
+            },
+        };
+        assert_eq!(
+            leap.next_after(datetime!(2027-12-31 23:59 UTC), tz, None),
+            Some(datetime!(2028-02-29 00:00 UTC))
+        );
+        let daily = Schedule {
+            kind: ScheduleKind::Daily { at: time!(00:00) },
+        };
+        assert_eq!(
+            daily.next_after(datetime!(2026-12-31 23:59 UTC), tz, None),
+            Some(datetime!(2027-01-01 00:00 UTC))
+        );
+        let interval = Schedule {
+            kind: ScheduleKind::Interval {
+                every: Duration::hours(6),
+            },
+        };
+        let anchor = datetime!(2026-01-01 00:00 UTC);
+        for now in [
+            anchor - Duration::hours(1),
+            anchor + Duration::hours(23),
+            anchor + Duration::days(400),
+        ] {
+            let next = interval.next_after(now, tz, Some(anchor)).unwrap();
+            assert!(next > now);
+            assert_eq!((next - anchor).whole_seconds() % 21600, 0);
+        }
+    }
+}

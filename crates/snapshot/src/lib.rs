@@ -43,6 +43,7 @@ pub struct BtrfsSnapshotProvider {
 
 impl SnapshotProvider for ZfsSnapshotProvider {
     fn create(&self, name: &str) -> Result<SnapshotInfo, SnapshotError> {
+        validate_name(name)?;
         let snap = format!("{}@{name}", self.pool_dataset);
         run_cli("zfs", &["snapshot", snap.as_str()])?;
         Ok(SnapshotInfo {
@@ -52,12 +53,25 @@ impl SnapshotProvider for ZfsSnapshotProvider {
     }
 
     fn delete(&self, name: &str) -> Result<(), SnapshotError> {
+        validate_name(name)?;
         let snap = format!("{}@{name}", self.pool_dataset);
         run_cli("zfs", &["destroy", snap.as_str()])?;
         Ok(())
     }
 
     fn rollback(&self, name: &str) -> Result<(), SnapshotError> {
+        let mount = run_cli(
+            "zfs",
+            &["get", "-H", "-o", "value", "mountpoint", &self.pool_dataset],
+        )?;
+        if !Path::new(mount.trim()).is_absolute() {
+            return Err(SnapshotError::Unsupported(
+                "rollback requires an absolute ZFS mountpoint".into(),
+            ));
+        }
+        let _lock = storage::StorageLock::acquire(Path::new(mount.trim()))
+            .map_err(|e| SnapshotError::Command(e.to_string()))?;
+        validate_name(name)?;
         let snap = format!("{}@{name}", self.pool_dataset);
         run_cli("zfs", &["rollback", snap.as_str()])?;
         Ok(())
@@ -68,7 +82,7 @@ impl SnapshotProvider for ZfsSnapshotProvider {
             "zfs",
             &[
                 "list",
-                "-H",
+                "-Hp",
                 "-t",
                 "snapshot",
                 "-o",
@@ -84,6 +98,7 @@ impl SnapshotProvider for ZfsSnapshotProvider {
 
 impl SnapshotProvider for BtrfsSnapshotProvider {
     fn create(&self, name: &str) -> Result<SnapshotInfo, SnapshotError> {
+        validate_name(name)?;
         let sv = self.subvol.to_string_lossy().into_owned();
         let target = snapshot_path(&self.subvol, name)
             .to_string_lossy()
@@ -101,6 +116,7 @@ impl SnapshotProvider for BtrfsSnapshotProvider {
     }
 
     fn delete(&self, name: &str) -> Result<(), SnapshotError> {
+        validate_name(name)?;
         let target = snapshot_path(&self.subvol, name)
             .to_string_lossy()
             .into_owned();
@@ -109,17 +125,27 @@ impl SnapshotProvider for BtrfsSnapshotProvider {
     }
 
     fn rollback(&self, name: &str) -> Result<(), SnapshotError> {
-        // Restore: delete the live subvolume, re-snapshot the read-only one
-        // under the live name (standard btrfs rollback).
-        let sv = self.subvol.to_string_lossy().into_owned();
-        let target = snapshot_path(&self.subvol, name)
-            .to_string_lossy()
-            .into_owned();
-        run_cli("btrfs", &["subvolume", "delete", sv.as_str()])?;
+        validate_name(name)?;
+        let _lock = storage::StorageLock::acquire(&self.subvol)
+            .map_err(|e| SnapshotError::Command(e.to_string()))?;
+        let target = snapshot_path(&self.subvol, name);
+        let prepared = snapshot_path(
+            &self.subvol,
+            &format!("rollback-old-{}", synora_core::RunId::new()),
+        );
         run_cli(
             "btrfs",
-            &["subvolume", "snapshot", target.as_str(), sv.as_str()],
+            &[
+                "subvolume",
+                "snapshot",
+                &target.to_string_lossy(),
+                &prepared.to_string_lossy(),
+            ],
         )?;
+        // Linux atomic exchange: live never disappears. A mountpoint/unsupported
+        // filesystem fails without touching live. Keep the previous tree for recovery.
+        exchange_paths(&self.subvol, &prepared)?;
+        tracing::warn!(old = %prepared.display(), "rollback complete; previous live subvolume retained for operator verification");
         Ok(())
     }
 
@@ -152,7 +178,7 @@ pub fn provider_for(
             "dir storage does not support snapshots".into(),
         )),
         StorageKind::Zfs { pool, dataset, .. } => Ok(Box::new(ZfsSnapshotProvider {
-            pool_dataset: format!("{pool}/{dataset}"),
+            pool_dataset: storage::zfs_dataset_id(pool, dataset),
         })),
         StorageKind::Btrfs { subvol } => Ok(Box::new(BtrfsSnapshotProvider {
             subvol: PathBuf::from(subvol),
@@ -160,12 +186,58 @@ pub fn provider_for(
     }
 }
 
+fn validate_name(name: &str) -> Result<(), SnapshotError> {
+    if name.is_empty()
+        || name.len() > 200
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err(SnapshotError::Command("invalid snapshot name".into()));
+    }
+    Ok(())
+}
+
+fn exchange_paths(live: &Path, prepared: &Path) -> Result<(), SnapshotError> {
+    use std::os::unix::ffi::OsStrExt;
+    let a = std::ffi::CString::new(live.as_os_str().as_bytes())
+        .map_err(|e| SnapshotError::Command(e.to_string()))?;
+    let b = std::ffi::CString::new(prepared.as_os_str().as_bytes())
+        .map_err(|e| SnapshotError::Command(e.to_string()))?;
+    let rc = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            a.as_ptr(),
+            libc::AT_FDCWD,
+            b.as_ptr(),
+            libc::RENAME_EXCHANGE,
+        )
+    };
+    if rc != 0 {
+        return Err(SnapshotError::Command(format!(
+            "atomic rollback failed; live unchanged, prepared tree retained at {}: {}",
+            prepared.display(),
+            std::io::Error::last_os_error()
+        )));
+    }
+    if let Some(parent) = live.parent() {
+        std::fs::File::open(parent)
+            .and_then(|f| f.sync_all())
+            .map_err(|e| {
+                SnapshotError::Command(format!("rollback exchanged; directory sync failed: {e}"))
+            })?;
+    }
+    Ok(())
+}
+
 /// Snapshot name convention (spec §32): synora-YYYYMMDD-HHMMSS.
 pub fn snapshot_name(now: OffsetDateTime) -> String {
-    now.format(&time::macros::format_description!(
-        "synora-[year][month][day]-[hour][minute][second]"
-    ))
-    .unwrap_or_default()
+    let timestamp = now
+        .format(&time::macros::format_description!(
+            "synora-[year][month][day]-[hour][minute][second]"
+        ))
+        .unwrap_or_default();
+    format!("{timestamp}-{}", synora_core::RunId::new())
 }
 
 /// Retention pruning (spec §33): keep the newest N snapshots in each bucket.
@@ -279,6 +351,14 @@ fn iso_week_key(d: time::Date) -> (i32, u8) {
 fn parse_snapshot_name(name: &str, offset: UtcOffset) -> Option<OffsetDateTime> {
     let rest = name.strip_prefix("synora-")?;
     let (date_s, time_s) = rest.split_once('-')?;
+    let time_s = if let Some((time, suffix)) = time_s.split_once('-') {
+        if suffix.len() != 36 || !suffix.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
+            return None;
+        }
+        time
+    } else {
+        time_s
+    };
     if date_s.len() != 8 || time_s.len() != 6 {
         return None;
     }
@@ -344,15 +424,12 @@ fn parse_btrfs_list(out: &str) -> Vec<SnapshotInfo> {
 /// [`SnapshotError::Command`]; a missing binary (spawn `NotFound`) becomes
 /// [`SnapshotError::Unsupported`] with a clear message.
 fn run_cli(cmd: &str, args: &[&str]) -> Result<String, SnapshotError> {
-    let out = std::process::Command::new(cmd)
-        .args(args)
-        .output()
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => SnapshotError::Unsupported(format!(
-                "`{cmd}` is not installed; cannot manage snapshots"
-            )),
-            _ => SnapshotError::Command(format!("failed to run `{cmd}`: {e}")),
-        })?;
+    let out = command_runner::run_sync(cmd, args).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => {
+            SnapshotError::Unsupported(format!("`{cmd}` is not installed; cannot manage snapshots"))
+        }
+        _ => SnapshotError::Command(format!("failed to run `{cmd}`: {e}")),
+    })?;
     if !out.status.success() {
         return Err(SnapshotError::Command(format!(
             "`{cmd} {}` failed: {}",
@@ -376,7 +453,11 @@ mod tests {
         .unwrap()
         .assume_utc();
         SnapshotInfo {
-            name: snapshot_name(dt),
+            name: dt
+                .format(&format_description!(
+                    "synora-[year][month][day]-[hour][minute][second]"
+                ))
+                .unwrap(),
             created_at: dt.unix_timestamp(),
         }
     }
@@ -410,15 +491,11 @@ mod tests {
 
     #[test]
     fn snapshot_name_format() {
-        assert_eq!(
-            snapshot_name(datetime!(2026-08-16 12:34:56 UTC)),
-            "synora-20260816-123456"
-        );
-        // 24h clock, zero-padded.
-        assert_eq!(
-            snapshot_name(datetime!(2026-01-02 23:05:09 UTC)),
-            "synora-20260102-230509"
-        );
+        let now = datetime!(2026-08-16 12:34:56 UTC);
+        let first = snapshot_name(now);
+        assert!(first.starts_with("synora-20260816-123456-"));
+        assert_ne!(first, snapshot_name(now));
+        assert_eq!(parse_snapshot_name(&first, UtcOffset::UTC), Some(now));
     }
 
     #[test]
@@ -655,5 +732,36 @@ mod tests {
             Err(SnapshotError::Unsupported(_))
         ));
         assert!(matches!(p.list(), Err(SnapshotError::Unsupported(_))));
+    }
+}
+
+#[cfg(test)]
+mod rollback_tests {
+    use super::*;
+    #[test]
+    fn atomic_exchange_preserves_old_tree_and_failure_preserves_live() {
+        let dir =
+            std::env::temp_dir().join(format!("synora-rollback-{}", synora_core::RunId::new()));
+        let live = dir.join("live");
+        let prepared = dir.join("prepared");
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::create_dir(&prepared).unwrap();
+        std::fs::write(live.join("content"), "old").unwrap();
+        std::fs::write(prepared.join("content"), "restored").unwrap();
+        exchange_paths(&live, &prepared).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(live.join("content")).unwrap(),
+            "restored"
+        );
+        assert_eq!(
+            std::fs::read_to_string(prepared.join("content")).unwrap(),
+            "old"
+        );
+        assert!(exchange_paths(&live, &dir.join("missing")).is_err());
+        assert_eq!(
+            std::fs::read_to_string(live.join("content")).unwrap(),
+            "restored"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

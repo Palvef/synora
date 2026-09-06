@@ -10,7 +10,6 @@ use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
-use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
@@ -209,30 +208,9 @@ async fn collect_container_stats() -> HashMap<String, ContainerStats> {
     .kill_on_drop(true)
     .stdout(Stdio::piped())
     .stderr(Stdio::null());
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(_) => return HashMap::new(),
-    };
-    let mut stdout = match child.stdout.take() {
-        Some(pipe) => pipe,
-        None => {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
-            return HashMap::new();
-        }
-    };
-    let mut buf = Vec::new();
-    tokio::select! {
-        _ = tokio::time::sleep(Duration::from_secs(6)) => {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
-            HashMap::new()
-        }
-        n = stdout.read_to_end(&mut buf) => {
-            let _ = n;
-            let _ = child.wait().await;
-            parse_stats_table(&buf)
-        }
+    match command_runner::run(&mut cmd, Duration::from_secs(6)).await {
+        Ok(out) if out.status.success() => parse_stats_table(&out.stdout),
+        _ => HashMap::new(),
     }
 }
 
@@ -322,24 +300,96 @@ fn should_bind_host_storage_path(host_storage: &str) -> bool {
     host_storage != "/data" && !path.starts_with("/data")
 }
 
+/// Only bounded resource settings and container environment/workdir options
+/// may be passed through. Mounts and namespace controls have dedicated checks.
+fn validate_docker_options(
+    options: &[String],
+    volumes: &[String],
+    network: Option<&str>,
+) -> Result<(), ProviderError> {
+    let reject = || {
+        ProviderError::Config("unsafe Docker option, mount, or host namespace; use an isolated container and read-only extra volumes".into())
+    };
+    if network.is_some_and(|v| v.trim() == "host" || v.trim().starts_with("container:")) {
+        return Err(reject());
+    }
+    let mut iter = options.iter();
+    while let Some(arg) = iter.next() {
+        let (key, inline) = arg
+            .split_once('=')
+            .map(|(a, b)| (a, Some(b)))
+            .unwrap_or((arg.as_str(), None));
+        if !matches!(
+            key,
+            "--cpus"
+                | "--memory"
+                | "--memory-swap"
+                | "--pids-limit"
+                | "--user"
+                | "--workdir"
+                | "--env"
+                | "--pull"
+                | "--label"
+        ) {
+            return Err(reject());
+        }
+        let value = inline
+            .or_else(|| iter.next().map(String::as_str))
+            .ok_or_else(reject)?;
+        if value.is_empty() || value.starts_with('-') {
+            return Err(reject());
+        }
+    }
+    for volume in volumes {
+        let parts: Vec<_> = volume.split(':').collect();
+        if parts.len() != 3 || parts[2] != "ro" {
+            return Err(reject());
+        }
+        let source = std::path::Path::new(parts[0])
+            .canonicalize()
+            .map_err(|_| reject())?;
+        let metadata = source.metadata().map_err(|_| reject())?;
+        if (!metadata.is_file() && !metadata.is_dir())
+            || !std::path::Path::new(parts[1]).is_absolute()
+            || source == std::path::Path::new("/")
+            || ["/proc", "/sys", "/dev", "/run", "/var/run", "/etc", "/root"]
+                .iter()
+                .any(|p| source.starts_with(p))
+            || source.file_name().is_some_and(|n| n == "docker.sock")
+        {
+            return Err(reject());
+        }
+    }
+    Ok(())
+}
+
 pub async fn run_named_container(
     spec: DockerRunSpec,
     ctx: &SyncContext,
 ) -> Result<SyncResult, ProviderError> {
+    validate_docker_options(
+        &spec.extra_options,
+        &spec.extra_volumes,
+        spec.network.as_deref(),
+    )?;
     let mut cmd = Command::new("docker");
-    cmd.arg("run");
+    cmd.args([
+        "run",
+        "--security-opt=no-new-privileges",
+        "--cap-drop=ALL",
+        "--pids-limit=512",
+    ]);
     // Container name follows the `synora-job-<job>` convention
     // (tunasync uses tunasync-job-<mirror>; operator requirement).
     // A leftover container from a killed worker would collide with
     // --name — remove it first (docker run --rm cleans up after itself,
     // this only handles crash leftovers).
     let cname = format!("synora-job-{}", ctx.job_name);
-    let _ = tokio::process::Command::new("docker")
-        .args(["rm", "-f", &cname])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await;
+    let _ = command_runner::run(
+        tokio::process::Command::new("docker").args(["rm", "-f", &cname]),
+        command_runner::DEFAULT_TIMEOUT,
+    )
+    .await;
     cmd.arg("--name").arg(&cname);
     if let Some(net) = spec
         .network
@@ -776,5 +826,36 @@ mod tests {
             map.get("all_proxy").map(String::as_str),
             Some("socks5h://192.0.2.10:14001")
         );
+    }
+}
+
+#[cfg(test)]
+mod sandbox_tests {
+    use super::*;
+    #[test]
+    fn rejects_host_capabilities_and_unknown_flags() {
+        for args in [
+            vec!["--privileged"],
+            vec!["--pid=host"],
+            vec!["--network=host"],
+            vec!["-v", "/:/host"],
+            vec!["--security-opt=seccomp=unconfined"],
+            vec!["--env-file=/etc/shadow"],
+        ] {
+            assert!(validate_docker_options(
+                &args.into_iter().map(String::from).collect::<Vec<_>>(),
+                &[],
+                None
+            )
+            .is_err());
+        }
+        assert!(validate_docker_options(&[], &[], Some("host")).is_err());
+        assert!(validate_docker_options(
+            &["--cpus=2".into(), "--memory".into(), "2g".into()],
+            &[],
+            Some("bridge")
+        )
+        .is_ok());
+        assert!(validate_docker_options(&[], &["/:/host:ro".into()], None).is_err());
     }
 }

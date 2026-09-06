@@ -463,6 +463,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "command-runner"
+version = "0.1.9"
+dependencies = [
+ "libc",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "compact_str"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -753,6 +762,7 @@ name = "engine"
 version = "0.1.9"
 dependencies = [
  "axum",
+ "command-runner",
  "config",
  "db",
  "netroute",
@@ -1598,6 +1608,7 @@ dependencies = [
  "synora-core",
  "time",
  "tokio",
+ "tower",
  "tracing",
  "tracing-subscriber",
 ]
@@ -1677,6 +1688,7 @@ name = "netroute"
 version = "0.1.9"
 dependencies = [
  "axum",
+ "command-runner",
  "config",
  "libc",
  "regex",
@@ -2083,6 +2095,7 @@ dependencies = [
 name = "provider"
 version = "0.1.9"
 dependencies = [
+ "command-runner",
  "httpfetch",
  "libc",
  "parser",
@@ -2778,12 +2791,14 @@ name = "snapshot"
 version = "0.1.9"
 dependencies = [
  "axum",
+ "command-runner",
  "config",
  "libc",
  "regex",
  "reqwest",
  "serde",
  "serde_json",
+ "storage",
  "synora-core",
  "thiserror 2.0.20",
  "time",
@@ -2819,6 +2834,7 @@ name = "storage"
 version = "0.1.9"
 dependencies = [
  "axum",
+ "command-runner",
  "config",
  "libc",
  "regex",
@@ -3402,6 +3418,8 @@ dependencies = [
  "synora-core",
  "time",
  "tokio",
+ "toml",
+ "toml_edit",
 ]
 
 [[package]]

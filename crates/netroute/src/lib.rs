@@ -786,7 +786,8 @@ async fn probe_command(
     for (k, v) in env {
         cmd.env(k, v);
     }
-    let healthy = match tokio::time::timeout(timeout, cmd.output()).await {
+    let healthy = match tokio::time::timeout(timeout, command_runner::run(&mut cmd, timeout)).await
+    {
         Ok(Ok(o)) if o.status.success() => true,
         Ok(Ok(o)) => {
             tracing::warn!(proxy = name, status = ?o.status, "probe: check command failed");

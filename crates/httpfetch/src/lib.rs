@@ -4,9 +4,9 @@
 //! upstream. Planning is parser-driven ([`parser`] crate) and yields a
 //! [`Plan`]; [`Fetcher::execute`] runs it concurrently with a cancel token.
 //!
-//! Failure discipline: a broken *file* never aborts a sync — it is logged
-//! and skipped ([`FetchStats::files_skipped`]). Only an unreachable base
-//! URL (the first index request) or explicit cancellation returns an error.
+//! Failed files are counted and the provider fails the run. Incomplete
+//! listings also fail the run; destructive deletes are suppressed after any
+//! transfer/planning failure. Successful files are retained for the next retry.
 
 use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -62,7 +62,11 @@ fn append_log(log_file: Option<&std::path::Path>, line: &str) {
         .append(true)
         .open(path)
     {
-        let _ = writeln!(f, "{line}");
+        let remaining = (16 * 1024 * 1024u64)
+            .saturating_sub(f.metadata().map(|m| m.len()).unwrap_or(u64::MAX))
+            as usize;
+        let text = format!("{line}\n");
+        let _ = f.write_all(&text.as_bytes()[..text.len().min(remaining)]);
     }
 }
 
@@ -107,6 +111,14 @@ pub struct FetchStats {
     pub total_size_hint: Option<u64>,
     /// Per-file detail lines (downloaded/skipped/deleted) for run logs.
     pub log_lines: Vec<String>,
+}
+
+impl FetchStats {
+    fn record_log(&mut self, line: String) {
+        if self.log_lines.len() < 2048 {
+            self.log_lines.push(line);
+        }
+    }
 }
 
 /// A planned sync: what to download (url → destination), what to delete,
@@ -454,6 +466,7 @@ impl Fetcher {
         }
         let mut stats = FetchStats {
             total_size_hint: plan.total_size_hint,
+            files_failed: u32::from(plan.incomplete),
             ..FetchStats::default()
         };
         let transfer_counter = self
@@ -549,7 +562,7 @@ impl Fetcher {
                         synora_rate(bytes, elapsed.as_secs_f64())
                     );
                     append_log(log_file, &line);
-                    stats.log_lines.push(line);
+                    stats.record_log(line);
                 }
                 Ok(Err((FetchError::Cancelled, _, _, _))) => cancelled = true,
                 Ok(Err((e, url, dest, elapsed))) => {
@@ -561,7 +574,7 @@ impl Fetcher {
                         elapsed.as_secs_f64()
                     );
                     append_log(log_file, &line);
-                    stats.log_lines.push(line);
+                    stats.record_log(line);
                 }
                 Err(_) if cancelled => {}
                 Err(error) => {
@@ -600,7 +613,8 @@ impl Fetcher {
         if cancelled {
             return Err(FetchError::Cancelled);
         }
-        for path in &plan.deletes {
+        let allow_deletes = stats.files_failed == 0;
+        for path in plan.deletes.iter().filter(|_| allow_deletes) {
             if cancel.is_cancelled() {
                 return Err(FetchError::Cancelled);
             }
@@ -611,7 +625,8 @@ impl Fetcher {
                     error_chain(&e)
                 );
                 stats.files_skipped += 1;
-                stats.log_lines.push(format!(
+                stats.files_failed += 1;
+                stats.record_log(format!(
                     "skipped delete of {}: {}",
                     path.display(),
                     error_chain(&e)
@@ -619,7 +634,7 @@ impl Fetcher {
                 continue;
             }
             stats.files_deleted += 1;
-            stats.log_lines.push(format!("deleted {}", path.display()));
+            stats.record_log(format!("deleted {}", path.display()));
         }
         // Symlink entries are mirrored after downloads and deletes so a
         // stale regular file at the same path is gone before the link goes
@@ -633,15 +648,14 @@ impl Fetcher {
             match ensure_symlink(dest, target).await {
                 Ok(true) => {
                     stats.files_symlinked += 1;
-                    stats
-                        .log_lines
-                        .push(format!("symlinked {} -> {target}", dest.display()));
+                    stats.record_log(format!("symlinked {} -> {target}", dest.display()));
                 }
                 Ok(false) => {}
                 Err(e) => {
                     tracing::warn!("skipping symlink {}: {}", dest.display(), error_chain(&e));
                     stats.files_skipped += 1;
-                    stats.log_lines.push(format!(
+                    stats.files_failed += 1;
+                    stats.record_log(format!(
                         "skipped symlink {}: {}",
                         dest.display(),
                         error_chain(&e)

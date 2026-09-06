@@ -65,7 +65,13 @@ impl PgDb {
             .execute(&sql, &refs)
             .await
             .map(|n| n as usize)
-            .map_err(|e| DbError::Sql(e.to_string()))
+            .map_err(|e| {
+                if e.code() == Some(&tokio_postgres::error::SqlState::UNIQUE_VIOLATION) {
+                    DbError::Conflict
+                } else {
+                    DbError::Sql(e.to_string())
+                }
+            })
     }
 
     pub async fn query(
@@ -89,19 +95,31 @@ impl PgDb {
             let mut cells = Vec::with_capacity(row.len());
             for (i, col) in row.columns().iter().enumerate() {
                 let value = match col.type_() {
-                    &tokio_postgres::types::Type::INT2
-                    | &tokio_postgres::types::Type::INT4
-                    | &tokio_postgres::types::Type::INT8 => row
+                    &tokio_postgres::types::Type::INT2 => row
+                        .try_get::<_, i16>(i)
+                        .ok()
+                        .map(|v| DbValue::Int(v as i64))
+                        .unwrap_or(DbValue::Null),
+                    &tokio_postgres::types::Type::INT4 => row
+                        .try_get::<_, i32>(i)
+                        .ok()
+                        .map(|v| DbValue::Int(v as i64))
+                        .unwrap_or(DbValue::Null),
+                    &tokio_postgres::types::Type::INT8 => row
                         .try_get::<_, i64>(i)
                         .ok()
                         .map(DbValue::Int)
                         .unwrap_or(DbValue::Null),
-                    &tokio_postgres::types::Type::FLOAT4 | &tokio_postgres::types::Type::FLOAT8 => {
-                        row.try_get::<_, f64>(i)
-                            .ok()
-                            .map(|f| DbValue::Text(f.to_string()))
-                            .unwrap_or(DbValue::Null)
-                    }
+                    &tokio_postgres::types::Type::FLOAT4 => row
+                        .try_get::<_, f32>(i)
+                        .ok()
+                        .map(|v| DbValue::Text(v.to_string()))
+                        .unwrap_or(DbValue::Null),
+                    &tokio_postgres::types::Type::FLOAT8 => row
+                        .try_get::<_, f64>(i)
+                        .ok()
+                        .map(|f| DbValue::Text(f.to_string()))
+                        .unwrap_or(DbValue::Null),
                     _ => row
                         .try_get::<_, String>(i)
                         .ok()
@@ -168,7 +186,14 @@ impl tokio_postgres::types::ToSql for PgParam {
         out: &mut bytes::BytesMut,
     ) -> Result<tokio_postgres::types::IsNull, Box<dyn std::error::Error + Sync + Send>> {
         match self {
-            PgParam::Int(i) => i.to_sql(ty, out),
+            PgParam::Int(i) => match *ty {
+                tokio_postgres::types::Type::INT2 => i16::try_from(*i)?.to_sql(ty, out),
+                tokio_postgres::types::Type::INT4 => i32::try_from(*i)?.to_sql(ty, out),
+                _ => i.to_sql(ty, out),
+            },
+            PgParam::Real(f) if *ty == tokio_postgres::types::Type::FLOAT4 => {
+                (*f as f32).to_sql(ty, out)
+            }
             PgParam::Real(f) => f.to_sql(ty, out),
             PgParam::Text(s) => s.to_sql(ty, out),
             PgParam::Null => Ok(tokio_postgres::types::IsNull::Yes),
@@ -186,12 +211,7 @@ impl tokio_postgres::types::ToSql for PgParam {
         ty: &tokio_postgres::types::Type,
         out: &mut bytes::BytesMut,
     ) -> Result<tokio_postgres::types::IsNull, Box<dyn std::error::Error + Sync + Send>> {
-        match self {
-            PgParam::Int(i) => i.to_sql_checked(ty, out),
-            PgParam::Real(f) => f.to_sql_checked(ty, out),
-            PgParam::Text(s) => s.to_sql_checked(ty, out),
-            PgParam::Null => Ok(tokio_postgres::types::IsNull::Yes),
-        }
+        self.to_sql(ty, out)
     }
 }
 

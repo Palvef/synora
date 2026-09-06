@@ -12,6 +12,8 @@ name = "synora-tui"
 path = "src/main.rs"
 
 [dependencies]
+toml.workspace = true
+toml_edit.workspace = true
 synora-core.workspace = true
 netroute.workspace = true
 glob.workspace = true

@@ -1,82 +1,67 @@
-//! Per-run log files (spec §49): `current.log` holds the latest run,
-//! `YYYY-MM-DD.log` accumulates. Plain std writes are fine at mirror-sync
-//! scale (ponytail: switch to a blocking writer if logs become a bottleneck).
+//! Unique per-run logs with an atomic current.log symlink, bounded output,
+//! and retention. Legacy daily logs expire after 30 days.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 
 pub struct RunLogger {
-    current: File,
-    dated: File,
-    /// Per-run file, tunasync naming: `<job>_<YYYY-MM-DD_HH_MM>.log`
-    /// inside the job's own directory (`log_dir/<job>/`).
     run: File,
 }
-
+const MAX_RUN_LOG_BYTES: u64 = 16 * 1024 * 1024;
 impl RunLogger {
     pub fn open(log_dir: &Path, job_name: &str) -> std::io::Result<RunLogger> {
         let dir = log_dir.join(job_name);
         std::fs::create_dir_all(&dir)?;
-        let current = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(dir.join("current.log"))?;
-        let today = time::OffsetDateTime::now_utc().date();
-        let dated = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(dir.join(format!("{today}.log")))?;
-        // Per-run log (tunasync convention: one file per run, named with
-        // the mirror name and start timestamp).
         let now = time::OffsetDateTime::now_utc();
-        let run_ts = now
-            .format(
-                &time::format_description::parse_borrowed::<2>(
-                    "[year]-[month]-[day]_[hour]_[minute]",
-                )
-                .unwrap(),
-            )
-            .unwrap_or_else(|_| "unknown".into());
+        let filename = format!(
+            "{job_name}_{}-{}.log",
+            now.unix_timestamp(),
+            synora_core::RunId::new()
+        );
         let run = OpenOptions::new()
-            .create(true)
+            .create_new(true)
             .append(true)
-            .open(dir.join(format!("{job_name}_{run_ts}.log")))?;
-        // Keep the latest 20 per-run logs; older ones are removed (user
-        // requirement).
+            .open(dir.join(&filename))?;
+        let link = dir.join(format!(".current-{}", synora_core::RunId::new()));
+        std::os::unix::fs::symlink(&filename, &link)?;
+        std::fs::rename(&link, dir.join("current.log"))?;
         prune_run_logs(&dir, job_name, 20);
-        Ok(RunLogger {
-            current,
-            dated,
-            run,
-        })
+        prune_daily_logs(&dir);
+        Ok(Self { run })
     }
-
-    /// One timestamped line, written to both files.
     pub fn line(&mut self, msg: &str) -> std::io::Result<()> {
-        let ts = time::OffsetDateTime::now_utc();
-        let fmt = ts
+        let ts = time::OffsetDateTime::now_utc()
             .format(&time::format_description::well_known::Rfc3339)
-            .unwrap_or_else(|_| "?".into());
-        let line = format!("{fmt} {msg}\n");
-        self.current.write_all(line.as_bytes())?;
-        self.dated.write_all(line.as_bytes())?;
-        self.run.write_all(line.as_bytes())?;
-        Ok(())
+            .unwrap_or_default();
+        self.raw(format!("{ts} {msg}\n").as_bytes())
     }
-
-    /// Raw provider output (stdout/stderr), written to both files.
     pub fn raw(&mut self, data: &[u8]) -> std::io::Result<()> {
-        self.current.write_all(data)?;
-        self.dated.write_all(data)?;
-        self.run.write_all(data)?;
-        if !data.is_empty() && data.last() != Some(&b'\n') {
-            self.current.write_all(b"\n")?;
-            self.dated.write_all(b"\n")?;
-            self.run.write_all(b"\n")?;
+        let remaining = MAX_RUN_LOG_BYTES.saturating_sub(self.run.metadata()?.len()) as usize;
+        self.run.write_all(&data[..data.len().min(remaining)])
+    }
+}
+fn prune_daily_logs(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let cutoff = time::OffsetDateTime::now_utc().date() - time::Duration::days(30);
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|t| t.is_file()) {
+            continue;
         }
-        Ok(())
+        let name = entry.file_name();
+        let Some(date) = name.to_str().and_then(|s| s.strip_suffix(".log")) else {
+            continue;
+        };
+        if time::Date::parse(
+            date,
+            &time::macros::format_description!("[year]-[month]-[day]"),
+        )
+        .is_ok_and(|d| d < cutoff)
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
     }
 }
 
@@ -90,21 +75,43 @@ pub fn walk_size(root: &Path) -> u64 {
 /// on-disk mirror) and never fall back to a full tree walk — alpine/AOSP
 /// are multi-terabyte.
 pub fn measure_repo_size(root: &Path) -> Option<u64> {
-    zfs_used_for(root)
+    zfs_used_for(root).or_else(|| btrfs_used_for(root))
 }
 
 /// Parse `zfs list -Hp -o used,mountpoint` and pick the longest mountpoint
 /// that equals `root` (exact match only — the pool root would otherwise
 /// report 70T+ for every job).
 pub fn zfs_used_for(root: &Path) -> Option<u64> {
-    let out = std::process::Command::new("zfs")
-        .args(["list", "-Hp", "-o", "used,mountpoint"])
-        .output()
-        .ok()?;
+    let out = command_runner::run_sync("zfs", &["list", "-Hp", "-o", "used,mountpoint"]).ok()?;
     if !out.status.success() {
         return None;
     }
     parse_zfs_used(&String::from_utf8_lossy(&out.stdout), root)
+}
+
+/// qgroup referenced bytes for this exact subvolume; unavailable quotas return
+/// unknown, never the whole filesystem's usage for one repository.
+fn btrfs_used_for(root: &Path) -> Option<u64> {
+    let path = root.to_str()?;
+    let id = command_runner::run_sync("btrfs", &["inspect-internal", "rootid", path]).ok()?;
+    if !id.status.success() {
+        return None;
+    }
+    let id: u64 = String::from_utf8_lossy(&id.stdout).trim().parse().ok()?;
+    let out = command_runner::run_sync("btrfs", &["qgroup", "show", "--raw", path]).ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let key = format!("0/{id}");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.split_whitespace();
+            if fields.next()? != key {
+                return None;
+            }
+            fields.next()?.parse().ok()
+        })
 }
 
 pub fn parse_zfs_used(text: &str, root: &Path) -> Option<u64> {

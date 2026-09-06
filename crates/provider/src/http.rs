@@ -51,7 +51,7 @@ impl HttpProvider {
                             if let Some(prev) = last {
                                 if dt >= 0.5 {
                                     let bps = now.saturating_sub(prev) as f64 / dt;
-                                    usage.lock().unwrap().record_bandwidth(bps);
+                                    usage.lock().unwrap_or_else(|e| e.into_inner()).record_bandwidth(bps);
                                 }
                             }
                             last = Some(now);

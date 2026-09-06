@@ -9,9 +9,9 @@ mod schema;
 pub use error::ConfigError;
 pub use jobfile::remove_job_block;
 pub use loader::{
-    ApiConfig, ApiToken, CgroupConfig, CliOverrides, ConfigLoader, DaemonConfig, DbConfig, DbKind,
-    EgressConfig, EgressGroupConfig, NotificationConfig, ProxyConfig, ProxyGroupConfig, ProxyKind,
-    ResolvedConfig, StorageConfig, StorageKind, TlsConfig,
+    validate_job_text, ApiConfig, ApiToken, CgroupConfig, CliOverrides, ConfigLoader, DaemonConfig,
+    DbConfig, DbKind, EgressConfig, EgressGroupConfig, NotificationConfig, ProxyConfig,
+    ProxyGroupConfig, ProxyKind, ResolvedConfig, StorageConfig, StorageKind, TlsConfig,
 };
 
 use std::path::PathBuf;

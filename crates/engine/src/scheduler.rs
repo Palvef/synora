@@ -10,6 +10,7 @@ use synora_core::job::JobStatus;
 /// while offline. `next_run >= boot` means they were synced at this boot —
 /// those fire normally. Missed ones follow the job's misfire policy (spec §7).
 pub async fn boot_pass(engine: &Arc<Engine>, boot: i64) {
+    let _config = engine.config_gate.read().await;
     let now = unix_now();
     let Ok(schedules) = engine.store.all_schedules().await else {
         return;
@@ -26,7 +27,7 @@ pub async fn boot_pass(engine: &Arc<Engine>, boot: i64) {
                 tracing::info!(
                     "job `{name}`: missed run, dispatching immediately (misfire=run-immediately)"
                 );
-                if let Err(e) = engine.dispatch(&name, false).await {
+                if let Err(e) = engine.dispatch_current(&name, false).await {
                     tracing::warn!("misfire dispatch of `{name}` failed: {e}");
                 }
                 recompute_next(engine, &name).await;
@@ -41,6 +42,7 @@ pub async fn boot_pass(engine: &Arc<Engine>, boot: i64) {
 
 /// Retries whose wait elapsed: back to the queue.
 pub async fn retry_tick(engine: &Arc<Engine>, now: i64) {
+    let _config = engine.config_gate.read().await;
     let Ok(due) = engine.store.due_retries(now).await else {
         return;
     };
@@ -73,7 +75,7 @@ pub async fn retry_tick(engine: &Arc<Engine>, now: i64) {
         }
         let _ = engine
             .store
-            .set_run_status(&run.id, JobStatus::Queued)
+            .db().execute("UPDATE job_runs SET status = 'QUEUED' WHERE id = ? AND status = 'RETRYING' AND retry_count = ? AND next_retry_at <= ?", &[run.id.clone().into(), (run.retry_count as i64).into(), now.into()])
             .await;
         tracing::info!(
             "job `{}`: retry re-queued (attempt {})",
@@ -85,6 +87,7 @@ pub async fn retry_tick(engine: &Arc<Engine>, now: i64) {
 
 /// Dispatch jobs whose schedule is due (strictly future next_run afterwards).
 pub async fn dispatch_due(engine: &Arc<Engine>, now: i64) {
+    let _config = engine.config_gate.read().await;
     let Ok(schedules) = engine.store.all_schedules().await else {
         return;
     };
@@ -95,7 +98,7 @@ pub async fn dispatch_due(engine: &Arc<Engine>, now: i64) {
         if next_run > now {
             continue;
         }
-        if let Err(e) = engine.dispatch(&name, false).await {
+        if let Err(e) = engine.dispatch_current(&name, false).await {
             tracing::warn!("dispatch of `{name}` failed: {e}");
         }
         recompute_next(engine, &name).await;
@@ -132,6 +135,7 @@ async fn recompute_next(engine: &Arc<Engine>, job_name: &str) {
 
 /// Claim QUEUED runs (concurrency gates) and spawn execution tasks.
 pub async fn execute_queued(engine: &Arc<Engine>) {
+    let _config = engine.config_gate.read().await;
     let Ok(queued) = engine.store.queued_runs(crate::engine::LOCAL_WORKER).await else {
         return;
     };
@@ -168,7 +172,7 @@ pub async fn execute_queued(engine: &Arc<Engine>) {
         };
         // Per-job concurrency gate.
         {
-            let active = engine.active.lock().unwrap();
+            let active = engine.active.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(n) = active.get(&run.job_id) {
                 if *n >= job.max_concurrency as usize {
                     continue;

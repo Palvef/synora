@@ -78,6 +78,8 @@ pub struct RegisterResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HeartbeatRequest {
+    #[serde(default)]
+    pub active_runs: Vec<RunLease>,
     pub status: String, // "idle" | "running"
     pub jobs_running: u32,
     /// Live per-job resource samples so the manager can export CPU/memory
@@ -96,6 +98,12 @@ pub struct HeartbeatRequest {
     /// distributed-worker logs before a run completes.
     #[serde(default)]
     pub logs: Vec<JobLogSample>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RunLease {
+    pub run_id: String,
+    pub lease_token: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -123,6 +131,8 @@ pub struct JobResourceSample {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HeartbeatResponse {
+    #[serde(default)]
+    pub cancel_runs: Vec<String>,
     pub assignment: Option<RunAssignment>,
     /// Additional queued runs the worker may claim in this beat, up to free
     /// slots. Older workers ignore this and still use `assignment`.
@@ -148,6 +158,8 @@ impl HeartbeatResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunAssignment {
+    #[serde(default)]
+    pub lease_token: String,
     pub run_id: String,
     /// Retry generation of this assignment. Workers echo it in completion
     /// requests so a delayed response from an older attempt cannot finish a
@@ -164,11 +176,13 @@ pub struct RunAssignment {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompleteRequest {
+    #[serde(default)]
+    pub lease_token: String,
     /// Worker id of the caller (identity check on the manager).
     #[serde(default)]
     pub worker_id: String,
-    /// Retry generation received in [`RunAssignment`]. `None` is accepted
-    /// for rolling compatibility with older workers.
+    /// Retry generation received in [`RunAssignment`]. Required by the manager;
+    /// the optional wire field lets it reject legacy requests with HTTP 409.
     #[serde(default)]
     pub attempt: Option<u32>,
     pub status: String, // "success" | "failed" | "cancelled"
@@ -343,7 +357,7 @@ impl Client {
         let resp = self
             .send(
                 reqwest::Method::POST,
-                &format!("{API_V1}/runs/{run_id}/claim?worker={worker_id}"),
+                &format!("{API_V1}/runs/{run_id}/claim?worker={worker_id}&protocol=2"),
                 None::<&()>,
             )
             .await?;

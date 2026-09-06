@@ -7,6 +7,7 @@ version = "0.1.9"
 edition = "2021"
 
 [workspace.dependencies]
+command-runner = { path = "crates/command-runner" }
 # --- internal (path) ---
 synora-core = { path = "crates/synora-core" }
 config = { path = "crates/config" }

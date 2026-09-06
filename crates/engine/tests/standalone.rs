@@ -770,3 +770,62 @@ storage = "{}"
     let metrics = engine.metrics.render();
     assert!(!metrics.contains("job=\"gone\""), "{metrics}");
 }
+
+#[tokio::test]
+async fn snapshot_failure_defaults_to_fail_before_provider_writes() {
+    for (policy, expected) in [
+        ("fail", synora_core::JobStatus::Failed),
+        ("warn", synora_core::JobStatus::Success),
+        ("ignore", synora_core::JobStatus::Success),
+    ] {
+        let dir = temp_dir(policy);
+        write(
+            &dir,
+            "jobs/protected.toml",
+            &format!(
+                r#"[[jobs]]
+name = "protected"
+schedule = "manual"
+provider = "script"
+command = "touch marker"
+storage = "{}"
+retry = 0
+[jobs.snapshot]
+policy = "before-sync"
+failure = "{policy}"
+"#,
+                dir.join("repo").display()
+            ),
+        );
+        write(&dir, "synora.toml", &config_text(&dir));
+        let engine = engine_for(&dir).await;
+        engine.sync_config().await.unwrap();
+        let id = engine.dispatch("protected", true).await.unwrap();
+        assert_eq!(wait_terminal(&engine, &id, 10).await, expected);
+        assert_eq!(dir.join("repo/marker").exists(), policy != "fail");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn lost_worker_defaults_to_hold_until_manual_recovery() {
+    let dir = temp_dir("lost-hold");
+    write(&dir, "jobs/hold.toml", &format!("[[jobs]]\nname = \"hold\"\nschedule = \"manual\"\nprovider = \"script\"\ncommand = \"true\"\nstorage = \"{}\"\n", dir.join("repo").display()));
+    write(&dir, "synora.toml", &config_text(&dir));
+    let engine = engine_for(&dir).await;
+    engine.sync_config().await.unwrap();
+    let id = engine.dispatch("hold", true).await.unwrap();
+    assert!(engine
+        .store
+        .claim_run(&id, engine::engine::LOCAL_WORKER)
+        .await
+        .unwrap());
+    engine.store.set_run_lost(&id).await.unwrap();
+    assert!(engine
+        .dispatch("hold", false)
+        .await
+        .unwrap_err()
+        .contains("is held"));
+    assert_ne!(engine.dispatch("hold", true).await.unwrap(), id);
+    std::fs::remove_dir_all(dir).unwrap();
+}

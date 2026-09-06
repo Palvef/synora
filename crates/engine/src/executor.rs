@@ -117,7 +117,11 @@ pub async fn execute_run(
 
     let cancel = CancellationToken::new();
     engine.register_run(&job.name, cancel.clone());
-    let netroute = engine.netroute.read().unwrap().clone();
+    let netroute = engine
+        .netroute
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
     let outcome = run_once(
         &job,
         &run_id,
@@ -155,15 +159,60 @@ pub async fn run_once(
     manager_url: Option<String>,
 ) -> RunOutcome {
     let hook_job = resolve_local_job(job, storage_ctx);
-    let hook_ctx = hook_ctx(
+    let lock_path = storage_ctx
+        .and_then(|ctx| ctx.storage_for(&hook_job))
+        .map(|(_, cfg)| match &cfg.kind {
+            config::StorageKind::Zfs { pool, dataset, .. } => {
+                cfg.mountpoint.clone().unwrap_or_else(|| {
+                    std::path::PathBuf::from(format!("/{}", storage::zfs_dataset_id(pool, dataset)))
+                })
+            }
+            config::StorageKind::Btrfs { subvol } => std::path::PathBuf::from(subvol),
+            config::StorageKind::Dir => hook_job.storage.clone(),
+        })
+        .unwrap_or_else(|| hook_job.storage.clone());
+    let _storage_lock = match storage::StorageLock::acquire(&lock_path) {
+        Ok(lock) => lock,
+        Err(e) => {
+            return RunOutcome {
+                result: Err(ProviderError::Other(e.to_string())),
+                duration_secs: 0,
+                mem_peak: None,
+                cpu_seconds: None,
+            }
+        }
+    };
+    let lock_file = match _storage_lock.file() {
+        Ok(file) => file,
+        Err(e) => {
+            return RunOutcome {
+                result: Err(ProviderError::Other(e.to_string())),
+                duration_secs: 0,
+                mem_peak: None,
+                cpu_seconds: None,
+            }
+        }
+    };
+    if cancel.is_cancelled() {
+        return RunOutcome {
+            result: Err(ProviderError::Cancelled),
+            duration_secs: 0,
+            mem_peak: None,
+            cpu_seconds: None,
+        };
+    }
+    let mut hook_ctx = hook_ctx(
         &hook_job,
         run_id,
         worker,
         manager_proxy_env.clone().unwrap_or_default(),
         manager_url.clone(),
     );
-    let outcome = run_once_inner(
+    hook_ctx.cancel = cancel.clone();
+    hook_ctx.storage_lock = Some(lock_file.clone());
+    let execution = Box::pin(run_once_inner(
         &hook_job,
+        Some(lock_file.clone()),
         run_id,
         worker,
         cancel,
@@ -174,8 +223,8 @@ pub async fn run_once(
         shared_usage,
         scripts_image,
         manager_url,
-    )
-    .await;
+    ));
+    let outcome = command_runner::with_storage_lock(lock_file.clone(), execution).await;
     // Terminal hooks belong to the execution side. Keeping them in the
     // standalone DB tail meant distributed workers never ran on_success or
     // on_failure at all.
@@ -188,11 +237,14 @@ pub async fn run_once(
     } else {
         &hook_job.hooks.on_failure
     };
-    run_hooks(
-        hooks,
-        &hook_ctx,
-        None,
-        Some(if succeeded { "success" } else { "failure" }),
+    command_runner::with_storage_lock(
+        lock_file,
+        run_hooks(
+            hooks,
+            &hook_ctx,
+            None,
+            Some(if succeeded { "success" } else { "failure" }),
+        ),
     )
     .await;
     outcome
@@ -222,6 +274,7 @@ fn resolve_local_job(job: &JobSpec, storage_ctx: Option<&crate::engine::RunStora
 #[allow(clippy::too_many_arguments)]
 async fn run_once_inner(
     job: &JobSpec,
+    storage_lock: Option<std::sync::Arc<std::fs::File>>,
     run_id: &str,
     worker: &str,
     cancel: CancellationToken,
@@ -305,21 +358,27 @@ async fn run_once_inner(
         synora_core::SnapshotPolicy::BeforeSync | synora_core::SnapshotPolicy::BeforeAndAfter
     );
     if wants_before {
-        if let Some(p) = snapshot_provider.as_ref() {
-            let name = snapshot::snapshot_name(time::OffsetDateTime::now_utc());
-            match p.create(&name) {
-                Ok(info) => {
-                    if let Some(l) = logger.as_mut() {
-                        let _ = l.line(&format!("run {run_id}: snapshot {name} created"));
-                    }
-                    let _ = info;
-                }
-                Err(e) => {
-                    if let Some(l) = logger.as_mut() {
-                        let _ = l.line(&format!("run {run_id}: snapshot failed: {e}"));
-                    }
+        let name = snapshot::snapshot_name(time::OffsetDateTime::now_utc());
+        let created = snapshot_provider
+            .as_ref()
+            .ok_or_else(|| "snapshot backend unavailable for this storage".to_string())
+            .and_then(|p| p.create(&name).map_err(|e| e.to_string()));
+        if let Err(e) = created {
+            if job.snapshot_failure != synora_core::job::SnapshotFailure::Ignore {
+                if let Some(l) = logger.as_mut() {
+                    let _ = l.line(&format!("run {run_id}: before-sync snapshot failed: {e}"));
                 }
             }
+            if job.snapshot_failure == synora_core::job::SnapshotFailure::Fail {
+                return RunOutcome {
+                    result: Err(ProviderError::Other(format!("before-sync snapshot: {e}"))),
+                    duration_secs: unix_now() - started,
+                    mem_peak: None,
+                    cpu_seconds: None,
+                };
+            }
+        } else if let Some(l) = logger.as_mut() {
+            let _ = l.line(&format!("run {run_id}: snapshot {name} created"));
         }
     }
 
@@ -346,6 +405,7 @@ async fn run_once_inner(
         .map(|c| std::sync::Arc::new(CgroupHandle(c.path().to_path_buf())) as std::sync::Arc<_>);
 
     let ctx = SyncContext {
+        storage_lock,
         run_id: run_id.to_string(),
         job_name: job.name.clone(),
         upstream: job.upstream.clone(),
@@ -424,7 +484,10 @@ async fn run_once_inner(
             let mut last_cpu = 0.0f64;
             let mut last_io: Option<u64> = None;
             let mut last_tick = std::time::Instant::now();
-            usage.lock().unwrap().record_bandwidth(0.0);
+            usage
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .record_bandwidth(0.0);
             // Delay: docker stats --no-stream itself waits ~1s. Skip would
             // fire the next tick immediately, making dt≈0 and reporting
             // multi-GB/s spikes.
@@ -444,27 +507,27 @@ async fn run_once_inner(
                         let dt = now.duration_since(last_tick).as_secs_f64();
                         if let Some(stats) = docker {
                             peak = peak.max(stats.memory_bytes);
-                            let prev = usage.lock().unwrap().cpu_seconds.unwrap_or(0.0);
-                            usage.lock().unwrap().record(
+                            let prev = usage.lock().unwrap_or_else(|e| e.into_inner()).cpu_seconds.unwrap_or(0.0);
+                            usage.lock().unwrap_or_else(|e| e.into_inner()).record(
                                 peak,
                                 prev + (stats.cpu_percent / 100.0) * dt.max(0.001),
                                 Some(stats.cpu_percent),
                             );
                             if let Some(io) = stats.net_bytes {
                                 if let Some(bps) = network_bps(last_io, io, dt) {
-                                    usage.lock().unwrap().record_bandwidth(bps);
+                                    usage.lock().unwrap_or_else(|e| e.into_inner()).record_bandwidth(bps);
                                 }
                                 last_io = Some(io);
                             }
                             last_tick = now;
                             continue;
                         }
-                        let pgid = usage.lock().unwrap().child_pgid;
+                        let pgid = usage.lock().unwrap_or_else(|e| e.into_inner()).child_pgid;
                         // Network only: never fold in cgroup/block disk IO.
                         let io_bytes = pgid.and_then(proc_group_net_bytes);
                         if let Some(bytes) = io_bytes {
                             if let Some(bps) = network_bps(last_io, bytes, dt) {
-                                usage.lock().unwrap().record_bandwidth(bps);
+                                usage.lock().unwrap_or_else(|e| e.into_inner()).record_bandwidth(bps);
                             }
                             last_io = Some(bytes);
                         }
@@ -493,11 +556,11 @@ async fn run_once_inner(
                             let pct = if dt >= 0.5 {
                                 ((cpu - last_cpu) / dt * 100.0).max(0.0)
                             } else {
-                                usage.lock().unwrap().cpu_percent.unwrap_or(0.0)
+                                usage.lock().unwrap_or_else(|e| e.into_inner()).cpu_percent.unwrap_or(0.0)
                             };
                             last_cpu = cpu;
                             last_tick = now;
-                            usage.lock().unwrap().record(peak, cpu, Some(pct));
+                            usage.lock().unwrap_or_else(|e| e.into_inner()).record(peak, cpu, Some(pct));
                         } else {
                             last_tick = now;
                         }
@@ -623,7 +686,7 @@ async fn run_once_inner(
 
     // Post-sync verification (spec §56): only a verified success produces
     // after-success snapshots.
-    let result = match &result {
+    let mut result = match &result {
         Ok(r) => match run_verify(job, r) {
             Ok(()) => result,
             Err(msg) => {
@@ -670,11 +733,20 @@ async fn run_once_inner(
                     }
                 }
                 Err(e) => {
-                    if let Some(l) = logger.as_mut() {
-                        let _ = l.line(&format!("run {run_id}: snapshot failed: {e}"));
+                    if job.snapshot_failure != synora_core::job::SnapshotFailure::Ignore {
+                        if let Some(l) = logger.as_mut() {
+                            let _ = l.line(&format!("run {run_id}: snapshot failed: {e}"));
+                        }
+                    }
+                    if job.snapshot_failure == synora_core::job::SnapshotFailure::Fail {
+                        result = Err(ProviderError::Other(format!("after-success snapshot: {e}")));
                     }
                 }
             }
+        } else if job.snapshot_failure == synora_core::job::SnapshotFailure::Fail {
+            result = Err(ProviderError::Other(
+                "snapshot backend unavailable for this storage".into(),
+            ));
         }
     }
 
@@ -695,7 +767,7 @@ async fn run_once_inner(
     // Sample resource usage before cleanup: provider-reported (docker
     // stats polling) wins, the cgroup scope is the fallback.
     let provider_usage = match &ctx.usage {
-        Some(a) => *a.lock().unwrap(),
+        Some(a) => *a.lock().unwrap_or_else(|e| e.into_inner()),
         None => provider::ResourceUsage::default(),
     };
     let (mem_peak, cpu_seconds) = match (provider_usage.memory_bytes, provider_usage.cpu_seconds) {
@@ -767,7 +839,7 @@ struct ProcSnapshot {
 static PROC_SNAP: Mutex<Option<Arc<ProcSnapshot>>> = Mutex::new(None);
 
 fn cached_proc_snapshot() -> Arc<ProcSnapshot> {
-    let mut slot = PROC_SNAP.lock().unwrap();
+    let mut slot = PROC_SNAP.lock().unwrap_or_else(|e| e.into_inner());
     let stale = slot
         .as_ref()
         .map(|s| s.at.elapsed() >= Duration::from_millis(1500))
@@ -1162,6 +1234,9 @@ async fn run_hooks(
     terminal_status: Option<&str>,
 ) {
     for hook in hooks {
+        if ctx.cancel.is_cancelled() {
+            break;
+        }
         let mut cmd = tokio::process::Command::new("/bin/sh");
         cmd.arg("-c").arg(hook);
         cmd.current_dir(&ctx.storage);
@@ -1188,7 +1263,10 @@ async fn run_hooks(
         if let Some(api) = ctx.manager_url.as_deref().filter(|s| !s.trim().is_empty()) {
             cmd.env("SYNORA_API", api);
         }
-        let out = cmd.output().await;
+        let out = tokio::select! {
+            _ = ctx.cancel.cancelled() => break,
+            out = command_runner::run(&mut cmd, command_runner::DEFAULT_TIMEOUT) => out,
+        };
         match out {
             Ok(o) if o.status.success() => {}
             Ok(o) => {
@@ -1217,6 +1295,7 @@ fn hook_ctx(
     manager_url: Option<String>,
 ) -> SyncContext {
     SyncContext {
+        storage_lock: None,
         run_id: run_id.to_string(),
         job_name: job.name.clone(),
         upstream: job.upstream.clone(),
@@ -1280,14 +1359,14 @@ fn run_verify(job: &JobSpec, result: &SyncResult) -> Result<(), String> {
                     .command
                     .as_deref()
                     .ok_or("verify `command` check configured without a command")?;
-                let out = std::process::Command::new("/bin/sh")
+                let mut command = std::process::Command::new("/bin/sh");
+                command
                     .arg("-c")
                     .arg(cmd)
                     .current_dir(&job.storage)
                     .env("SYNORA_JOB", &job.name)
-                    .env("SYNORA_STORAGE", job.storage.display().to_string())
-                    .output()
-                    .map_err(|e| e.to_string())?;
+                    .env("SYNORA_STORAGE", &job.storage);
+                let out = command_runner::run_sync_command(command).map_err(|e| e.to_string())?;
                 if !out.status.success() {
                     return Err(format!(
                         "verify command `{cmd}` exited with {:?}",

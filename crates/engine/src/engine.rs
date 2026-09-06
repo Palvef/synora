@@ -104,6 +104,7 @@ pub const LOCAL_WORKER: &str = "local";
 pub type WorkerPlanner = Arc<dyn Fn(&JobSpec) -> Option<String> + Send + Sync>;
 
 pub struct Engine {
+    pub config_gate: tokio::sync::RwLock<()>,
     /// Static daemon config: NOT hot-reloadable (spec §85). Reloadable job
     /// definitions live in `live_jobs`.
     pub cfg: ResolvedConfig,
@@ -200,6 +201,7 @@ impl Engine {
             cfg,
             store,
             metrics: Arc::new(Metrics::new()),
+            config_gate: tokio::sync::RwLock::new(()),
             live_jobs: std::sync::RwLock::new(live_jobs),
             job_locks: std::sync::RwLock::new(job_locks),
             global_sem: Arc::new(tokio::sync::Semaphore::new(max_concurrency)),
@@ -219,7 +221,13 @@ impl Engine {
     /// interval anchors). Jobs removed from config are purged from every table.
     pub async fn sync_config(&self) -> Result<(), String> {
         let now = unix_now();
-        let jobs: Vec<JobSpec> = self.live_jobs.read().unwrap().values().cloned().collect();
+        let jobs: Vec<JobSpec> = self
+            .live_jobs
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .cloned()
+            .collect();
         for job in &jobs {
             self.store.sync_job(job).await.map_err(|e| e.to_string())?;
             self.sync_schedule_for(job, now).await?;
@@ -239,14 +247,33 @@ impl Engine {
 
     /// Drop a job from memory, metrics, logs, and every DB table.
     pub async fn forget_job(&self, name: &str) -> Result<(), String> {
+        let _guard = self.config_gate.write().await;
+        self.forget_job_current(name).await
+    }
+    async fn forget_job_current(&self, name: &str) -> Result<(), String> {
         let _ = self.stop_job(name).await;
         let _ = self.store.set_cancelling_by_job(name).await;
         {
-            self.live_jobs.write().unwrap().remove(name);
-            self.job_locks.write().unwrap().remove(name);
-            self.failure_streak.lock().unwrap().remove(name);
-            self.active.lock().unwrap().remove(name);
-            self.active_runs.lock().unwrap().remove(name);
+            self.live_jobs
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(name);
+            self.job_locks
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(name);
+            self.failure_streak
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(name);
+            self.active
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(name);
+            self.active_runs
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(name);
         }
         self.store
             .purge_job(name)
@@ -262,12 +289,23 @@ impl Engine {
     pub fn config_path(&self) -> Option<std::path::PathBuf> {
         self.config_source
             .read()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .map(|(path, _)| path.clone())
     }
 
     async fn sync_schedule_for(&self, job: &JobSpec, now: i64) -> Result<(), String> {
+        self.store
+            .db()
+            .execute(
+                "UPDATE jobs SET config_generation = ? WHERE name = ?",
+                &[
+                    synora_core::RunId::new().to_string().into(),
+                    job.name.clone().into(),
+                ],
+            )
+            .await
+            .map_err(|e| e.to_string())?;
         let tz = time_tz::timezones::get_by_name(&job.timezone)
             .ok_or_else(|| format!("unknown timezone `{}`", job.timezone))?;
         let schedule_json = serde_json::to_string(&job.schedule).map_err(|e| e.to_string())?;
@@ -335,11 +373,20 @@ impl Engine {
     }
 
     pub fn job(&self, name: &str) -> Option<JobSpec> {
-        self.live_jobs.read().unwrap().get(name).cloned()
+        self.live_jobs
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(name)
+            .cloned()
     }
 
     pub fn jobs(&self) -> Vec<JobSpec> {
-        self.live_jobs.read().unwrap().values().cloned().collect()
+        self.live_jobs
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .cloned()
+            .collect()
     }
 
     /// Dispatch one job: create a QUEUED run row. Serialized per job.
@@ -348,11 +395,33 @@ impl Engine {
     /// Queue a run. `forced` (operator-triggered) runs get priority 1 and
     /// jump ahead of the scheduled backlog.
     pub async fn dispatch(&self, job_name: &str, forced: bool) -> Result<String, String> {
+        let _guard = self.config_gate.read().await;
+        self.dispatch_current(job_name, forced).await
+    }
+
+    pub(crate) async fn dispatch_current(
+        &self,
+        job_name: &str,
+        forced: bool,
+    ) -> Result<String, String> {
         let job = self
             .job(job_name)
             .ok_or_else(|| format!("unknown job `{job_name}`"))?;
         if !job.enabled {
             return Err(format!("job `{job_name}` is disabled"));
+        }
+        if !forced && matches!(job.on_worker_lost, synora_core::OnWorkerLost::Fail) {
+            let runs = self
+                .store
+                .run_history(job_name, 1)
+                .await
+                .map_err(|e| e.to_string())?;
+            if runs
+                .first()
+                .is_some_and(|run| run.status == JobStatus::Lost)
+            {
+                return Err(format!("job `{job_name}` is held after worker loss; isolate the old writer before manually triggering recovery"));
+            }
         }
         for dep in &job.depends_on {
             let dep_ok = self
@@ -399,7 +468,7 @@ impl Engine {
         let lock = self
             .job_locks
             .read()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get(job_name)
             .cloned()
             .unwrap_or_else(|| Arc::new(tokio::sync::Mutex::new(())));
@@ -412,7 +481,7 @@ impl Engine {
         // Manager mode: planner picks (None = stay QUEUED, visible, spec §8).
         // Standalone: everything runs on the local worker.
         let worker: Option<String> = {
-            let planner = self.planner.read().unwrap();
+            let planner = self.planner.read().unwrap_or_else(|e| e.into_inner());
             match planner.as_ref() {
                 None => Some(LOCAL_WORKER.to_string()),
                 Some(p) => p(&job),
@@ -473,7 +542,10 @@ impl Engine {
         };
         let dedup_key = job.unwrap_or("");
         let (send, effective_event) = {
-            let mut streaks = self.failure_streak.lock().unwrap();
+            let mut streaks = self
+                .failure_streak
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             match event {
                 "sync_failed" => {
                     let n = streaks.entry(dedup_key.to_string()).or_insert(0);
@@ -541,7 +613,10 @@ impl Engine {
     /// True when a planner is installed (manager mode): unassigned runs stay
     /// QUEUED for remote workers instead of being executed locally.
     pub fn has_planner(&self) -> bool {
-        self.planner.read().unwrap().is_some()
+        self.planner
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
     }
 
     /// Install the worker picker (manager mode). Without it, runs stay local.
@@ -549,22 +624,26 @@ impl Engine {
     where
         F: Fn(&JobSpec) -> Option<String> + Send + Sync + 'static,
     {
-        *self.planner.write().unwrap() = Some(Arc::new(f));
+        *self.planner.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(f));
     }
 
     /// Remember where the config came from so `reload()` can re-read it.
     pub fn set_config_source(&self, path: PathBuf, overrides: CliOverrides) {
-        *self.config_source.write().unwrap() = Some((path, overrides));
+        *self
+            .config_source
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Some((path, overrides));
     }
 
     /// Hot reload (spec §85, Yuki's `yukictl reload` convention): re-read the
     /// config, apply job/schedule changes, reject non-reloadable changes
     /// (db backend, listen address, tls, log dir) as a whole.
     pub async fn reload(&self) -> Result<usize, String> {
+        let _guard = self.config_gate.write().await;
         let (path, overrides) = self
             .config_source
             .read()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .clone()
             .ok_or_else(|| "no config source set (started without -c?)".to_string())?;
         let new_cfg = ConfigLoader::load(&path, &overrides).map_err(|e| e.to_string())?;
@@ -624,24 +703,28 @@ impl Engine {
         // Send — so: short lock for the diff, awaits, short lock to apply.)
         let now = unix_now();
         let removed: Vec<String> = {
-            let jobs = self.live_jobs.read().unwrap();
+            let jobs = self.live_jobs.read().unwrap_or_else(|e| e.into_inner());
             jobs.keys()
                 .filter(|n| !new_cfg.jobs.iter().any(|j| &j.name == *n))
                 .cloned()
                 .collect()
         };
         for job in &new_cfg.jobs {
+            if self.job(&job.name).as_ref() == Some(job) {
+                continue;
+            }
+            self.store.db().execute("UPDATE job_runs SET status = 'CANCELLED', finished_at = ?, message = 'configuration changed before execution' WHERE job_id = ? AND status IN ('QUEUED','RETRYING')", &[now.into(), job.name.clone().into()]).await.map_err(|e| e.to_string())?;
             self.store.sync_job(job).await.map_err(|e| e.to_string())?;
             self.sync_schedule_for(job, now).await?;
         }
         for name in &removed {
-            self.forget_job(name).await?;
+            self.forget_job_current(name).await?;
         }
         let audit: Vec<(String, Option<String>, Option<String>)> = {
-            let mut jobs = self.live_jobs.write().unwrap();
+            let mut jobs = self.live_jobs.write().unwrap_or_else(|e| e.into_inner());
             let mut rows = Vec::new();
             {
-                let mut locks = self.job_locks.write().unwrap();
+                let mut locks = self.job_locks.write().unwrap_or_else(|e| e.into_inner());
                 for job in &new_cfg.jobs {
                     locks
                         .entry(job.name.clone())
@@ -676,7 +759,7 @@ impl Engine {
             if job.enabled {
                 // Queue one catch-up run; dispatch goes through the same
                 // planner/concurrency gates as a scheduled run.
-                match self.dispatch(name, false).await {
+                match self.dispatch_current(name, false).await {
                     Ok(run_id) => {
                         let _ = self
                             .store
@@ -708,13 +791,14 @@ impl Engine {
         // Always rebuild from the just-loaded snapshot. Comparing against
         // `self.cfg` (the immutable startup config) made A -> B -> A reloads
         // leave routing stuck on B.
-        *self.netroute.write().unwrap() = netroute::NetRoute::build_optional(
-            &new_cfg.proxies,
-            &new_cfg.proxy_groups,
-            &new_cfg.egresses,
-            &new_cfg.egress_groups,
-            new_cfg.daemon.default_proxy.as_deref(),
-        );
+        *self.netroute.write().unwrap_or_else(|e| e.into_inner()) =
+            netroute::NetRoute::build_optional(
+                &new_cfg.proxies,
+                &new_cfg.proxy_groups,
+                &new_cfg.egresses,
+                &new_cfg.egress_groups,
+                new_cfg.daemon.default_proxy.as_deref(),
+            );
         let changed = new_cfg.jobs.len() + removed.len();
         let _ = self
             .store
@@ -734,7 +818,7 @@ impl Engine {
         let token = self
             .active_runs
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get(job_name)
             .cloned()
             .ok_or_else(|| format!("job `{job_name}` is not running"))?;
@@ -746,12 +830,15 @@ impl Engine {
     pub(crate) fn register_run(&self, job: &str, token: tokio_util::sync::CancellationToken) {
         self.active_runs
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .insert(job.to_string(), token);
     }
 
     pub(crate) fn remove_run(&self, job: &str) {
-        self.active_runs.lock().unwrap().remove(job);
+        self.active_runs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(job);
     }
 
     /// `synora stop <job>` drops a file into <log_dir>/control/stop-<job>;
@@ -793,14 +880,14 @@ impl Engine {
 
     /// Active-run accounting (per-job concurrency gate).
     pub fn active_inc(&self, job: &str) -> usize {
-        let mut m = self.active.lock().unwrap();
+        let mut m = self.active.lock().unwrap_or_else(|e| e.into_inner());
         let n = m.entry(job.to_string()).or_insert(0);
         *n += 1;
         *n
     }
 
     pub fn active_dec(&self, job: &str) -> usize {
-        let mut m = self.active.lock().unwrap();
+        let mut m = self.active.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(n) = m.get_mut(job) {
             *n -= 1;
             if *n == 0 {

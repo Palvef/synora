@@ -13,14 +13,13 @@ use std::process::Stdio;
 use tokio::process::Command;
 
 async fn git_ok(args: &[&str]) -> bool {
-    tokio::process::Command::new("git")
-        .args(args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await
-        .map(|s| s.success())
-        .unwrap_or(false)
+    command_runner::run(
+        tokio::process::Command::new("git").args(args),
+        command_runner::DEFAULT_TIMEOUT,
+    )
+    .await
+    .map(|o| o.status.success())
+    .unwrap_or(false)
 }
 
 /// Repair a bare repo with an empty HEAD (interrupted git.sh) or report
@@ -69,11 +68,12 @@ pub struct GitProvider {
 }
 
 async fn git_output(args: &[&str]) -> Option<String> {
-    let out = tokio::process::Command::new("git")
-        .args(args)
-        .output()
-        .await
-        .ok()?;
+    let out = command_runner::run(
+        tokio::process::Command::new("git").args(args),
+        command_runner::DEFAULT_TIMEOUT,
+    )
+    .await
+    .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -109,10 +109,11 @@ async fn maybe_repack(dest: &str) {
         return;
     }
     tracing::info!("git {dest}: {loose} loose objects, repacking");
-    let _ = tokio::process::Command::new("git")
-        .args(["-C", dest, "repack", "-a", "-b", "-d"])
-        .status()
-        .await;
+    let _ = command_runner::run(
+        tokio::process::Command::new("git").args(["-C", dest, "repack", "-a", "-b", "-d"]),
+        std::time::Duration::from_secs(3600),
+    )
+    .await;
 }
 
 async fn refresh_head(dest: &str) {

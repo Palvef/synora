@@ -54,6 +54,7 @@ fn default_scripts_image() -> String {
 }
 
 struct Running {
+    lease_token: String,
     cancel: CancellationToken,
     job: String,
     usage: provider::UsageSink,
@@ -184,37 +185,12 @@ async fn main() -> Result<(), String> {
         Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     // Worker exit is a drain, not a cancellation: stop accepting work and
     // keep heartbeating until every in-flight run finishes naturally.
-    // Only the manager's explicit cancel_run path may cancel a run.
+    // Lease loss also cancels work, independently of graceful draining.
     async fn request_drain(client: Client, worker_id: String, shutdown: Arc<AtomicBool>) {
         shutdown.store(true, Ordering::SeqCst);
         if let Err(e) = client.drain_worker(&worker_id).await {
             tracing::warn!("failed to mark worker `{worker_id}` draining: {e}");
         }
-    }
-
-    async fn cleanup_job_containers() {
-        let out = tokio::process::Command::new("docker")
-            .args(["ps", "-aq", "--filter", "name=synora-job-"])
-            .output()
-            .await;
-        let Ok(out) = out else {
-            return;
-        };
-        let ids: Vec<String> = String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(String::from)
-            .collect();
-        if ids.is_empty() {
-            return;
-        }
-        let mut cmd = tokio::process::Command::new("docker");
-        cmd.arg("rm").arg("-f");
-        for id in &ids {
-            cmd.arg(id);
-        }
-        let _ = cmd.status().await;
     }
 
     // SIGTERM/SIGINT: drain — finish current runs, unregister, exit (spec §11).
@@ -237,12 +213,29 @@ async fn main() -> Result<(), String> {
         });
     }
 
+    let lease_deadline = Arc::new(std::sync::Mutex::new(
+        std::time::Instant::now() + std::time::Duration::from_secs(40),
+    ));
+    {
+        let deadline = lease_deadline.clone();
+        let running = running.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                if std::time::Instant::now() >= *deadline.lock().unwrap_or_else(|e| e.into_inner())
+                {
+                    for run in running.lock().await.values() {
+                        run.cancel.cancel();
+                    }
+                }
+            }
+        });
+    }
     loop {
         // Poll fast while under the concurrency cap so a worker can fill
         // all slots (production: 30) instead of claiming one every 15s.
         let jobs_running = running.lock().await.len() as u32;
         if shutdown.load(Ordering::SeqCst) && jobs_running == 0 {
-            cleanup_job_containers().await;
             if let Err(e) = client.unregister(&worker_id).await {
                 tracing::warn!("unregister failed: {e}");
             } else {
@@ -256,7 +249,7 @@ async fn main() -> Result<(), String> {
             let mut out = Vec::new();
             let mut logs = Vec::new();
             for (run_id, r) in guard.iter() {
-                let sample = *r.usage.lock().unwrap();
+                let sample = *r.usage.lock().unwrap_or_else(|e| e.into_inner());
                 if sample.memory_bytes.is_some()
                     || sample.cpu_seconds.is_some()
                     || sample.cpu_percent.is_some()
@@ -286,10 +279,20 @@ async fn main() -> Result<(), String> {
             }
             (out, active_jobs, logs)
         };
+        let heartbeat_sent = std::time::Instant::now();
         let heartbeat = client
             .heartbeat(
                 &worker_id,
                 &HeartbeatRequest {
+                    active_runs: running
+                        .lock()
+                        .await
+                        .iter()
+                        .map(|(id, r)| api::RunLease {
+                            run_id: id.clone(),
+                            lease_token: r.lease_token.clone(),
+                        })
+                        .collect(),
                     status: if jobs_running > 0 {
                         "running".into()
                     } else {
@@ -312,9 +315,15 @@ async fn main() -> Result<(), String> {
             }
         };
 
+        *lease_deadline.lock().unwrap_or_else(|e| e.into_inner()) =
+            heartbeat_sent + std::time::Duration::from_secs(40);
+
         // Cancel requests from the operator (stop).
-        let cancel_id = heartbeat.cancel_run.clone();
-        if let Some(cancel_id) = cancel_id {
+        let mut cancel_ids = heartbeat.cancel_runs.clone();
+        if let Some(id) = heartbeat.cancel_run.clone() {
+            cancel_ids.push(id);
+        }
+        for cancel_id in cancel_ids {
             let cancel = running
                 .lock()
                 .await
@@ -344,7 +353,7 @@ async fn main() -> Result<(), String> {
         // Claim every offered run up to the concurrency cap in this beat.
         let offers = heartbeat.offered_assignments();
         for assignment in offers {
-            if shutdown.load(Ordering::SeqCst) {
+            if shutdown.load(Ordering::SeqCst) || heartbeat_sent.elapsed().as_secs() >= 40 {
                 break;
             }
             let jobs_now = running.lock().await.len() as u32;
@@ -374,6 +383,7 @@ async fn main() -> Result<(), String> {
                     running.lock().await.insert(
                         a.run_id.clone(),
                         Running {
+                            lease_token: a.lease_token.clone(),
                             cancel: cancel.clone(),
                             job: a.job.name.clone(),
                             usage: usage.clone(),
@@ -397,7 +407,7 @@ async fn main() -> Result<(), String> {
                             manager_url,
                         )
                         .await;
-                        let req = outcome_to_complete(
+                        let mut req = outcome_to_complete(
                             &worker_id,
                             a.attempt,
                             &job,
@@ -405,6 +415,7 @@ async fn main() -> Result<(), String> {
                             &log_dir,
                             run_storage.as_ref(),
                         );
+                        req.lease_token = a.lease_token;
                         let mut reported = false;
                         for attempt in 1..=8u32 {
                             match client.complete_run(&a.run_id, &req).await {
@@ -494,6 +505,7 @@ fn outcome_to_complete(
         512 * 1024,
     );
     CompleteRequest {
+        lease_token: String::new(),
         worker_id: worker_id.to_string(),
         attempt: Some(attempt),
         status: status.to_string(),

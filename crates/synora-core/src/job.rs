@@ -263,6 +263,16 @@ pub enum SnapshotPolicy {
     Manual,
 }
 
+/// Whether a requested recovery point may fail without failing the run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SnapshotFailure {
+    #[default]
+    Fail,
+    Warn,
+    Ignore,
+}
+
 /// Post-sync verification (spec §56): only a verified success can produce an
 /// after-success snapshot.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -350,6 +360,8 @@ pub struct JobSpec {
     pub depends_on: Vec<String>,
     /// Snapshot timing (spec §32).
     pub snapshot_policy: SnapshotPolicy,
+    #[serde(default)]
+    pub snapshot_failure: SnapshotFailure,
     /// Post-sync verification (spec §56).
     pub verify: VerifyConfig,
 }

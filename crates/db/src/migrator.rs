@@ -9,6 +9,14 @@ use std::path::Path;
 /// `migrations/` dir is an override for development; when it is missing —
 /// e.g. systemd services with CWD=/ — the embedded set runs instead.
 const EMBEDDED: &[(u64, &str)] = &[
+    (
+        9,
+        include_str!("../../../migrations/0009_config_generation.sql"),
+    ),
+    (
+        8,
+        include_str!("../../../migrations/0008_assignment_fencing.sql"),
+    ),
     (1, include_str!("../../../migrations/0001_init.sql")),
     (
         2,
@@ -85,29 +93,39 @@ impl Migrator {
                 continue;
             }
             let path_display = format!("migration v{version}");
-            for stmt in split_statements(sql) {
-                match db {
-                    Db::Sqlite(d) => {
-                        let pd = path_display.clone();
-                        d.with_conn(move |conn| {
-                            conn.execute(&stmt, rusqlite::params![])
-                                .map_err(|e| DbError::Sql(format!("in {pd}: {e}")))?;
-                            Ok(())
-                        })
-                        .await?;
-                    }
-                    Db::Pg(d) => {
-                        d.simple(&stmt)
-                            .await
-                            .map_err(|e| DbError::Sql(format!("in {path_display}: {e}")))?;
+            let statements = split_statements(sql);
+            match db {
+                Db::Sqlite(d) => {
+                    let version = *version;
+                    d.with_conn(move |conn| {
+                        let tx = conn
+                            .unchecked_transaction()
+                            .map_err(|e| DbError::Sql(e.to_string()))?;
+                        for stmt in statements {
+                            tx.execute_batch(&stmt)
+                                .map_err(|e| DbError::Sql(format!("in {path_display}: {e}")))?;
+                        }
+                        tx.execute(
+                            "INSERT INTO schema_migrations (version, applied_at) VALUES (?,?)",
+                            rusqlite::params![version as i64, now],
+                        )
+                        .map_err(|e| DbError::Sql(e.to_string()))?;
+                        tx.commit().map_err(|e| DbError::Sql(e.to_string()))
+                    })
+                    .await?;
+                }
+                Db::Pg(d) => {
+                    let body = statements
+                        .join(";\n")
+                        .replace("INTEGER PRIMARY KEY AUTOINCREMENT", "BIGSERIAL PRIMARY KEY")
+                        .replace("INTEGER", "BIGINT");
+                    let batch = format!("BEGIN; {body}; INSERT INTO schema_migrations (version, applied_at) VALUES ({version},{now}); COMMIT;");
+                    if let Err(e) = d.simple(&batch).await {
+                        let _ = d.simple("ROLLBACK").await;
+                        return Err(DbError::Sql(format!("in {path_display}: {e}")));
                     }
                 }
             }
-            db.execute(
-                "INSERT INTO schema_migrations (version, applied_at) VALUES (?,?)",
-                &[Param::Int(*version as i64), Param::Int(now)],
-            )
-            .await?;
             applied.push(format!("migration v{version}"));
         }
         Ok(applied)

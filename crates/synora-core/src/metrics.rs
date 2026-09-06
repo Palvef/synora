@@ -60,7 +60,7 @@ impl Metrics {
             name: name.to_string(),
             labels: sorted,
         };
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         entries.insert(key, Entry { kind, value });
     }
 
@@ -82,7 +82,7 @@ impl Metrics {
             name: name.to_string(),
             labels: sorted,
         };
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         entries.retain(|existing, _| {
             !(existing.name == name && existing.labels.iter().any(|(n, v)| n == "job" && v == job))
         });
@@ -98,7 +98,7 @@ impl Metrics {
     /// Remove all series for one metric carrying the given job label.
     /// Used for run-scoped gauges when a job leaves RUNNING.
     pub fn remove_job_metric(&self, name: &str, job: &str) {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         entries.retain(|key, _| {
             !(key.name == name && key.labels.iter().any(|(n, v)| n == "job" && v == job))
         });
@@ -107,7 +107,7 @@ impl Metrics {
     /// Remove one run-scoped job/worker series without disturbing the same
     /// job executing on another worker.
     pub fn remove_job_worker_metric(&self, name: &str, job: &str, worker: &str) {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         entries.retain(|key, _| {
             let has_job = key.labels.iter().any(|(n, v)| n == "job" && v == job);
             let has_worker = key.labels.iter().any(|(n, v)| n == "worker" && v == worker);
@@ -119,7 +119,7 @@ impl Metrics {
     /// heartbeat snapshot. The heartbeat is authoritative, so a missing job
     /// must not leave its previous CPU/memory value behind.
     pub fn remove_worker_metrics(&self, names: &[&str], worker: &str) {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         entries.retain(|key, _| {
             !(names.contains(&key.name.as_str())
                 && key.labels.iter().any(|(n, v)| n == "worker" && v == worker))
@@ -136,7 +136,7 @@ impl Metrics {
             name: name.to_string(),
             labels: sorted,
         };
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         let entry = entries.entry(key).or_insert(Entry {
             kind: MetricType::Counter,
             value: 0.0,
@@ -147,13 +147,13 @@ impl Metrics {
     /// Drop every sample labeled with this job so a deleted job leaves no
     /// gauge/counter residue in `/metrics`.
     pub fn remove_job(&self, job: &str) {
-        let mut entries = self.entries.lock().unwrap();
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         entries.retain(|key, _| !key.labels.iter().any(|(n, v)| n == "job" && v == job));
     }
 
     /// Prometheus exposition format (one TYPE line per metric, then samples).
     pub fn render(&self) -> String {
-        let entries = self.entries.lock().unwrap();
+        let entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
         let mut samples: Vec<(String, MetricType, String)> = Vec::new();
         for (key, entry) in entries.iter() {
             let mut s = key.name.clone();

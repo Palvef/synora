@@ -128,3 +128,9 @@ cargo clippy --workspace
 
 GitHub Actions：push/PR 自动 CI；`VERSION` 文件变更时自动构建 Linux
 x86_64/aarch64 并发布 Release。
+
+## 工程加固与状态
+
+代理、HTTP、快照、Manager/Worker 和 TUI 已实现；真实存储回滚及跨宿主共享存储接管仍需部署验收，HA 多 Manager 与通用 Provider SDK 未标记生产可用。
+
+新版默认 rsync 23 判失败、快照失败阻止同步、metrics 要求认证、reload 要求 config.reload；Manager/Worker 租约协议需一起升级。

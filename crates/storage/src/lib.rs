@@ -95,20 +95,16 @@ impl StorageManager {
                         )));
                     }
                 }
-                tokio::fs::create_dir_all(&mount).await.map_err(|e| {
-                    StorageError::Command(format!("mkdir -p {}: {e}", mount.display()))
-                })?;
+                let actual =
+                    run_cli("zfs", &["get", "-H", "-o", "value", "mountpoint", &ds]).await?;
+                let mounted = run_cli("zfs", &["get", "-H", "-o", "value", "mounted", &ds]).await?;
+                validate_zfs_mount(&mount, actual.trim(), mounted.trim())?;
                 self.check_empty(&mount, cfg.require_empty).await?;
                 Ok(mount)
             }
             StorageKind::Btrfs { subvol } => {
                 let subvol_path = PathBuf::from(subvol);
-                let list_target = cfg
-                    .mountpoint
-                    .clone()
-                    .unwrap_or_else(|| subvol_path.clone());
-                let target = to_arg(&list_target);
-                match run_cli("btrfs", &["subvolume", "list", target.as_str()]).await {
+                match run_cli("btrfs", &["subvolume", "show", subvol.as_str()]).await {
                     Ok(_) => {}
                     Err(e @ StorageError::Unsupported(_)) => return Err(e),
                     Err(_) if cfg.auto_create => {
@@ -186,16 +182,17 @@ impl StorageManager {
 /// [`StorageError::Command`]; a missing binary (spawn `NotFound`) becomes
 /// [`StorageError::Unsupported`] with a clear message.
 async fn run_cli(cmd: &str, args: &[&str]) -> Result<String, StorageError> {
-    let out = tokio::process::Command::new(cmd)
-        .args(args)
-        .output()
-        .await
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => StorageError::Unsupported(format!(
-                "`{cmd}` is not installed; cannot manage this storage backend"
-            )),
-            _ => StorageError::Command(format!("failed to run `{cmd}`: {e}")),
-        })?;
+    let out = command_runner::run(
+        tokio::process::Command::new(cmd).args(args),
+        command_runner::DEFAULT_TIMEOUT,
+    )
+    .await
+    .map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => StorageError::Unsupported(format!(
+            "`{cmd}` is not installed; cannot manage this storage backend"
+        )),
+        _ => StorageError::Command(format!("failed to run `{cmd}`: {e}")),
+    })?;
     if !out.status.success() {
         return Err(StorageError::Command(format!(
             "`{cmd} {}` failed: {}",
@@ -206,7 +203,7 @@ async fn run_cli(cmd: &str, args: &[&str]) -> Result<String, StorageError> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-fn zfs_dataset_id(pool: &str, dataset: &str) -> String {
+pub fn zfs_dataset_id(pool: &str, dataset: &str) -> String {
     let dataset = dataset.trim();
     if dataset.is_empty() {
         pool.to_string()
@@ -214,6 +211,75 @@ fn zfs_dataset_id(pool: &str, dataset: &str) -> String {
         dataset.to_string()
     } else {
         format!("{pool}/{dataset}")
+    }
+}
+
+fn validate_zfs_mount(expected: &Path, actual: &str, mounted: &str) -> Result<(), StorageError> {
+    if mounted != "yes" || !Path::new(actual).is_absolute() || Path::new(actual) != expected {
+        return Err(StorageError::Command(format!(
+            "ZFS mount mismatch: expected {}, actual {actual}, mounted={mounted}",
+            expected.display()
+        )));
+    }
+    if !expected.is_dir() {
+        return Err(StorageError::NotFound);
+    }
+    Ok(())
+}
+
+/// Advisory lock on a stable sibling, outside rsync --delete and rollback.
+/// Shared storage must provide coherent POSIX flock semantics to all workers.
+pub struct StorageLock(std::fs::File);
+impl StorageLock {
+    pub fn acquire(path: &Path) -> Result<Self, StorageError> {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::OpenOptionsExt;
+        let resolved;
+        let path = if std::fs::symlink_metadata(path).is_ok() {
+            resolved = path
+                .canonicalize()
+                .map_err(|e| StorageError::Command(e.to_string()))?;
+            resolved.as_path()
+        } else {
+            path
+        };
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        std::fs::create_dir_all(parent).map_err(|e| StorageError::Command(e.to_string()))?;
+        let parent = parent
+            .canonicalize()
+            .map_err(|e| StorageError::Command(e.to_string()))?;
+        let name = path
+            .file_name()
+            .ok_or_else(|| StorageError::Command("cannot lock filesystem root".into()))?;
+        let mut lock_name = std::ffi::OsString::from(".synora-lock-");
+        lock_name.push(name);
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .mode(0o600)
+            .open(parent.join(lock_name))
+            .map_err(|e| StorageError::Command(e.to_string()))?;
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+            return Err(StorageError::Command(format!(
+                "storage {} is locked by another run or rollback",
+                path.display()
+            )));
+        }
+        Ok(Self(file))
+    }
+}
+impl StorageLock {
+    pub fn file(&self) -> Result<std::sync::Arc<std::fs::File>, StorageError> {
+        self.0
+            .try_clone()
+            .map(std::sync::Arc::new)
+            .map_err(|e| StorageError::Command(e.to_string()))
     }
 }
 
@@ -377,5 +443,28 @@ mod tests {
         assert_eq!(zfs_dataset_id("datas", "  "), "datas");
         assert_eq!(zfs_dataset_id("datas", "mirror"), "datas/mirror");
         assert_eq!(zfs_dataset_id("datas", "datas/GXDE"), "datas/GXDE");
+    }
+}
+
+#[cfg(test)]
+mod safety_tests {
+    use super::*;
+    #[test]
+    fn storage_lock_excludes_competing_runs_and_releases_on_drop() {
+        let dir = std::env::temp_dir().join(format!("synora-lock-{}", synora_core::RunId::new()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("mirror");
+        let first = StorageLock::acquire(&path).unwrap();
+        assert!(StorageLock::acquire(&path).is_err());
+        drop(first);
+        assert!(StorageLock::acquire(&path).is_ok());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn zfs_requires_exact_mounted_path() {
+        assert!(validate_zfs_mount(Path::new("/tmp"), "/tmp", "yes").is_ok());
+        assert!(validate_zfs_mount(Path::new("/tmp"), "/srv", "yes").is_err());
+        assert!(validate_zfs_mount(Path::new("/tmp"), "/tmp", "no").is_err());
+        assert!(validate_zfs_mount(Path::new("/tmp"), "legacy", "yes").is_err());
     }
 }

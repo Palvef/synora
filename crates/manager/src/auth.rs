@@ -15,6 +15,12 @@ pub struct AuthUser {
 }
 
 pub const PERMS: &[&str] = &[
+    "metrics.read",
+    "config.reload",
+    "jobs.hooks.write",
+    "jobs.provider.write",
+    "jobs.storage.write",
+    "proxies.write",
     "jobs.read",
     "jobs.write",
     "runs.manage",
@@ -106,5 +112,23 @@ pub fn require(user: &AuthUser, perm: &str) -> Result<(), StatusCode> {
         Ok(())
     } else {
         Err(StatusCode::FORBIDDEN)
+    }
+}
+
+#[cfg(test)]
+mod permission_tests {
+    use super::*;
+    #[test]
+    fn operator_cannot_reload_executable_configuration() {
+        for permission in [
+            "config.reload",
+            "jobs.hooks.write",
+            "jobs.provider.write",
+            "jobs.storage.write",
+            "proxies.write",
+        ] {
+            assert!(!role_defaults("operator").contains(&permission));
+            assert!(role_defaults("admin").contains(&permission));
+        }
     }
 }

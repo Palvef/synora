@@ -1,0 +1,8 @@
+[package]
+name = "command-runner"
+version.workspace = true
+edition.workspace = true
+[dependencies]
+tokio.workspace = true
+libc.workspace = true
+tracing.workspace = true

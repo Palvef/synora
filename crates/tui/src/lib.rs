@@ -8,11 +8,11 @@
 use api::Client;
 use clap::Parser;
 use config::{CliOverrides, ConfigLoader};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use ratatui::layout::{Constraint, Layout};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Row, Table, TableState};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Row, Table, TableState};
 use ratatui::Frame;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -44,6 +44,7 @@ struct Snapshot {
     /// Job whose spec is currently loaded (spec re-fetch gate).
     spec_job: Option<String>,
     history: Vec<api::RunDTO>,
+    history_job: Option<String>,
     /// Full job spec (structured editor) + its editable field view.
     spec_json: Option<serde_json::Value>,
     spec_fields: Vec<(String, String)>,
@@ -132,6 +133,8 @@ enum PickKind {
 struct App {
     mode: Mode,
     selected: usize,
+    selected_name: Option<String>,
+    log_offset: usize,
     /// Field cursor inside SpecEdit (must NOT reuse `selected`, which is the job index).
     spec_field: usize,
     /// Job frozen when entering SpecEdit so arrows cannot switch jobs.
@@ -163,6 +166,8 @@ impl App {
         App {
             mode: Mode::Jobs,
             selected: 0,
+            selected_name: None,
+            log_offset: 0,
             spec_field: 0,
             edit_job: None,
             jobs_state,
@@ -182,7 +187,40 @@ impl App {
     }
 
     fn selected_job<'a>(&self, snap: &'a Snapshot) -> Option<&'a api::JobDTO> {
-        snap.jobs.get(self.selected)
+        snap.jobs.get(self.selected).filter(|j| {
+            self.search.is_empty() || j.name.to_lowercase().contains(&self.search.to_lowercase())
+        })
+    }
+
+    fn reconcile_selection(&mut self, snap: &Snapshot) {
+        let visible = self.visible_jobs(snap);
+        let job = self
+            .selected_name
+            .as_ref()
+            .and_then(|name| visible.iter().find(|j| &j.name == name).copied())
+            .or_else(|| visible.first().copied());
+        self.selected_name = job.map(|j| j.name.clone());
+        self.selected = job
+            .and_then(|j| snap.jobs.iter().position(|v| v.name == j.name))
+            .unwrap_or(usize::MAX);
+        self.jobs_state
+            .select(job.and_then(|j| visible.iter().position(|v| v.name == j.name)));
+    }
+
+    fn move_job(&mut self, snap: &Snapshot, down: bool) {
+        let visible = self.visible_jobs(snap);
+        if visible.is_empty() {
+            return;
+        }
+        let current = self.jobs_state.selected().unwrap_or(0);
+        let next = if down {
+            current.saturating_add(1).min(visible.len() - 1)
+        } else {
+            current.saturating_sub(1)
+        };
+        self.selected_name = Some(visible[next].name.clone());
+        self.log_offset = 0;
+        self.reconcile_selection(snap);
     }
 
     /// Jobs matching the search filter (all when the filter is empty).
@@ -197,7 +235,7 @@ impl App {
 
 async fn fetch(client: &Client, snap: &mut Snapshot) {
     snap.error = None;
-    match (client.list_jobs().await, client.list_workers().await) {
+    match tokio::join!(client.list_jobs(), client.list_workers()) {
         (Ok(jobs), Ok(workers)) => {
             snap.jobs = jobs;
             snap.workers = workers;
@@ -250,7 +288,7 @@ fn fmt_size(bytes: Option<i64>) -> String {
     }
 }
 
-fn render_jobs(f: &mut Frame, app: &mut App, snap: &Snapshot) {
+fn render_jobs(f: &mut Frame, app: &mut App, snap: &Snapshot, area: Rect) {
     let header = Row::new(vec!["JOB", "STATUS", "SIZE", "NEXT RUN", "WORKER"])
         .style(Style::default().add_modifier(Modifier::BOLD));
     let visible = app.visible_jobs(snap);
@@ -298,15 +336,15 @@ fn render_jobs(f: &mut Frame, app: &mut App, snap: &Snapshot) {
     .block(Block::default().borders(Borders::ALL).title(title))
     .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
     .highlight_symbol("> ");
-    f.render_stateful_widget(table, f.area(), &mut app.jobs_state);
+    f.render_stateful_widget(table, area, &mut app.jobs_state);
 }
 
 /// Detail panel: selected job's last runs (Enter from the jobs table).
-fn render_job_detail(f: &mut Frame, app: &App, snap: &Snapshot) {
+fn render_job_detail(f: &mut Frame, app: &App, snap: &Snapshot, area: Rect) {
     let Some(job) = app.selected_job(snap) else {
         f.render_widget(
             Paragraph::new("no job selected").block(Block::default().borders(Borders::ALL)),
-            f.area(),
+            area,
         );
         return;
     };
@@ -338,8 +376,12 @@ fn render_job_detail(f: &mut Frame, app: &App, snap: &Snapshot) {
         "RUN ID", "STATUS", "DURATION", "EXIT", "BYTES", "MESSAGE",
     ])
     .style(Style::default().add_modifier(Modifier::BOLD));
-    let rows: Vec<Row> = snap
-        .history
+    let history = if snap.history_job.as_deref() == Some(job.name.as_str()) {
+        &snap.history[..]
+    } else {
+        &[]
+    };
+    let rows: Vec<Row> = history
         .iter()
         .take(30)
         .map(|r| {
@@ -382,12 +424,12 @@ fn render_job_detail(f: &mut Frame, app: &App, snap: &Snapshot) {
         Constraint::Length(lines.len() as u16 + 1),
         Constraint::Min(6),
     ])
-    .split(f.area());
+    .split(area);
     f.render_widget(Paragraph::new(lines), chunks[0]);
     f.render_widget(table, chunks[1]);
 }
 
-fn render_workers(f: &mut Frame, app: &mut App, snap: &Snapshot) {
+fn render_workers(f: &mut Frame, app: &mut App, snap: &Snapshot, area: Rect) {
     let header = Row::new(vec!["ID", "HOST", "STATUS", "RUNNING", "LABELS"])
         .style(Style::default().add_modifier(Modifier::BOLD));
     let rows: Vec<Row> = snap
@@ -422,10 +464,10 @@ fn render_workers(f: &mut Frame, app: &mut App, snap: &Snapshot) {
     )
     .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED))
     .highlight_symbol("> ");
-    f.render_stateful_widget(table, f.area(), &mut app.workers_state);
+    f.render_stateful_widget(table, area, &mut app.workers_state);
 }
 
-fn render_proxies(f: &mut Frame, _app: &App, snap: &Snapshot) {
+fn render_proxies(f: &mut Frame, _app: &App, snap: &Snapshot, area: Rect) {
     let header = Row::new(vec![
         "NAME",
         "TYPE",
@@ -478,28 +520,38 @@ fn render_proxies(f: &mut Frame, _app: &App, snap: &Snapshot) {
             .borders(Borders::ALL)
             .title(" Proxies (F3) — a add, w register CF One/WARP "),
     );
-    f.render_widget(table, f.area());
+    f.render_widget(table, area);
 }
 
-fn render_logs(f: &mut Frame, app: &App, snap: &Snapshot) {
+fn render_logs(f: &mut Frame, app: &App, snap: &Snapshot, area: Rect) {
     let job = app.selected_job(snap);
     let title = job
-        .map(|j| format!(" Logs: {} (F5) — follows selected job ", j.name))
+        .map(|j| {
+            format!(
+                " Logs: {} (F5) — newest first | PgUp/PgDn scroll, End live ",
+                j.name
+            )
+        })
         .unwrap_or_else(|| " Logs (F5) ".to_string());
-    let items: Vec<ListItem> = snap
-        .log_lines
+    let lines = if job.map(|j| j.name.as_str()) == snap.log_job.as_deref() {
+        &snap.log_lines[..]
+    } else {
+        &[]
+    };
+    let items: Vec<ListItem> = lines
         .iter()
         .rev()
+        .skip(app.log_offset)
         .map(|l| ListItem::new(Line::from(Span::raw(l.clone()))))
         .collect();
     let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
-    f.render_widget(list, f.area());
+    f.render_widget(list, area);
 }
 
 /// Structured job editor: every field with its current value (unset
 /// fields show their default), arrow keys select, Enter edits the value,
 /// S writes the whole job back and reloads.
-fn render_spec_edit(f: &mut Frame, app: &App, snap: &Snapshot) {
+fn render_spec_edit(f: &mut Frame, app: &App, snap: &Snapshot, area: Rect) {
     let job = app
         .edit_job
         .clone()
@@ -509,6 +561,10 @@ fn render_spec_edit(f: &mut Frame, app: &App, snap: &Snapshot) {
         .spec_fields
         .iter()
         .enumerate()
+        .skip(
+            app.spec_field
+                .saturating_sub(area.height.saturating_sub(3) as usize),
+        )
         .map(|(i, (k, v))| {
             let mark = if i == app.spec_field { "> " } else { "  " };
             ListItem::new(format!("{mark}{k:<22} {v}"))
@@ -516,11 +572,11 @@ fn render_spec_edit(f: &mut Frame, app: &App, snap: &Snapshot) {
         .collect();
     let title = format!(" Edit job: {job} — Enter change value, S save+reload, Esc back ");
     let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
-    f.render_widget(list, f.area());
+    f.render_widget(list, area);
 }
 
 /// Config editor: file list on the left, editable text on the right.
-fn render_config(f: &mut Frame, app: &App) {
+fn render_config(f: &mut Frame, app: &App, area: Rect) {
     let file_items: Vec<ListItem> = app
         .config_files
         .iter()
@@ -545,13 +601,18 @@ fn render_config(f: &mut Frame, app: &App) {
             Line::from(Span::raw(format!("{prefix} {l}")))
         })
         .collect();
-    let body = Paragraph::new(lines).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" Editor (F6) — arrows move, type to edit, S save, Tab switch file, Esc back "),
-    );
-    let chunks = Layout::horizontal([Constraint::Percentage(22), Constraint::Percentage(78)])
-        .split(f.area());
+    let body = Paragraph::new(lines)
+        .scroll((
+            app.cur_row
+                .saturating_sub(area.height.saturating_sub(3) as usize)
+                .min(u16::MAX as usize) as u16,
+            0,
+        ))
+        .block(Block::default().borders(Borders::ALL).title(
+            " Editor (F6) — arrows move, type to edit, Ctrl+S save, Tab switch file, Esc back ",
+        ));
+    let chunks =
+        Layout::horizontal([Constraint::Percentage(22), Constraint::Percentage(78)]).split(area);
     f.render_widget(files, chunks[0]);
     f.render_widget(body, chunks[1]);
 }
@@ -625,65 +686,75 @@ fn render_input(f: &mut Frame, app: &App) {
     }
     let height = 3 + body.lines().count() as u16;
     let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(height)]).split(f.area());
+    f.render_widget(Clear, chunks[1]);
     f.render_widget(
         Paragraph::new(body).block(Block::default().borders(Borders::ALL).title(title)),
         chunks[1],
     );
 }
 
-fn render_notice(f: &mut Frame, app: &App) {
-    if let Some(n) = &app.notice {
-        let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(f.area());
-        f.render_widget(
-            Paragraph::new(n.clone()).style(
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            chunks[0],
-        );
+fn render(f: &mut Frame, app: &mut App, snap: &Snapshot) {
+    let chunks = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(0),
+        Constraint::Length(1),
+        Constraint::Length(2),
+    ])
+    .split(f.area());
+    f.render_widget(
+        Paragraph::new(format!(
+            " Synora | {} jobs | {} workers | {}",
+            snap.jobs.len(),
+            snap.workers.len(),
+            if snap.error.is_some() {
+                "refresh failed — cached data"
+            } else {
+                "auto refresh 2s"
+            }
+        ))
+        .style(Style::default().fg(Color::Cyan)),
+        chunks[0],
+    );
+    let area = chunks[1];
+    match app.mode {
+        Mode::Jobs => render_jobs(f, app, snap, area),
+        Mode::Workers => render_workers(f, app, snap, area),
+        Mode::Proxies => render_proxies(f, app, snap, area),
+        Mode::Logs => render_logs(f, app, snap, area),
+        Mode::JobDetail => render_job_detail(f, app, snap, area),
+        Mode::SpecEdit => render_spec_edit(f, app, snap, area),
+        Mode::Config => render_config(f, app, area),
     }
-}
-
-fn render_footer(f: &mut Frame, app: &App, snap: &Snapshot) {
-    let chunks = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(f.area());
-    // Mode-specific key hints (user: keys only show in the panel they apply to).
+    let message = snap
+        .error
+        .as_deref()
+        .or(app.notice.as_deref())
+        .unwrap_or("");
+    f.render_widget(
+        Paragraph::new(message).style(Style::default().fg(if snap.error.is_some() {
+            Color::Red
+        } else {
+            Color::Cyan
+        })),
+        chunks[2],
+    );
     let mode_hint = match app.mode {
-        Mode::Jobs => "Enter detail  r run  s stop  D delete  / search  n new-job",
+        Mode::Jobs => "↑/↓ select  Enter detail  r run  s stop  D delete  / search  n new-job",
         Mode::JobDetail => "Esc back  r run  s stop  w assign worker  e edit config  D delete",
-        Mode::SpecEdit => "Enter edit value  S save+reload  Esc back",
+        Mode::SpecEdit => "↑/↓ select  Enter edit  S save+reload  Esc back",
         Mode::Workers => "↑/↓ select  d remove worker",
         Mode::Proxies => "a add-proxy  w register CF-One/WARP  e edit config",
-        Mode::Config => "S save  Tab switch file  Esc back",
-        Mode::Logs => "↑/↓ select job  (logs follow selection)",
+        Mode::Config => "Ctrl+S save  Tab switch file  Esc back",
+        Mode::Logs => "↑/↓ select job  PgUp/PgDn scroll  End live",
     };
-    let hint = format!("F1 Jobs  F2 Workers  F3 Proxies  F5 Logs  q/F10 quit   |   {mode_hint}");
     f.render_widget(
-        Paragraph::new(hint).style(Style::default().fg(Color::DarkGray)),
-        chunks[1],
+        Paragraph::new(format!(
+            "F1 Jobs  F2 Workers  F3 Proxies  F5 Logs  F6 Config  q/F10 quit\n{mode_hint}"
+        ))
+        .style(Style::default().fg(Color::DarkGray)),
+        chunks[3],
     );
-    if let Some(err) = &snap.error {
-        f.render_widget(
-            Paragraph::new(Line::from(Span::raw(format!("error: {err}"))))
-                .style(Style::default().fg(Color::Red)),
-            chunks[0],
-        );
-    }
-}
-
-fn render(f: &mut Frame, app: &mut App, snap: &Snapshot) {
-    match app.mode {
-        Mode::Jobs => render_jobs(f, app, snap),
-        Mode::Workers => render_workers(f, app, snap),
-        Mode::Proxies => render_proxies(f, app, snap),
-        Mode::Logs => render_logs(f, app, snap),
-        Mode::JobDetail => render_job_detail(f, app, snap),
-        Mode::SpecEdit => render_spec_edit(f, app, snap),
-        Mode::Config => render_config(f, app),
-    }
     render_input(f, app);
-    render_notice(f, app);
-    render_footer(f, app, snap);
 }
 
 fn detect_local_socks() -> Vec<u16> {
@@ -838,54 +909,25 @@ fn upsert_job_section(
 /// Build the config editor file list: the main config, its include globs,
 /// and the worker config when present next to it.
 fn load_config_files(app: &mut App) {
-    let mut files: Vec<PathBuf> = Vec::new();
-    if let Some(main) = &app.cfg_path {
-        files.push(main.clone());
-        if let Ok(text) = std::fs::read_to_string(main) {
-            for line in text.lines() {
-                let t = line.trim();
-                let Some(rest) = t.strip_prefix("include").and_then(|r| {
-                    r.trim_start_matches('=')
-                        .trim()
-                        .strip_prefix('[')
-                        .map(|_| r.trim_start_matches('=').trim())
-                        .or(Some(r.trim_start_matches('=').trim()))
-                }) else {
-                    continue;
-                };
-                // Both `include = "glob"` and `include = ["a", "b"]` forms.
-                let pats: Vec<&str> =
-                    if let Some(inner) = rest.strip_prefix('[').and_then(|r| r.strip_suffix(']')) {
-                        inner
-                            .split(',')
-                            .filter_map(|p| {
-                                let p = p.trim();
-                                p.strip_prefix('"').and_then(|s| s.strip_suffix('"'))
-                            })
-                            .collect()
-                    } else {
-                        rest.strip_prefix('"')
-                            .and_then(|s| s.strip_suffix('"'))
-                            .into_iter()
-                            .collect()
-                    };
-                let base = main.parent().unwrap_or(std::path::Path::new("."));
-                for pat in pats {
-                    let full = base.join(pat);
-                    if let Ok(paths) = glob::glob(&full.to_string_lossy()) {
-                        for p in paths.flatten() {
-                            files.push(p);
-                        }
-                    }
-                }
+    let mut files = if let Some(main) = &app.cfg_path {
+        match config_sources(main) {
+            Ok(files) => files,
+            Err(e) => {
+                app.notice = Some(e);
+                vec![main.clone()]
             }
         }
-        if let Some(dir) = main.parent() {
-            let worker = dir.join("worker.toml");
-            if worker.exists() {
-                files.push(worker);
-            }
-        }
+    } else {
+        Vec::new()
+    };
+    if let Some(worker) = app
+        .cfg_path
+        .as_ref()
+        .and_then(|p| p.parent())
+        .map(|p| p.join("worker.toml"))
+        .filter(|p| p.exists())
+    {
+        files.push(worker);
     }
     files.sort();
     files.dedup();
@@ -1044,8 +1086,13 @@ fn spec_to_editor(json: &serde_json::Value) -> serde_json::Value {
                 if k == "type" {
                     continue;
                 }
-                let dest = if k == "command" {
-                    "docker_command"
+                let dest = if po.get("type").and_then(|v| v.as_str()) == Some("docker") {
+                    match k.as_str() {
+                        "command" => "docker_command",
+                        "options" => "docker_options",
+                        "network" => "docker_network",
+                        other => other,
+                    }
                 } else {
                     k.as_str()
                 };
@@ -1070,6 +1117,14 @@ fn spec_to_editor(json: &serde_json::Value) -> serde_json::Value {
     }
     if let Some(v) = obj.get("retry_delay") {
         out.insert("retry_delay".into(), format_duration_field(v));
+    }
+    for key in ["hooks", "safety", "verify"] {
+        if let Some(value) = obj.get(key) {
+            out.insert(key.into(), value.clone());
+        }
+    }
+    if let Some(policy) = obj.get("snapshot_policy") {
+        out.insert("snapshot".into(), serde_json::json!({"policy": policy, "failure": obj.get("snapshot_failure").cloned().unwrap_or(serde_json::json!("fail"))}));
     }
     let provider = out
         .get("provider")
@@ -1150,6 +1205,9 @@ fn duration_secs(v: &serde_json::Value) -> Option<i64> {
 }
 
 fn format_duration_field(v: &serde_json::Value) -> serde_json::Value {
+    if v.is_null() {
+        return serde_json::Value::Null;
+    }
     if let Some(s) = v.as_str() {
         return serde_json::Value::String(s.to_string());
     }
@@ -1172,6 +1230,9 @@ fn format_duration_field(v: &serde_json::Value) -> serde_json::Value {
 }
 
 fn format_memory_field(v: &serde_json::Value) -> serde_json::Value {
+    if v.is_null() {
+        return serde_json::Value::Null;
+    }
     if let Some(s) = v.as_str() {
         return serde_json::Value::String(s.to_string());
     }
@@ -1251,7 +1312,14 @@ fn flatten_spec(json: &serde_json::Value) -> Vec<(String, String)> {
                     let items: Vec<String> = a.iter().map(json_scalar).collect();
                     format!("[{}]", items.join(", "))
                 }
-                serde_json::Value::Object(_) => continue, // nested tables handled below
+                serde_json::Value::Object(_) => {
+                    out.extend(
+                        flatten_spec(v)
+                            .into_iter()
+                            .map(|(field, value)| (format!("{k}.{field}"), value)),
+                    );
+                    continue;
+                }
                 other => other.to_string(),
             };
             out.push((k.clone(), val));
@@ -1264,87 +1332,157 @@ fn flatten_spec(json: &serde_json::Value) -> Vec<(String, String)> {
 /// Rewrite a job's whole [[jobs]] block from its spec JSON (the
 /// structured editor's save path). Nested tables (hooks/safety/snapshot/
 /// verify) render as [jobs.xxx] subtables.
+fn config_sources(path: &std::path::Path) -> Result<Vec<PathBuf>, String> {
+    let mut pending = vec![(path.to_path_buf(), 0usize)];
+    let mut seen = std::collections::HashSet::new();
+    let mut sources = Vec::new();
+    while let Some((path, depth)) = pending.pop() {
+        if depth > 32 || sources.len() >= 1024 {
+            return Err("configuration include limit exceeded".into());
+        }
+        let path = path.canonicalize().map_err(|e| e.to_string())?;
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        let doc = text
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|_| "invalid TOML in config source".to_string())?;
+        let patterns: Vec<&str> = match doc.get("include") {
+            Some(item) if item.is_str() => item.as_str().into_iter().collect(),
+            Some(item) => item
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                .unwrap_or_default(),
+            None => Vec::new(),
+        };
+        for pattern in patterns {
+            if pattern.contains("${") {
+                return Err("edit configuration with variable-based includes through F6".into());
+            }
+            let full = path
+                .parent()
+                .unwrap_or(std::path::Path::new("."))
+                .join(pattern);
+            for entry in glob::glob(&full.to_string_lossy())
+                .map_err(|e| e.to_string())?
+                .take(1025)
+            {
+                pending.push((entry.map_err(|e| e.to_string())?, depth + 1));
+            }
+        }
+        sources.push(path);
+    }
+    Ok(sources)
+}
+
+fn without_nulls(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.iter()
+                .filter(|(_, v)| !v.is_null())
+                .map(|(k, v)| (k.clone(), without_nulls(v)))
+                .collect(),
+        ),
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.iter().map(without_nulls).collect())
+        }
+        _ => value.clone(),
+    }
+}
+
+fn order_tables(table: &mut toml_edit::Table, position: &mut usize) {
+    table.set_position(*position);
+    *position += 1;
+    for (_, item) in table.iter_mut() {
+        match item {
+            toml_edit::Item::Table(child) => order_tables(child, position),
+            toml_edit::Item::ArrayOfTables(tables) => {
+                for child in tables.iter_mut() {
+                    order_tables(child, position);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 fn upsert_job_block(
     config_path: &std::path::Path,
     job_name: &str,
     json: &serde_json::Value,
 ) -> Result<(), String> {
-    let dir = config_path.parent().unwrap_or(std::path::Path::new("."));
-    let mut toml_lines = vec!["[[jobs]]".to_string(), format!("name = \"{job_name}\"")];
-    let mut nested: Vec<(String, String)> = Vec::new();
-    if let Some(obj) = json.as_object() {
-        let mut keys: Vec<&String> = obj.keys().filter(|k| k.as_str() != "name").collect();
-        keys.sort();
-        for k in keys {
-            let v = &obj[k];
-            if v.is_object() {
-                for (nk, nv) in v.as_object().unwrap() {
-                    nested.push((format!("{k}.{nk}"), json_scalar(nv)));
-                }
-                continue;
-            }
-            let val = match v {
-                serde_json::Value::String(s) => format!("\"{}\"", s.replace('\n', "\\n")),
-                serde_json::Value::Array(a) => {
-                    let items: Vec<String> = a
-                        .iter()
-                        .map(json_scalar)
-                        .map(|x| format!("\"{x}\"").replace('\n', "\\n"))
-                        .collect();
-                    format!("[{}]", items.join(", "))
-                }
-                serde_json::Value::Null => continue,
-                other => other.to_string(),
-            };
-            toml_lines.push(format!("{k} = {val}"));
-        }
-    }
-    let block = toml_lines.join("\n");
-    let mut done = false;
-    for entry in glob::glob(&format!("{}/**/*.toml", dir.display()))
-        .map_err(|e| e.to_string())?
-        .flatten()
-    {
-        let text = std::fs::read_to_string(&entry).map_err(|e| e.to_string())?;
-        if !text.contains(&format!("name = \"{job_name}\"")) {
-            continue;
-        }
-        // Split on the section marker and rebuild the matching block.
-        let mut parts: Vec<&str> = text.split("[[jobs]]").collect();
-        let mut rebuilt = String::new();
-        let mut replaced = false;
-        for part in parts.drain(..) {
-            if !replaced && part.contains(&format!("name = \"{job_name}\"")) {
-                // Drop the old block (up to the next section header).
-                let cut = part.find("\n[[").unwrap_or(part.len());
-                rebuilt.push_str("[[jobs]]");
-                rebuilt.push_str(&block);
-                rebuilt.push_str(part[cut..].trim_start_matches('\n'));
-                rebuilt.push('\n');
-                replaced = true;
-            } else {
-                if !rebuilt.is_empty() || !part.is_empty() {
-                    rebuilt.push_str("[[jobs]]");
-                    rebuilt.push_str(part);
+    let mut clean = without_nulls(json);
+    clean["name"] = serde_json::Value::String(job_name.to_string());
+    let serialized = toml::to_string(&clean).map_err(|e| e.to_string())?;
+    config::validate_job_text(&serialized).map_err(|e| e.to_string())?;
+    let replacement = serialized
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|_| "invalid edited job".to_string())?;
+    let mut updates = Vec::new();
+    for path in config_sources(config_path)? {
+        let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+        let mut doc = text
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|_| "invalid TOML".to_string())?;
+        let mut found = false;
+        if doc.get("name").and_then(|v| v.as_str()) == Some(job_name)
+            && doc.get("provider").is_some()
+        {
+            *doc.as_table_mut() = replacement.as_table().clone();
+            found = true;
+        } else if let Some(jobs) = doc.get_mut("jobs").and_then(|v| v.as_array_of_tables_mut()) {
+            for job in jobs.iter_mut() {
+                if job.get("name").and_then(|v| v.as_str()) == Some(job_name) {
+                    if found {
+                        return Err("duplicate job definitions; edit aborted".into());
+                    }
+                    *job = replacement.as_table().clone();
+                    found = true;
                 }
             }
         }
-        if replaced {
-            std::fs::write(&entry, rebuilt).map_err(|e| e.to_string())?;
-            done = true;
+        if found {
+            order_tables(doc.as_table_mut(), &mut 0);
+            updates.push((path, doc.to_string()));
         }
     }
-    if done {
-        Ok(())
-    } else {
-        Err(format!("job `{job_name}` not found in any config file"))
+    if updates.len() != 1 {
+        return Err(format!(
+            "expected one config definition of `{job_name}`, found {}",
+            updates.len()
+        ));
     }
+    let (path, text) = updates.remove(0);
+    let temp = path.with_extension(format!("tmp-{}", synora_core::RunId::new()));
+    let metadata = std::fs::metadata(&path).map_err(|e| e.to_string())?;
+    use std::io::Write;
+    let result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
+        file.set_permissions(metadata.permissions())?;
+        file.write_all(text.as_bytes())?;
+        file.sync_all()?;
+        std::fs::rename(&temp, &path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(temp);
+    }
+    result.map_err(|e| e.to_string())
 }
 
 /// Set a top-level field of the spec JSON, guessing the value type from
 /// the current value (numbers stay numbers, arrays parse as arrays of
 /// strings, booleans stay booleans; everything else is a string).
 fn set_json_field(json: &mut serde_json::Value, field: &str, value: &str) {
+    if let Some((parent, child)) = field.split_once('.') {
+        if let Some(nested) = json.get_mut(parent) {
+            set_json_field(nested, child, value);
+        }
+        return;
+    }
     let Some(obj) = json.as_object_mut() else {
         return;
     };
@@ -1363,12 +1501,14 @@ fn set_json_field(json: &mut serde_json::Value, field: &str, value: &str) {
                     .unwrap_or_else(|_| serde_json::Value::String(value.to_string()))
             }),
         Some(serde_json::Value::Bool(_)) => serde_json::Value::Bool(value == "true"),
-        Some(serde_json::Value::Array(_)) => serde_json::Value::Array(
-            value
-                .split(',')
-                .map(|s| serde_json::Value::String(s.trim().to_string()))
-                .collect(),
-        ),
+        Some(serde_json::Value::Array(_)) => serde_json::from_str(value).unwrap_or_else(|_| {
+            serde_json::Value::Array(
+                value
+                    .split(',')
+                    .map(|s| serde_json::Value::String(s.trim().to_string()))
+                    .collect(),
+            )
+        }),
         _ => serde_json::Value::String(value.to_string()),
     };
     obj.insert(field.to_string(), new_value);
@@ -1512,6 +1652,28 @@ async fn register_cf_warp(client: &Client, cfg_path: &Option<PathBuf>) -> Result
 }
 
 /// Entry point used by `synora tui` and the standalone `synora-tui` binary.
+fn char_byte(line: &str, column: usize) -> usize {
+    line.char_indices()
+        .nth(column)
+        .map(|(i, _)| i)
+        .unwrap_or(line.len())
+}
+
+struct TerminalRestore;
+impl Drop for TerminalRestore {
+    fn drop(&mut self) {
+        ratatui::restore();
+    }
+}
+
+fn preserve_editor(incoming: &mut Snapshot, current: &Snapshot, editing: Option<&str>) {
+    if editing.is_some() && current.spec_job.as_deref() == editing {
+        incoming.spec_job = current.spec_job.clone();
+        incoming.spec_json = current.spec_json.clone();
+        incoming.spec_fields = current.spec_fields.clone();
+    }
+}
+
 pub fn run(
     config: Option<PathBuf>,
     manager: Option<String>,
@@ -1529,7 +1691,7 @@ pub fn run(
     // Background refresh every 2s: world data + the selected job's
     // logs/history/spec. The render loop never blocks on the network
     // (a slow manager must not freeze the UI).
-    let selected_shared = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let selected_shared = Arc::new(Mutex::new(None::<String>));
     let detail_shared = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let logs_shared = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let edit_job_shared = std::sync::Arc::new(tokio::sync::Mutex::new(None::<String>));
@@ -1551,17 +1713,23 @@ pub fn run(
                 let mut s = snap.lock().await.clone();
                 fetch(&client, &mut s).await;
                 let frozen = edit_job_shared.lock().await.clone();
-                let idx = selected_shared.load(Ordering::Relaxed);
-                let name = frozen.or_else(|| s.jobs.get(idx).map(|j| j.name.clone()));
+                let name = frozen.or(selected_shared.lock().await.clone());
                 if let Some(name) = name {
                     // Only pull logs while the Logs panel is open.
                     if logs_shared.load(Ordering::Relaxed) {
+                        if s.log_job.as_deref() != Some(&name) {
+                            s.log_lines.clear();
+                        }
                         s.log_job = Some(name.clone());
                         if let Ok(log) = client.job_logs(&name, 200).await {
                             s.log_lines = log.lines().map(String::from).collect();
                         }
                     }
                     if detail_shared.load(Ordering::Relaxed) {
+                        if s.history_job.as_deref() != Some(&name) {
+                            s.history.clear();
+                        }
+                        s.history_job = Some(name.clone());
                         if let Ok(h) = client.job_history(&name).await {
                             s.history = h;
                         }
@@ -1581,7 +1749,10 @@ pub fn run(
                         }
                     }
                 }
-                *snap.lock().await = s;
+                let editing = edit_job_shared.lock().await;
+                let mut current = snap.lock().await;
+                preserve_editor(&mut s, &current, editing.as_deref());
+                *current = s;
             }
         });
     }
@@ -1605,6 +1776,7 @@ pub fn run(
             "cannot initialize the terminal ({e}). Is TERM set? The TUI needs a real terminal — try `export TERM=xterm-256color` and avoid dumb terminals."
         )
     })?;
+    let _restore = TerminalRestore;
     let result = loop {
         // Sync the shared selection state to the background fetcher.
         if let Ok(mut g) = edit_job_shared.try_lock() {
@@ -1625,7 +1797,8 @@ pub fn run(
                 app.jobs_state.select(Some(idx));
             }
         }
-        selected_shared.store(app.selected, Ordering::Relaxed);
+        app.reconcile_selection(&snap_view);
+        *selected_shared.blocking_lock() = app.selected_name.clone();
         detail_shared.store(
             app.mode == Mode::JobDetail || app.mode == Mode::SpecEdit,
             Ordering::Relaxed,
@@ -1639,7 +1812,9 @@ pub fn run(
                 snap_view.error
             );
         }
-        let _ = terminal.draw(|f| render(f, &mut app, &snap_view));
+        terminal
+            .draw(|f| render(f, &mut app, &snap_view))
+            .map_err(|e| e.to_string())?;
         if !event::poll(Duration::from_millis(400)).map_err(|e| e.to_string())? {
             continue;
         }
@@ -1942,6 +2117,13 @@ pub fn run(
         // Structured job editor: arrows select a field, Enter edits its
         // value, S rewrites the whole job block and reloads.
         if app.mode == Mode::SpecEdit {
+            if key.code != KeyCode::Esc
+                && (snap_view.spec_job.as_deref() != app.edit_job.as_deref()
+                    || snap_view.spec_json.is_none())
+            {
+                app.notice = Some("waiting for selected job configuration".into());
+                continue;
+            }
             match key.code {
                 KeyCode::Esc => {
                     app.mode = Mode::JobDetail;
@@ -2033,12 +2215,19 @@ pub fn run(
                     app.mode = Mode::Jobs;
                 }
                 KeyCode::Tab => {
+                    if app.dirty {
+                        app.notice = Some(
+                            "save changes before switching files (Ctrl+S), or Esc to discard"
+                                .into(),
+                        );
+                        continue;
+                    }
                     if !app.config_files.is_empty() {
                         app.config_idx = (app.config_idx + 1) % app.config_files.len();
                         load_config_file(&mut app);
                     }
                 }
-                KeyCode::Char('S') => {
+                KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     if let Some(path) = app.config_files.get(app.config_idx).cloned() {
                         let content = app.file_lines.join("\n") + "\n";
                         let write = std::fs::write(&path, &content);
@@ -2079,7 +2268,7 @@ pub fn run(
                 KeyCode::Right => app.cur_col += 1,
                 KeyCode::Enter => {
                     let line = app.file_lines.get(app.cur_row).cloned().unwrap_or_default();
-                    let col = app.cur_col.min(line.len());
+                    let col = char_byte(&line, app.cur_col);
                     let (head, tail) = line.split_at(col);
                     app.file_lines[app.cur_row] = head.to_string();
                     app.file_lines.insert(app.cur_row + 1, tail.to_string());
@@ -2090,25 +2279,28 @@ pub fn run(
                 KeyCode::Backspace => {
                     let line = app.file_lines.get(app.cur_row).cloned().unwrap_or_default();
                     if app.cur_col > 0 {
-                        let col = app.cur_col.min(line.len()).saturating_sub(1);
+                        let position = app.cur_col.min(line.chars().count()).saturating_sub(1);
+                        let col = char_byte(&line, position);
                         let mut l = line;
-                        l.remove(col);
+                        if col < l.len() {
+                            l.remove(col);
+                        }
                         app.file_lines[app.cur_row] = l;
-                        app.cur_col = col;
+                        app.cur_col = position;
                     } else if app.cur_row > 0 {
                         let removed = app.file_lines.remove(app.cur_row);
                         app.cur_row -= 1;
                         let cur = &app.file_lines[app.cur_row];
-                        app.cur_col = cur.len();
+                        app.cur_col = cur.chars().count();
                         app.file_lines[app.cur_row] = format!("{cur}{removed}");
                     }
                     app.dirty = true;
                 }
                 KeyCode::Delete => {
                     if let Some(line) = app.file_lines.get(app.cur_row).cloned() {
-                        if app.cur_col < line.len() && !line.is_empty() {
+                        if app.cur_col < line.chars().count() && !line.is_empty() {
                             let mut l = line;
-                            l.remove(app.cur_col);
+                            l.remove(char_byte(&l, app.cur_col));
                             app.file_lines[app.cur_row] = l;
                             app.dirty = true;
                         }
@@ -2116,11 +2308,16 @@ pub fn run(
                 }
                 KeyCode::Char(c) => {
                     let line = app.file_lines.get(app.cur_row).cloned().unwrap_or_default();
-                    let col = app.cur_col.min(line.len());
+                    let col = char_byte(&line, app.cur_col);
                     let mut l = line;
                     l.insert(col, c);
                     app.file_lines[app.cur_row] = l;
-                    app.cur_col = col + 1;
+                    app.cur_col = app.cur_col.min(
+                        app.file_lines[app.cur_row]
+                            .chars()
+                            .count()
+                            .saturating_sub(1),
+                    ) + 1;
                     app.dirty = true;
                 }
                 _ => {}
@@ -2129,6 +2326,16 @@ pub fn run(
         }
 
         match key.code {
+            KeyCode::PageUp if app.mode == Mode::Logs => {
+                app.log_offset = app
+                    .log_offset
+                    .saturating_add(10)
+                    .min(snap_view.log_lines.len().saturating_sub(1))
+            }
+            KeyCode::PageDown if app.mode == Mode::Logs => {
+                app.log_offset = app.log_offset.saturating_sub(10)
+            }
+            KeyCode::End if app.mode == Mode::Logs => app.log_offset = 0,
             KeyCode::Char('q') | KeyCode::F(10) => break Ok(()),
             KeyCode::F(1) => app.mode = Mode::Jobs,
             KeyCode::F(2) => app.mode = Mode::Workers,
@@ -2154,8 +2361,7 @@ pub fn run(
                     let next = cur.saturating_sub(1);
                     app.workers_state.select(Some(next));
                 } else {
-                    app.selected = app.selected.saturating_sub(1);
-                    app.jobs_state.select(Some(app.selected));
+                    app.move_job(&snap_view, false);
                 }
             }
             KeyCode::Down => {
@@ -2164,8 +2370,7 @@ pub fn run(
                     let next = (cur + 1).min(snap_view.workers.len().saturating_sub(1));
                     app.workers_state.select(Some(next));
                 } else {
-                    app.selected += 1;
-                    app.jobs_state.select(Some(app.selected));
+                    app.move_job(&snap_view, true);
                 }
             }
             KeyCode::Char('d') if app.mode == Mode::Workers => {
@@ -2202,7 +2407,7 @@ pub fn run(
                 }
             }
             KeyCode::Esc if app.mode == Mode::JobDetail => app.mode = Mode::Jobs,
-            KeyCode::Char('r') => {
+            KeyCode::Char('r') if app.mode == Mode::Jobs || app.mode == Mode::JobDetail => {
                 if let Some(job) = snap_view.jobs.get(app.selected) {
                     let client = client.clone();
                     let name = job.name.clone();
@@ -2214,7 +2419,7 @@ pub fn run(
                     });
                 }
             }
-            KeyCode::Char('s') => {
+            KeyCode::Char('s') if app.mode == Mode::Jobs || app.mode == Mode::JobDetail => {
                 if let Some(job) = snap_view.jobs.get(app.selected) {
                     let client = client.clone();
                     let name = job.name.clone();
@@ -2463,5 +2668,114 @@ mod block_tests {
         assert!(map["options"].contains("--delete-excluded"), "{map:?}");
         assert_eq!(map["schedule"], "interval");
         assert_eq!(map["every"], "4h");
+    }
+}
+
+#[cfg(test)]
+mod interaction_tests {
+    use super::*;
+    fn jobs(names: &[&str]) -> Snapshot {
+        Snapshot {
+            jobs: names
+                .iter()
+                .map(|name| {
+                    serde_json::from_value(serde_json::json!({
+                        "name": name, "enabled": true, "status": "SUCCESS", "provider": "rsync",
+                        "storage_path": "/mirror", "schedule": "manual"
+                    }))
+                    .unwrap()
+                })
+                .collect(),
+            ..Default::default()
+        }
+    }
+    #[test]
+    fn filtering_and_refresh_keep_action_target_on_highlighted_job() {
+        let mut app = App::new(None);
+        let snap = jobs(&["alpha", "beta", "gamma"]);
+        app.search = "beta".into();
+        app.reconcile_selection(&snap);
+        assert_eq!(app.selected_job(&snap).unwrap().name, "beta");
+        assert_eq!(app.jobs_state.selected(), Some(0));
+        app.move_job(&snap, true);
+        assert_eq!(app.selected_job(&snap).unwrap().name, "beta");
+        let refreshed = jobs(&["beta", "alpha"]);
+        app.reconcile_selection(&refreshed);
+        assert_eq!(app.selected_job(&refreshed).unwrap().name, "beta");
+        app.search = "missing".into();
+        app.reconcile_selection(&refreshed);
+        assert!(app.selected_job(&refreshed).is_none());
+        assert_eq!(app.jobs_state.selected(), None);
+    }
+    #[test]
+    fn background_refresh_preserves_unsaved_spec() {
+        let mut incoming = Snapshot {
+            spec_job: Some("job".into()),
+            spec_json: Some(serde_json::json!({"upstream":"old"})),
+            ..Default::default()
+        };
+        let current = Snapshot {
+            spec_job: Some("job".into()),
+            spec_json: Some(serde_json::json!({"upstream":"edited"})),
+            ..Default::default()
+        };
+        preserve_editor(&mut incoming, &current, Some("job"));
+        assert_eq!(incoming.spec_json, current.spec_json);
+        assert_eq!(char_byte("镜像站", 1), 3);
+        assert_eq!(char_byte("镜像站", 99), 9);
+    }
+    #[test]
+    fn rendering_small_terminals_does_not_overlap_chrome_or_panic() {
+        for (w, h) in [(1, 1), (20, 5), (80, 24)] {
+            let backend = ratatui::backend::TestBackend::new(w, h);
+            let mut terminal = ratatui::Terminal::new(backend).unwrap();
+            let mut app = App::new(None);
+            let snap = jobs(&["alpha", "beta"]);
+            app.reconcile_selection(&snap);
+            for mode in [
+                Mode::Jobs,
+                Mode::Workers,
+                Mode::Logs,
+                Mode::SpecEdit,
+                Mode::Config,
+            ] {
+                app.mode = mode;
+                terminal.draw(|f| render(f, &mut app, &snap)).unwrap();
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod editor_roundtrip_tests {
+    use super::*;
+    #[test]
+    fn nested_settings_and_quoted_commands_survive_save() {
+        let dir = std::env::temp_dir().join(format!("synora-editor-{}", synora_core::RunId::new()));
+        std::fs::create_dir_all(dir.join("jobs")).unwrap();
+        let root = dir.join("synora.toml");
+        std::fs::write(
+            &root,
+            "include = [\"jobs/*.toml\"]\n[daemon]\nlog_dir = \"/tmp/retained\"\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("jobs/a.toml"), "[[jobs]]\nname = \"a\"\nschedule = \"manual\"\nprovider = \"script\"\ncommand = \"true\"\nstorage = \"/tmp/a\"\n\n[[jobs]]\nname = \"b\"\nschedule = \"manual\"\nprovider = \"script\"\ncommand = \"true\"\nstorage = \"/tmp/b\"\n").unwrap();
+        let original = ConfigLoader::load(&root, &CliOverrides::default()).unwrap();
+        let mut editor = spec_to_editor(&serde_json::to_value(&original.jobs[0]).unwrap());
+        editor["command"] = serde_json::json!("printf '%s' \"quoted\\path\"");
+        editor["hooks"] = serde_json::json!({"on_success":["printf 'done'"], "before_sync":[], "after_sync":[], "on_failure":[]});
+        editor["snapshot"] = serde_json::json!({"policy":"before-sync", "failure":"warn"});
+        upsert_job_block(&root, "a", &editor).unwrap();
+        let after = ConfigLoader::load(&root, &CliOverrides::default()).unwrap();
+        let a = after.jobs.iter().find(|j| j.name == "a").unwrap();
+        assert_eq!(a.hooks.on_success, vec!["printf 'done'"]);
+        assert_eq!(a.snapshot_policy, synora_core::SnapshotPolicy::BeforeSync);
+        assert_eq!(a.snapshot_failure, synora_core::job::SnapshotFailure::Warn);
+        assert!(
+            matches!(&a.provider, synora_core::ProviderConfig::Script { command, .. } if command == "printf '%s' \"quoted\\path\"")
+        );
+        assert_eq!(after.jobs.len(), 2);
+        assert_eq!(after.daemon.log_dir, PathBuf::from("/tmp/retained"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

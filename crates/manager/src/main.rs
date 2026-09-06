@@ -101,10 +101,14 @@ async fn main() -> Result<(), String> {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
             loop {
                 tick.tick().await;
-                let nr = probe_engine.netroute.read().unwrap().clone();
+                let nr = probe_engine
+                    .netroute
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
                 if let Some(nr) = nr {
                     let results = nr.probe_all().await;
-                    *probes.write().unwrap() = results;
+                    *probes.write().unwrap_or_else(|e| e.into_inner()) = results;
                 }
             }
         });
@@ -126,7 +130,9 @@ async fn main() -> Result<(), String> {
             let _ = reaper_engine.store.reconcile_stale_job_status().await;
             if let Ok(expired) = reaper_engine.store.expired_runs(now).await {
                 for run in expired {
-                    let _ = reaper_engine.store.set_run_lost(&run.id).await;
+                    if !matches!(reaper_engine.store.expire_run(&run.id, now).await, Ok(true)) {
+                        continue;
+                    }
                     reaper_engine.metrics.inc_counter(
                         "synora_job_lost_total",
                         &[("job", run.job_id.as_str())],

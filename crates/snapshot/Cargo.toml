@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+storage.workspace = true
+command-runner.workspace = true
 synora-core.workspace = true
 config.workspace = true
 serde.workspace = true

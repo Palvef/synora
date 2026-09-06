@@ -73,10 +73,10 @@
 | `retry` | `int` | 3 | 失败重试次数 |
 | `retry_delay` | `string` | `30s` | 首次重试等待 |
 | `retry_backoff` | `float` | 2.0 | 退避倍数（封顶 24h） |
-| `success_exit_codes` | `int[]` | `[23, 24]` | 视为成功的退出码（tunasync 约定：0 恒成功，23/24 部分错误不失败） |
+| `success_exit_codes` | `int[]` | `[24]` | 0 恒成功；24 接受源文件消失，23 默认失败。显式 `[23,24]` 可采用 tunasync 兼容策略 |
 | `fail_on_match` | `string` | — | 输出匹配该正则即判失败（即使退出码 0） |
 | `max_concurrency` | `int` | 1 | 同任务最大并发运行数 |
-| `on_worker_lost` | `"retry"`/`"fail"` | `"retry"` | worker 失联（租约过期 → LOST）后的处理 |
+| `on_worker_lost` | `"retry"`/`"fail"` | `"fail"` | worker 失联（租约过期 → LOST）后的处理 |
 | `statistics` | `"provider"`/`"filesystem"` | `"provider"` | 仓库大小统计来源 |
 | `resources` | `string[]` | — | 需求标签（匹配 worker labels） |
 | `priority` | `int` | 0 | 队列优先级 |
@@ -260,3 +260,13 @@ Worker 上始终与 script 共用 `synora-scripts` 容器。配置仍是 `provid
 | `ca_cert` | `string` | 可选：校验 manager TLS 的 CA |
 | `log_dir` | `string` | 日志目录 |
 | `scripts_image` | `string` | git/script 使用的容器镜像，默认 `synora-scripts:latest` |
+
+### 加固新增配置
+
+- `[api] metrics_auth = true`：默认要求 `metrics.read` 权限。
+- `[jobs.snapshot] failure = "fail"`：快照失败策略，支持 `fail`、`warn`、`ignore`，默认 `fail`。
+- API reload 要求 `config.reload`，operator 默认不拥有。
+
+升级前应停止派发并等待旧 Worker 退出，备份数据库，再一起升级 Manager 和 Worker。新版租约协议要求领取任务时声明协议版本 2，完成上报携带当前 Worker、租约 token 和 attempt；不支持混用旧版 Worker。
+
+`on_worker_lost` 默认 `"fail"`：LOST 后不再定时派发；确认旧写入者已停止后手动触发恢复。`"retry"` 为显式选择，跨宿主容器需基础设施 fencing。
