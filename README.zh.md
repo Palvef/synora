@@ -121,12 +121,12 @@ viewer，权限键 `jobs.read` / `jobs.write` / `runs.manage` / `workers.read` /
 ## 构建与开发
 
 ```sh
-CGO_ENABLED=0 cargo build --workspace
-cargo test --workspace
-cargo clippy --workspace
+scripts/ci.sh  # 格式、版本、Clippy、测试和构建
 ```
 
-GitHub Actions：push/PR 自动 CI；`VERSION` 文件变更时自动构建 Linux
+Rust 版本固定在 `rust-toolchain.toml`。本地设置 `SYNORA_TEST_PG_URL` 指向空的、可丢弃的 PostgreSQL 数据库即可执行并发集成测试；CI 默认使用 PostgreSQL 17 执行该测试。
+
+GitHub Actions：所有分支 push/PR 自动 CI；`VERSION` 文件变更时自动构建 Linux
 x86_64/aarch64 并发布 Release。
 
 ## 工程加固与状态

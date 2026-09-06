@@ -870,6 +870,8 @@ impl Store {
         .await
     }
 
+    // Keep the completion fields aligned with finish_active_run and its SQL update.
+    #[allow(clippy::too_many_arguments)]
     pub async fn finish_active_run_fenced(
         &self,
         id: &str,

@@ -251,6 +251,17 @@ impl Engine {
         self.forget_job_current(name).await
     }
     async fn forget_job_current(&self, name: &str) -> Result<(), String> {
+        // This entry point also accepts names from persisted rows and the API.
+        // Reject paths before stopping runs or mutating any runtime/DB state.
+        if name.is_empty()
+            || name == "."
+            || name.contains("..")
+            || name.contains('/')
+            || name.contains('\\')
+            || name.contains('\0')
+        {
+            return Err("invalid job name".into());
+        }
         let _ = self.stop_job(name).await;
         let _ = self.store.set_cancelling_by_job(name).await;
         {

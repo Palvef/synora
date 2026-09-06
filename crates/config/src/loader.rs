@@ -1258,9 +1258,14 @@ fn resolve_db(db: &DbDoc) -> Result<DbConfig, ConfigError> {
 fn resolve_job(doc: &JobDoc, file: &str, line: usize) -> Result<JobSpec, ConfigError> {
     let err = |m: String| ConfigError::new(file, line, m);
 
-    if doc.name.is_empty() || doc.name.contains('/') {
+    if doc.name.is_empty()
+        || doc.name.contains('/')
+        || doc.name.contains('\\')
+        || doc.name.contains("..")
+        || doc.name.contains('\0')
+    {
         return Err(err(format!(
-            "invalid job name `{}`: must be non-empty, no `/`",
+            "invalid job name `{}`: must be non-empty, no path separators, `..`, or NUL",
             doc.name
         )));
     }

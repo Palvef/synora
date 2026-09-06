@@ -572,3 +572,36 @@ mountpoint = "/data"
         other => panic!("expected zfs, got {other:?}"),
     }
 }
+
+#[test]
+fn unsafe_job_path_names_rejected() {
+    let dir = temp_dir("unsafe-names");
+    for name in [
+        "",
+        ".",
+        "..",
+        "../outside",
+        "/tmp/outside",
+        "a/b",
+        "a\\\\b",
+        "a\\u0000b",
+    ] {
+        write(
+            &dir,
+            "synora.toml",
+            &job(
+                name,
+                "schedule = \"manual\"",
+                "provider = \"script\"\ncommand = \"true\"\nstorage = \"/tmp/test\"",
+            ),
+        );
+        assert!(
+            load(&dir)
+                .unwrap_err()
+                .to_string()
+                .contains("invalid job name"),
+            "accepted {name:?}"
+        );
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}

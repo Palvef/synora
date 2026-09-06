@@ -94,28 +94,28 @@ impl PgDb {
         for row in rows {
             let mut cells = Vec::with_capacity(row.len());
             for (i, col) in row.columns().iter().enumerate() {
-                let value = match col.type_() {
-                    &tokio_postgres::types::Type::INT2 => row
+                let value = match *col.type_() {
+                    tokio_postgres::types::Type::INT2 => row
                         .try_get::<_, i16>(i)
                         .ok()
                         .map(|v| DbValue::Int(v as i64))
                         .unwrap_or(DbValue::Null),
-                    &tokio_postgres::types::Type::INT4 => row
+                    tokio_postgres::types::Type::INT4 => row
                         .try_get::<_, i32>(i)
                         .ok()
                         .map(|v| DbValue::Int(v as i64))
                         .unwrap_or(DbValue::Null),
-                    &tokio_postgres::types::Type::INT8 => row
+                    tokio_postgres::types::Type::INT8 => row
                         .try_get::<_, i64>(i)
                         .ok()
                         .map(DbValue::Int)
                         .unwrap_or(DbValue::Null),
-                    &tokio_postgres::types::Type::FLOAT4 => row
+                    tokio_postgres::types::Type::FLOAT4 => row
                         .try_get::<_, f32>(i)
                         .ok()
                         .map(|v| DbValue::Text(v.to_string()))
                         .unwrap_or(DbValue::Null),
-                    &tokio_postgres::types::Type::FLOAT8 => row
+                    tokio_postgres::types::Type::FLOAT8 => row
                         .try_get::<_, f64>(i)
                         .ok()
                         .map(|f| DbValue::Text(f.to_string()))

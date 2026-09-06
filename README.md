@@ -225,11 +225,13 @@ Manager/Worker upgrade requirements.
 ## Development
 
 ```sh
-cargo build --workspace     # offline after first fetch
-cargo test --workspace      # 45+ tests: scheduler no-drift, config, parser, engine
-cargo clippy --workspace
+scripts/ci.sh               # format, versions, Clippy, tests and build
 synora check -c examples/simple.toml
 ```
+
+Rust is pinned in `rust-toolchain.toml`. Set `SYNORA_TEST_PG_URL` to an empty,
+disposable PostgreSQL database to include the concurrency integration test locally;
+GitHub CI always runs it with PostgreSQL 17. CI checks every branch push and PR.
 
 Workspace crates: `core` (domain types, no-drift schedule math, metrics),
 `config` (TOML loader/validator), `db` (SQLite/PostgreSQL), `provider`

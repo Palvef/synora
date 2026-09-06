@@ -11,6 +11,18 @@ pub struct RunLogger {
 const MAX_RUN_LOG_BYTES: u64 = 16 * 1024 * 1024;
 impl RunLogger {
     pub fn open(log_dir: &Path, job_name: &str) -> std::io::Result<RunLogger> {
+        if job_name.is_empty()
+            || job_name == "."
+            || job_name.contains("..")
+            || job_name.contains('/')
+            || job_name.contains('\\')
+            || job_name.contains('\0')
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid job name",
+            ));
+        }
         let dir = log_dir.join(job_name);
         std::fs::create_dir_all(&dir)?;
         let now = time::OffsetDateTime::now_utc();
@@ -216,5 +228,41 @@ mod tests {
         assert_eq!(parse_zfs_used(text, Path::new("/datas/missing")), None);
         // Pool root must not be used as a fallback for a child dataset.
         assert_eq!(parse_zfs_used(text, Path::new("/datas/rubygems")), None);
+    }
+}
+
+#[cfg(test)]
+mod path_safety_tests {
+    use super::*;
+
+    #[test]
+    fn reject_log_paths_before_creating_files() {
+        let root =
+            std::env::temp_dir().join(format!("synora-log-path-{}", synora_core::RunId::new()));
+        for name in [
+            "",
+            ".",
+            "..",
+            "../outside",
+            "/tmp/outside",
+            "a/b",
+            "a\\b",
+            "a\0b",
+        ] {
+            let err = RunLogger::open(&root, name)
+                .err()
+                .expect("unsafe name accepted");
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        }
+        assert!(!root.exists());
+        let mut logger = RunLogger::open(&root, "ubuntu-24.04").unwrap();
+        logger.line("safe log").unwrap();
+        assert!(
+            std::fs::read_to_string(root.join("ubuntu-24.04/current.log"))
+                .unwrap()
+                .contains("safe log")
+        );
+        drop(logger);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

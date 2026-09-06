@@ -1152,6 +1152,16 @@ async fn delete_job(
     Path(name): Path<String>,
 ) -> Result<axum::Json<serde_json::Value>, StatusCode> {
     require(&auth, "jobs.write")?;
+    if name.is_empty()
+        || name == "."
+        || name.contains("..")
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains('\0')
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
     if state.engine.job(&name).is_none()
         && state
             .engine
@@ -1258,6 +1268,16 @@ async fn job_logs(
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<String, StatusCode> {
     require(&auth, "logs.read")?;
+    if name.is_empty()
+        || name == "."
+        || name.contains("..")
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains('\0')
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
     // The name must be a configured job — a raw path segment must never
     // reach log_dir.join (path traversal).
     if state.engine.job(&name).is_none() {
@@ -1637,11 +1657,46 @@ retry = 0
             .await
             .unwrap();
         engine.sync_config().await.unwrap();
+
+        // Engine callers must not bypass the HTTP path validation, even when
+        // stale database rows contain names that are no longer configured.
+        for name in [
+            "",
+            ".",
+            "..",
+            "../outside",
+            "/tmp/outside",
+            "a/b",
+            "a\\b",
+            "a\0b",
+        ] {
+            assert!(engine.forget_job(name).await.is_err(), "accepted {name:?}");
+        }
         let (router, _) = build(
             engine.clone(),
             WorkerPicker::new(engine.clone()),
             Arc::new(RwLock::new(HashMap::new())),
         );
+
+        for name in [
+            ".",
+            "%2e%2e",
+            "%2e%2e%2foutside",
+            "%2ftmp%2foutside",
+            "a%5cb",
+            "a%00b",
+        ] {
+            for (method, suffix) in [("GET", "/logs"), ("DELETE", "")] {
+                let uri = format!("/api/v1/jobs/{name}{suffix}");
+                assert_eq!(
+                    request(&router, method, &uri, Some(&token), serde_json::Value::Null)
+                        .await
+                        .status(),
+                    StatusCode::BAD_REQUEST,
+                    "{method} {uri}"
+                );
+            }
+        }
         assert_eq!(
             request(&router, "GET", "/metrics", None, serde_json::Value::Null)
                 .await
