@@ -291,8 +291,16 @@ impl Engine {
             .await
             .map_err(|e| e.to_string())?;
         self.metrics.remove_job(name);
-        let log_dir = self.cfg.daemon.log_dir.join(name);
-        let _ = std::fs::remove_dir_all(log_dir);
+        // Resolve the configured root and require the job directory to remain
+        // its direct, non-symlink child before recursive deletion.
+        if let Ok(root) = self.cfg.daemon.log_dir.canonicalize() {
+            let expected = root.join(name);
+            if let Ok(log_dir) = expected.canonicalize() {
+                if log_dir.starts_with(&root) && log_dir == expected {
+                    let _ = std::fs::remove_dir_all(log_dir);
+                }
+            }
+        }
         tracing::info!("job `{name}` purged from database and runtime");
         Ok(())
     }

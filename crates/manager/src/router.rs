@@ -1297,7 +1297,20 @@ async fn job_logs(
         .log_dir
         .join(&name)
         .join("current.log");
-    let mut content = tail_of_file(&path, tail);
+    // current.log is a symlink, so validate the resolved target as well as
+    // the job name. A log link must not expose files outside this job's logs.
+    let mut content = match (
+        state.engine.cfg.daemon.log_dir.canonicalize(),
+        path.canonicalize(),
+    ) {
+        (Ok(root), Ok(path)) => {
+            if !path.starts_with(&root) || !path.starts_with(root.join(&name)) {
+                return Err(StatusCode::FORBIDDEN);
+            }
+            tail_of_file(&path, tail)
+        }
+        _ => None,
+    };
     if content.as_deref().unwrap_or("").trim().is_empty() {
         // Distributed runs: worker logs arrive with `complete` and are
         // stored in job_logs.content.
@@ -1628,6 +1641,8 @@ mod protocol_tests {
             &path,
             format!(
                 r#"
+[daemon]
+log_dir = "{}/logs"
 [daemon.db]
 path = "{}"
 [api]
@@ -1648,6 +1663,7 @@ schedule = "manual"
 storage = "/tmp/test"
 retry = 0
 "#,
+                dir.display(),
                 dir.join("db.sqlite").display()
             ),
         )
@@ -1697,6 +1713,57 @@ retry = 0
                 );
             }
         }
+
+        let logs = dir.join("logs");
+        let job_logs = logs.join("test");
+        std::fs::create_dir_all(&job_logs).unwrap();
+        std::fs::write(job_logs.join("run.log"), "safe log").unwrap();
+        std::os::unix::fs::symlink("run.log", job_logs.join("current.log")).unwrap();
+        let response = request(
+            &router,
+            "GET",
+            "/api/v1/jobs/test/logs",
+            Some(&token),
+            serde_json::Value::Null,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap()
+                .as_ref(),
+            b"safe log"
+        );
+        let outside = dir.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret"), "private").unwrap();
+        std::fs::remove_file(job_logs.join("current.log")).unwrap();
+        std::os::unix::fs::symlink(outside.join("secret"), job_logs.join("current.log")).unwrap();
+        assert_eq!(
+            request(
+                &router,
+                "GET",
+                "/api/v1/jobs/test/logs",
+                Some(&token),
+                serde_json::Value::Null
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+        // Even a directory symlink must not make recursive job cleanup delete
+        // another job's logs or files outside the configured root.
+        std::os::unix::fs::symlink(&outside, logs.join("outside-link")).unwrap();
+        std::os::unix::fs::symlink(&job_logs, logs.join("other-job-link")).unwrap();
+        engine.forget_job("outside-link").await.unwrap();
+        engine.forget_job("other-job-link").await.unwrap();
+        assert!(outside.join("secret").is_file());
+        assert!(job_logs.join("run.log").is_file());
+        std::fs::create_dir_all(logs.join("disposable")).unwrap();
+        std::fs::write(logs.join("disposable/run.log"), "old log").unwrap();
+        engine.forget_job("disposable").await.unwrap();
+        assert!(!logs.join("disposable").exists());
         assert_eq!(
             request(&router, "GET", "/metrics", None, serde_json::Value::Null)
                 .await
