@@ -171,7 +171,16 @@ pub async fn run_once(
             config::StorageKind::Dir => hook_job.storage.clone(),
         })
         .unwrap_or_else(|| hook_job.storage.clone());
-    let _storage_lock = match storage::StorageLock::acquire(&lock_path) {
+    let lock = if matches!(
+        job.snapshot_policy,
+        synora_core::job::SnapshotPolicy::Never | synora_core::job::SnapshotPolicy::Manual
+    ) && lock_path.is_dir()
+    {
+        storage::StorageLock::acquire_under(&lock_path, &hook_job.storage)
+    } else {
+        storage::StorageLock::acquire(&lock_path)
+    };
+    let _storage_lock = match lock {
         Ok(lock) => lock,
         Err(e) => {
             return RunOutcome {
@@ -274,7 +283,7 @@ fn resolve_local_job(job: &JobSpec, storage_ctx: Option<&crate::engine::RunStora
 #[allow(clippy::too_many_arguments)]
 async fn run_once_inner(
     job: &JobSpec,
-    storage_lock: Option<std::sync::Arc<std::fs::File>>,
+    storage_lock: Option<command_runner::StorageLocks>,
     run_id: &str,
     worker: &str,
     cancel: CancellationToken,

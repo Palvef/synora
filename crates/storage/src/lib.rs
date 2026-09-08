@@ -229,9 +229,42 @@ fn validate_zfs_mount(expected: &Path, actual: &str, mounted: &str) -> Result<()
 
 /// Advisory lock on a stable sibling, outside rsync --delete and rollback.
 /// Shared storage must provide coherent POSIX flock semantics to all workers.
-pub struct StorageLock(std::fs::File);
+pub struct StorageLock(Vec<std::fs::File>);
 impl StorageLock {
     pub fn acquire(path: &Path) -> Result<Self, StorageError> {
+        Self::acquire_mode(path, libc::LOCK_EX).map(|file| Self(vec![file]))
+    }
+
+    /// Shared ancestors exclude whole-backend rollback without serializing
+    /// independent mirrors. Overlapping mirror paths still exclude each other.
+    pub fn acquire_under(root: &Path, path: &Path) -> Result<Self, StorageError> {
+        let root = root
+            .canonicalize()
+            .map_err(|e| StorageError::Command(e.to_string()))?;
+        let parent = path.parent().ok_or(StorageError::NotFound)?;
+        std::fs::create_dir_all(parent).map_err(|e| StorageError::Command(e.to_string()))?;
+        let path = if path.exists() {
+            path.canonicalize()
+        } else {
+            parent
+                .canonicalize()
+                .map(|p| p.join(path.file_name().unwrap_or_default()))
+        }
+        .map_err(|e| StorageError::Command(e.to_string()))?;
+        let relative = path
+            .strip_prefix(&root)
+            .map_err(|_| StorageError::Command("mirror path is outside storage root".into()))?;
+        let mut current = root;
+        let mut files = Vec::new();
+        for component in relative.components() {
+            files.push(Self::acquire_mode(&current, libc::LOCK_SH)?);
+            current.push(component);
+        }
+        files.push(Self::acquire_mode(&current, libc::LOCK_EX)?);
+        Ok(Self(files))
+    }
+
+    fn acquire_mode(path: &Path, mode: libc::c_int) -> Result<std::fs::File, StorageError> {
         use std::os::fd::AsRawFd;
         use std::os::unix::fs::OpenOptionsExt;
         let resolved;
@@ -265,19 +298,21 @@ impl StorageLock {
             .mode(0o600)
             .open(parent.join(lock_name))
             .map_err(|e| StorageError::Command(e.to_string()))?;
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        if unsafe { libc::flock(file.as_raw_fd(), mode | libc::LOCK_NB) } != 0 {
             return Err(StorageError::Command(format!(
                 "storage {} is locked by another run or rollback",
                 path.display()
             )));
         }
-        Ok(Self(file))
+        Ok(file)
     }
 }
 impl StorageLock {
-    pub fn file(&self) -> Result<std::sync::Arc<std::fs::File>, StorageError> {
+    pub fn file(&self) -> Result<command_runner::StorageLocks, StorageError> {
         self.0
-            .try_clone()
+            .iter()
+            .map(std::fs::File::try_clone)
+            .collect::<Result<Vec<_>, _>>()
             .map(std::sync::Arc::new)
             .map_err(|e| StorageError::Command(e.to_string()))
     }
@@ -449,6 +484,27 @@ mod tests {
 #[cfg(test)]
 mod safety_tests {
     use super::*;
+    #[test]
+    fn sibling_mirrors_run_concurrently_but_rollback_and_overlaps_are_excluded() {
+        let dir = std::env::temp_dir().join(format!("synora-lock-{}", synora_core::RunId::new()));
+        let root = dir.join("pool");
+        std::fs::create_dir_all(&root).unwrap();
+        let first = StorageLock::acquire_under(&root, &root.join("git/first")).unwrap();
+        let second = StorageLock::acquire_under(&root, &root.join("git/second")).unwrap();
+        assert!(StorageLock::acquire_under(&root, &root.join("git/first")).is_err());
+        assert!(StorageLock::acquire_under(&root, &root.join("git")).is_err());
+        assert!(StorageLock::acquire(&root).is_err());
+        let inherited = first.file().unwrap();
+        drop((first, second));
+        assert!(StorageLock::acquire(&root).is_err());
+        assert!(StorageLock::acquire_under(&root, &root.join("git/first")).is_err());
+        drop(inherited);
+        let rollback = StorageLock::acquire(&root).unwrap();
+        assert!(StorageLock::acquire_under(&root, &root.join("git/first")).is_err());
+        drop(rollback);
+        assert!(StorageLock::acquire_under(&root, &dir.join("outside")).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
     #[test]
     fn storage_lock_excludes_competing_runs_and_releases_on_drop() {
         let dir = std::env::temp_dir().join(format!("synora-lock-{}", synora_core::RunId::new()));

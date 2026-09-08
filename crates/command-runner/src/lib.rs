@@ -9,16 +9,14 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 pub const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
-tokio::task_local! { static STORAGE_LOCK: std::sync::Arc<std::fs::File>; }
+pub type StorageLocks = std::sync::Arc<Vec<std::fs::File>>;
+tokio::task_local! { static STORAGE_LOCK: StorageLocks; }
 
-pub async fn with_storage_lock<F: std::future::Future>(
-    lock: std::sync::Arc<std::fs::File>,
-    future: F,
-) -> F::Output {
+pub async fn with_storage_lock<F: std::future::Future>(lock: StorageLocks, future: F) -> F::Output {
     STORAGE_LOCK.scope(lock, Box::pin(future)).await
 }
 
-fn current_storage_lock() -> Option<std::sync::Arc<std::fs::File>> {
+fn current_storage_lock() -> Option<StorageLocks> {
     STORAGE_LOCK.try_with(Clone::clone).ok()
 }
 
@@ -55,13 +53,15 @@ pub async fn run(cmd: &mut tokio::process::Command, timeout: Duration) -> io::Re
         .kill_on_drop(true)
         .process_group(0);
     let lock = current_storage_lock();
-    if let Some(file) = &lock {
+    if let Some(files) = &lock {
         use std::os::fd::AsRawFd;
-        let fd = file.as_raw_fd();
+        let fds: Vec<_> = files.iter().map(AsRawFd::as_raw_fd).collect();
         unsafe {
             cmd.pre_exec(move || {
-                if libc::fcntl(fd, libc::F_SETFD, 0) < 0 {
-                    return Err(io::Error::last_os_error());
+                for fd in &fds {
+                    if libc::fcntl(*fd, libc::F_SETFD, 0) < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
                 }
                 Ok(())
             });

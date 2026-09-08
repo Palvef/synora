@@ -64,13 +64,15 @@ pub(crate) fn spawn_group(
     }
     if let Some(lock) = &ctx.storage_lock {
         use std::os::fd::AsRawFd;
-        let fd = lock.as_raw_fd();
-        // Only this run's lock survives exec. A worker crash must not unlock
+        let fds: Vec<_> = lock.iter().map(AsRawFd::as_raw_fd).collect();
+        // Only this run's locks survive exec. A worker crash must not unlock
         // storage while rsync or a shell child continues writing.
         unsafe {
             cmd.pre_exec(move || {
-                if libc::fcntl(fd, libc::F_SETFD, 0) < 0 {
-                    return Err(std::io::Error::last_os_error());
+                for fd in &fds {
+                    if libc::fcntl(*fd, libc::F_SETFD, 0) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
                 }
                 Ok(())
             });
@@ -208,7 +210,7 @@ use synora_core::job::{ErrorKind, JobSpec};
 /// Everything a provider needs for one run.
 #[derive(Clone)]
 pub struct SyncContext {
-    pub storage_lock: Option<std::sync::Arc<std::fs::File>>,
+    pub storage_lock: Option<command_runner::StorageLocks>,
     pub run_id: String,
     pub job_name: String,
     pub upstream: Option<String>,
