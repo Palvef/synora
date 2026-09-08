@@ -484,6 +484,20 @@ mod tests {
 #[cfg(test)]
 mod safety_tests {
     use super::*;
+    fn acquire_after_drop(path: &Path) -> StorageLock {
+        // Other tests spawn commands concurrently. Between fork and exec those
+        // children briefly hold our CLOEXEC descriptors even after local drop.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            match StorageLock::acquire(path) {
+                Ok(lock) => return lock,
+                Err(error) => {
+                    assert!(std::time::Instant::now() < deadline, "{error}");
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        }
+    }
     #[test]
     fn sibling_mirrors_run_concurrently_but_rollback_and_overlaps_are_excluded() {
         let dir = std::env::temp_dir().join(format!("synora-lock-{}", synora_core::RunId::new()));
@@ -499,7 +513,7 @@ mod safety_tests {
         assert!(StorageLock::acquire(&root).is_err());
         assert!(StorageLock::acquire_under(&root, &root.join("git/first")).is_err());
         drop(inherited);
-        let rollback = StorageLock::acquire(&root).unwrap();
+        let rollback = acquire_after_drop(&root);
         assert!(StorageLock::acquire_under(&root, &root.join("git/first")).is_err());
         drop(rollback);
         assert!(StorageLock::acquire_under(&root, &dir.join("outside")).is_err());
@@ -513,7 +527,7 @@ mod safety_tests {
         let first = StorageLock::acquire(&path).unwrap();
         assert!(StorageLock::acquire(&path).is_err());
         drop(first);
-        assert!(StorageLock::acquire(&path).is_ok());
+        drop(acquire_after_drop(&path));
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]

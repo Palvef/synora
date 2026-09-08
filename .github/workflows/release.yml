@@ -48,8 +48,9 @@ jobs:
     name: Build ${{ matrix.target }}
     needs: gate
     if: needs.gate.outputs.should == 'true'
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
+    # Production includes Ubuntu 22.04; newer runners link newer glibc symbols.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
     continue-on-error: ${{ matrix.optional }}
     strategy:
       fail-fast: false
@@ -72,13 +73,13 @@ jobs:
           test "$ver" = "$cargo_ver" || { echo "VERSION ($ver) != Cargo.toml ($cargo_ver)"; exit 1; }
           test "$ver" = "$lock_ver" || { echo "VERSION ($ver) != Cargo.lock synora-core ($lock_ver)"; exit 1; }
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.0
         with:
           targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          key: ubuntu-22.04-glibc-2.35-${{ matrix.target }}
 
       - name: Install cross toolchain (linux aarch64)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
@@ -94,6 +95,13 @@ jobs:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
           CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
         run: cargo build --workspace --release --locked --target ${{ matrix.target }}
+
+      - name: Verify production glibc compatibility
+        run: |
+          python3 scripts/check-release-glibc.py \
+            target/${{ matrix.target }}/release/synora \
+            target/${{ matrix.target }}/release/synora-manager \
+            target/${{ matrix.target }}/release/synora-worker
 
       - name: Package
         env:
