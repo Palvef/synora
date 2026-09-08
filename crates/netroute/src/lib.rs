@@ -965,7 +965,9 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// Serve an HTTP proxy on `listen`, forwarding CONNECT and plain HTTP through
-/// the local WARP/SOCKS endpoint `upstream`. Empty user/pass allows
+/// an HTTP forward proxy or a local unauthenticated SOCKS endpoint `upstream`.
+/// HTTP upstream credentials are independent of the exposed listener's auth.
+/// Empty user/pass allows
 /// unauthenticated use (needed for rsync `RSYNC_PROXY=host:port`). Runs
 /// forever.
 pub async fn serve_auth_proxy(
@@ -977,7 +979,7 @@ pub async fn serve_auth_proxy(
     let listener = tokio::net::TcpListener::bind(listen)
         .await
         .map_err(|e| RouteError::Other(format!("auth proxy bind {listen}: {e}")))?;
-    tracing::info!("auth proxy listening on {listen} → {upstream}");
+    tracing::info!("auth proxy listening on {listen}");
     let expected = if user.is_empty() && pass.is_empty() {
         String::new()
     } else {
@@ -1056,8 +1058,8 @@ async fn serve_auth_proxy_conn(
     if !expected_auth.is_empty() {
         let auth_ok = lines
             .clone()
-            .find_map(|l| l.split_once(':'))
-            .filter(|(name, _)| name.eq_ignore_ascii_case("Proxy-Authorization"))
+            .filter_map(|l| l.split_once(':'))
+            .find(|(name, _)| name.eq_ignore_ascii_case("Proxy-Authorization"))
             .map(|(_, value)| value)
             .map(|v| v.trim().as_bytes())
             .map(|v| constant_time_eq(v, expected_auth.as_bytes()))
@@ -1068,6 +1070,72 @@ async fn serve_auth_proxy_conn(
                 .await;
             return Ok(());
         }
+    }
+
+    if upstream.starts_with("http://") {
+        let proxy = reqwest::Url::parse(upstream)
+            .map_err(|_| RouteError::BadResponse("invalid HTTP upstream URL".into()))?;
+        let host = proxy
+            .host_str()
+            .ok_or_else(|| RouteError::BadResponse("HTTP upstream requires a hostname".into()))?;
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        let port = proxy.port_or_known_default().unwrap_or(80);
+        let mut tunnel =
+            match tokio::time::timeout(Duration::from_secs(15), TcpStream::connect((host, port)))
+                .await
+            {
+                Ok(Ok(stream)) => stream,
+                _ => {
+                    let _ = client.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await;
+                    return Ok(());
+                }
+            };
+        // Forward absolute-form HTTP requests and CONNECT unchanged, replacing
+        // listener credentials with the upstream proxy's own credentials.
+        let mut forwarded = format!("{method} {target} {version}\r\n");
+        for line in lines {
+            if line.is_empty() {
+                continue;
+            }
+            let name = line.split_once(':').map(|(name, _)| name).unwrap_or("");
+            if !name.eq_ignore_ascii_case("Proxy-Authorization")
+                && !name.eq_ignore_ascii_case("Proxy-Connection")
+                && (method.eq_ignore_ascii_case("CONNECT")
+                    || !name.eq_ignore_ascii_case("Connection"))
+            {
+                forwarded.push_str(line);
+                forwarded.push_str("\r\n");
+            }
+        }
+        // A second plain-HTTP request on this raw relay would carry the
+        // listener's credentials without rewriting. Require a new connection
+        // per HTTP request; CONNECT remains a persistent byte tunnel.
+        if !method.eq_ignore_ascii_case("CONNECT") {
+            forwarded.push_str("Connection: close\r\n");
+        }
+        if !proxy.username().is_empty() || proxy.password().is_some() {
+            let user = percent_encoding::percent_decode_str(proxy.username())
+                .decode_utf8()
+                .map_err(|_| {
+                    RouteError::BadResponse("invalid upstream username encoding".into())
+                })?;
+            let pass = percent_encoding::percent_decode_str(proxy.password().unwrap_or(""))
+                .decode_utf8()
+                .map_err(|_| {
+                    RouteError::BadResponse("invalid upstream password encoding".into())
+                })?;
+            forwarded.push_str(&format!(
+                "Proxy-Authorization: Basic {}\r\n",
+                base64_auth(&user, &pass)
+            ));
+        }
+        forwarded.push_str("\r\n");
+        if tunnel.write_all(forwarded.as_bytes()).await.is_err() {
+            let _ = client.write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n").await;
+            return Ok(());
+        }
+        let _ = tokio::io::copy_bidirectional(&mut client, &mut tunnel).await;
+        return Ok(());
     }
 
     if !method.eq_ignore_ascii_case("CONNECT") {
@@ -1788,6 +1856,98 @@ mod tests {
         assert_eq!(probe.egress_ip.as_deref(), Some(PROBE_BODY));
         th.abort();
         ph.abort();
+    }
+
+    #[tokio::test]
+    async fn exposed_http_proxy_authenticates_both_hops_and_relays_tunnels() {
+        async fn read_head(stream: &mut TcpStream) -> String {
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                head.push(stream.read_u8().await.unwrap());
+                assert!(head.len() <= 8192);
+            }
+            String::from_utf8(head).unwrap()
+        }
+        for method in ["GET", "CONNECT"] {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let upstream = format!("http://up%40stream:p%3Ass@{}", upstream_listener.local_addr().unwrap());
+                let upstream_task = tokio::spawn(async move {
+                    let (mut socket, _) = upstream_listener.accept().await.unwrap();
+                    let head = read_head(&mut socket).await;
+                    assert!(head.starts_with(method));
+                    assert!(head.contains(&format!("Proxy-Authorization: Basic {}\r\n", base64_auth("up@stream", "p:ss"))));
+                    assert!(!head.contains(&base64_auth("worker", "secret")));
+                    assert!(!head.to_lowercase().contains("proxy-connection:"));
+                    if method == "CONNECT" {
+                        socket.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await.unwrap();
+                        let mut body = [0; 4];
+                        socket.read_exact(&mut body).await.unwrap();
+                        assert_eq!(&body, b"ping");
+                        socket.write_all(b"pong").await.unwrap();
+                    } else {
+                        assert!(head.starts_with("GET http://example.test/path?q=1 HTTP/1.1\r\n"));
+                        assert!(head.contains("Connection: close\r\n"));
+                        socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK").await.unwrap();
+                    }
+                });
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let server = tokio::spawn(async move {
+                    let (client, _) = listener.accept().await.unwrap();
+                    serve_auth_proxy_conn(client, &upstream, &format!("Basic {}", base64_auth("worker", "secret"))).await.unwrap();
+                });
+                let mut client = TcpStream::connect(address).await.unwrap();
+                let target = if method == "CONNECT" { "example.test:443" } else { "http://example.test/path?q=1" };
+                client.write_all(format!("{method} {target} HTTP/1.1\r\nHost: example.test\r\nProxy-Connection: keep-alive\r\nProxy-Authorization: Basic {}\r\n\r\n", base64_auth("worker", "secret")).as_bytes()).await.unwrap();
+                let head = read_head(&mut client).await;
+                assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+                if method == "CONNECT" {
+                    client.write_all(b"ping").await.unwrap();
+                    let mut body = [0; 4];
+                    client.read_exact(&mut body).await.unwrap();
+                    assert_eq!(&body, b"pong");
+                } else {
+                    let mut body = [0; 2];
+                    client.read_exact(&mut body).await.unwrap();
+                    assert_eq!(&body, b"OK");
+                }
+                drop(client);
+                upstream_task.await.unwrap();
+                server.await.unwrap();
+            }).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn exposed_proxy_rejects_invalid_credentials_before_connecting() {
+        for auth in ["", "Proxy-Authorization: Basic wrong\r\n"] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (client, _) = listener.accept().await.unwrap();
+                serve_auth_proxy_conn(client, "http://127.0.0.1:1", "Basic required")
+                    .await
+                    .unwrap();
+            });
+            let mut client = TcpStream::connect(address).await.unwrap();
+            client
+                .write_all(
+                    format!(
+                        "CONNECT example.test:443 HTTP/1.1\r\nHost: example.test\r\n{auth}\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            let mut response = String::new();
+            tokio::time::timeout(Duration::from_secs(5), client.read_to_string(&mut response))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(response.starts_with("HTTP/1.1 407"));
+            server.await.unwrap();
+        }
     }
 
     #[tokio::test]

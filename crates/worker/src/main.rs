@@ -161,7 +161,7 @@ async fn main() -> Result<(), String> {
                     tokio::spawn(async move {
                         let _ = netroute::serve_auth_proxy(&e2, &u2, &user, &pass).await;
                     });
-                    tracing::info!("proxy `{name}`: serving authenticated expose {expose} → {url}");
+                    tracing::info!("proxy `{name}`: serving authenticated expose {expose}");
                 }
             }
         }

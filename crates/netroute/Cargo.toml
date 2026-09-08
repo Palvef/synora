@@ -16,5 +16,6 @@ thiserror.workspace = true
 time.workspace = true
 regex.workspace = true
 reqwest.workspace = true
+percent-encoding.workspace = true
 libc.workspace = true
 axum.workspace = true

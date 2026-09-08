@@ -70,7 +70,7 @@ async fn main() -> Result<(), String> {
             }
         });
         tracing::info!(
-            "proxy `{name}`: serving HTTP expose {expose} → {url}{}",
+            "proxy `{name}`: serving HTTP expose {expose}{}",
             if p.expose_auth.is_some() {
                 " (auth)"
             } else {

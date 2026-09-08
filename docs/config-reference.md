@@ -190,6 +190,14 @@ Worker 上始终与 script 共用 `synora-scripts` 容器。配置仍是 `provid
 | `healthcheck` | `string` | 健康检查 URL |
 | `timeout` | `string` | 超时（默认 10s） |
 | `expose` | `string` | 暴露本地监听（如 `127.0.0.1:4000` 供其他程序使用） |
+| `expose_auth` | `string` | 转发端口的 `用户名:密码`，独立于上游 URL 中的认证信息 |
+
+Manager 支持将无认证 SOCKS5 上游或 HTTP 代理（可带认证）转发到 `expose`。
+远程 Worker 会领取该监听地址及 `expose_auth`，注入大小写的
+`HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`；未设置 `expose` 时直接注入上游 URL。
+远程 Worker 使用的监听地址应为 Manager 的可达 IP，端口不能与上游监听冲突。
+新增或修改监听地址需重启 Manager；运行中的任务沿用原 assignment，下次领取时生效。
+普通 HTTP 请求逐连接转发，HTTPS CONNECT 隧道保持长连接。
 
 ## `[proxy_groups.<name>]`
 
