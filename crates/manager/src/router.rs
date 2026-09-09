@@ -794,15 +794,16 @@ async fn complete(
     // Treat the process exit status as authoritative at the manager boundary too.
     // This protects the database from old, buggy, or custom workers that report
     // `status=success` together with a failed process exit code.
-    let completion_validation_error = (body.status == "success")
-        .then(|| {
-            engine::reported_completion_failure_reason(
-                &job,
-                body.exit_code.map(|value| value as i32),
-                Some(body.status.as_str()),
-            )
-        })
-        .flatten();
+    let completion_validation_error =
+        matches!(body.status.as_str(), "success" | "success_with_warnings")
+            .then(|| {
+                engine::reported_completion_failure_reason(
+                    &job,
+                    body.exit_code.map(|value| value as i32),
+                    Some(body.status.as_str()),
+                )
+            })
+            .flatten();
     let effective_status = if completion_validation_error.is_some() {
         "failed"
     } else {
@@ -841,15 +842,19 @@ async fn complete(
                 .await
                 .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         }
-        "success" => {
-            new_status = JobStatus::Success;
+        "success" | "success_with_warnings" => {
+            new_status = if effective_status == "success_with_warnings" {
+                JobStatus::SuccessWithWarnings
+            } else {
+                JobStatus::Success
+            };
             let applied = state
                 .engine
                 .store
                 .finish_active_run_fenced(
                     &run_id,
                     expected_attempt,
-                    JobStatus::Success,
+                    new_status,
                     body.exit_code.map(|v| v as i32),
                     body.size_before,
                     body.size_after,
@@ -1873,6 +1878,28 @@ retry = 0
             engine.store.get_run("run").await.unwrap().unwrap().status,
             JobStatus::Success
         );
+        for (id, exit_code) in [("warned", 0), ("invalid-warning", 1)] {
+            engine
+                .store
+                .create_run(id, "test", None, JobStatus::Queued, 0)
+                .await
+                .unwrap();
+            assert!(engine.store.claim_run(id, "worker").await.unwrap());
+            let claimed = engine.store.get_run(id).await.unwrap().unwrap();
+            let response = request(&router, "POST", &format!("/api/v1/runs/{id}/complete"), Some(&token),
+                serde_json::json!({"worker_id":"worker", "attempt":0, "status":"success_with_warnings",
+                    "exit_code":exit_code, "lease_token":claimed.lease_token,
+                    "message":"completed with warnings: 1 missing file; paths: /mirror/missing.rpm"})).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let finished = engine.store.get_run(id).await.unwrap().unwrap();
+            if exit_code == 0 {
+                assert_eq!(finished.status, JobStatus::SuccessWithWarnings);
+                assert_eq!(finished.retry_count, 0);
+                assert!(finished.message.unwrap().contains("/mirror/missing.rpm"));
+            } else {
+                assert!(!finished.status.is_success());
+            }
+        }
         let response = request(&router, "POST", "/api/v1/workers/worker/heartbeat", Some(&token), serde_json::json!({"status":"running","jobs_running":1,"active_runs":[{"run_id":"run","lease_token":assignment.lease_token}]})).await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), 64 * 1024)

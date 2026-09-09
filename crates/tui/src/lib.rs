@@ -253,6 +253,7 @@ async fn fetch(client: &Client, snap: &mut Snapshot) {
 
 fn status_label(status: &str) -> String {
     match status.to_ascii_lowercase().as_str() {
+        "success_with_warnings" => "done (warn)".into(),
         "starting" | "syncing" | "running" => "syncing".into(),
         other => other.to_string(),
     }
@@ -261,6 +262,7 @@ fn status_label(status: &str) -> String {
 fn status_color(status: &str) -> Color {
     match status.to_ascii_lowercase().as_str() {
         "success" => Color::Green,
+        "success_with_warnings" => Color::Yellow,
         "failed" | "lost" => Color::Red,
         "running" | "starting" | "syncing" | "retrying" => Color::Yellow,
         "queued" => Color::Blue,
@@ -2531,6 +2533,16 @@ fn find_config(explicit: Option<PathBuf>) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn warning_completion_has_a_distinct_visible_status() {
+        assert_eq!(status_label("SUCCESS_WITH_WARNINGS"), "done (warn)");
+        assert_eq!(status_color("success_with_warnings"), Color::Yellow);
+        assert_ne!(
+            status_color("success_with_warnings"),
+            status_color("failed")
+        );
+    }
 
     #[test]
     fn proxy_section_add_and_replace() {

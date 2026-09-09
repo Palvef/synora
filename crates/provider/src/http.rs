@@ -1,7 +1,7 @@
 //! HTTP directory-mirroring provider (spec §14/§60, tsumugu-style): parse the
 //! upstream index and download only files that differ. Per-file download
 //! errors are logged and the rest of the tree still transfers, but the run
-//! is failed if any file could not be fetched. Local symlinks are left
+//! completes with warnings for missing ordinary files; integrity errors fail it. Local symlinks are left
 //! alone; listing-marked symlinks are mirrored as local links.
 
 use crate::{ProviderError, SyncContext, SyncResult};
@@ -93,22 +93,39 @@ impl HttpProvider {
         );
         if stats.files_failed > 0 {
             return Err(ProviderError::Other(format!(
-                "http sync failed: {} file(s) could not be downloaded",
+                "http sync failed: {} integrity/transfer error(s); see run log",
                 stats.files_failed
             )));
         }
+        let summary = format!(
+            "downloaded {} files ({} skipped, {} deleted, {} symlinked)",
+            stats.files_downloaded, stats.files_skipped, stats.files_deleted, stats.files_symlinked
+        );
+        let message = if stats.files_warned > 0 {
+            format!(
+                "completed with warnings: {} missing files; {}; paths: {}{}",
+                stats.files_warned,
+                summary,
+                stats.warning_paths.join(", "),
+                if stats.files_warned as usize > stats.warning_paths.len() {
+                    "; additional paths in run log"
+                } else {
+                    ""
+                }
+            )
+        } else {
+            summary
+        };
         Ok(SyncResult {
             exit_code: Some(0),
             stdout: stats.log_lines.join("\n").into_bytes(),
             bytes_transferred: Some(stats.downloaded_bytes),
-            size_hint: stats.total_size_hint,
-            message: Some(format!(
-                "downloaded {} files ({} skipped, {} deleted, {} symlinked)",
-                stats.files_downloaded,
-                stats.files_skipped,
-                stats.files_deleted,
-                stats.files_symlinked
-            )),
+            // A partial mirror cannot claim the complete upstream size.
+            size_hint: (stats.files_warned == 0)
+                .then_some(stats.total_size_hint)
+                .flatten(),
+            message: Some(message),
+            status: (stats.files_warned > 0).then(|| "success_with_warnings".into()),
             ..Default::default()
         })
     }

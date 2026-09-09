@@ -28,6 +28,8 @@ pub enum JobStatus {
     Syncing,
     Running,
     Success,
+    #[serde(rename = "success_with_warnings")]
+    SuccessWithWarnings,
     Failed,
     Retrying,
     Cancelling,
@@ -39,6 +41,10 @@ pub enum JobStatus {
 }
 
 impl JobStatus {
+    pub fn is_success(self) -> bool {
+        matches!(self, Self::Success | Self::SuccessWithWarnings)
+    }
+
     /// Map internal job state onto tuna/mirror-web tunasync.json.
     ///
     /// ha-mirrors-web only renders `success` / `syncing` / `failed` /
@@ -58,12 +64,12 @@ impl JobStatus {
             JobStatus::Failed | JobStatus::Lost | JobStatus::Skipped | JobStatus::Retrying => {
                 "failed"
             }
-            JobStatus::Success => "success",
+            JobStatus::Success | JobStatus::SuccessWithWarnings => "success",
             _ => match last_finished {
                 Some(
                     JobStatus::Failed | JobStatus::Lost | JobStatus::Skipped | JobStatus::Retrying,
                 ) => "failed",
-                Some(JobStatus::Success) => "success",
+                Some(JobStatus::Success | JobStatus::SuccessWithWarnings) => "success",
                 Some(JobStatus::Cancelled) if has_success => "success",
                 Some(JobStatus::Cancelled) => "failed",
                 _ if has_success => "success",
@@ -81,6 +87,7 @@ impl JobStatus {
             Self::Syncing => "syncing",
             Self::Running => "running",
             Self::Success => "success",
+            Self::SuccessWithWarnings => "success_with_warnings",
             Self::Failed => "failed",
             Self::Retrying => "retrying",
             Self::Cancelling => "cancelling",

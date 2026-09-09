@@ -68,6 +68,7 @@ async fn wait_terminal(
             if matches!(
                 run.status,
                 synora_core::JobStatus::Success
+                    | synora_core::JobStatus::SuccessWithWarnings
                     | synora_core::JobStatus::Failed
                     | synora_core::JobStatus::Cancelled
                     | synora_core::JobStatus::Lost
@@ -828,4 +829,64 @@ async fn lost_worker_defaults_to_hold_until_manual_recovery() {
         .contains("is held"));
     assert_ne!(engine.dispatch("hold", true).await.unwrap(), id);
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn http_warning_completion_preserves_paths_and_allows_dependencies() {
+    use axum::{routing::get, Router};
+    let app = Router::new().route(
+        "/",
+        get(|| async { "<pre><a href=\"missing.rpm\">missing.rpm</a> 16-Aug-2026 10:00 4</pre>" }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let dir = temp_dir("http-warnings");
+    write(&dir, "synora.toml", &config_text(&dir));
+    write(
+        &dir,
+        "jobs/http.toml",
+        &format!(
+            r#"[[jobs]]
+name = "http"
+schedule = "manual"
+provider = "http"
+parser = "nginx"
+upstream = "http://{addr}/"
+storage = "{}/repo/http"
+retry = 3
+
+[[jobs]]
+name = "dependent"
+schedule = "manual"
+provider = "script"
+command = "true"
+storage = "{}/repo/dependent"
+depends_on = ["http"]
+"#,
+            dir.display(),
+            dir.display()
+        ),
+    );
+    let engine = engine_for(&dir).await;
+    let status = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        engine.clone().run_once("http"),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(status, synora_core::JobStatus::SuccessWithWarnings);
+    let runs = engine.store.latest_run_stats().await.unwrap();
+    let stats = runs.iter().find(|r| r.job_id == "http").unwrap();
+    assert!(stats.last_success.is_some());
+    assert_eq!(stats.last_finished_status, Some(status));
+    assert_eq!(
+        engine.clone().run_once("dependent").await.unwrap(),
+        synora_core::JobStatus::Success
+    );
+    let log = std::fs::read_to_string(dir.join("logs/http/current.log")).unwrap();
+    assert!(log.contains("missing.rpm"));
+    assert!(log.contains("1 missing-file warnings"));
+    server.abort();
 }

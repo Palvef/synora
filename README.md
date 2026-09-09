@@ -31,7 +31,7 @@ to TUNA and to the authors and maintainers of these projects.
   `[24]`; exit 23 fails unless explicitly enabled), two-stage-rsync (tunasync two-pass: a fast stage-1 subset by
   profile, then the full sync), script (`SYNORA_*` env, `SYNORA_SIZE=` size reporting; workers always run these in `synora-scripts`), docker (`docker run`, storage mounted at /data,
   optional in-container command), git (`clone --mirror` + `remote update --prune`, same `synora-scripts` image on workers),
-  and HTTP directory mirroring (tsumugu-style: failed files/incomplete listings fail the run,
+  and HTTP directory mirroring (tsumugu-style: missing ordinary files complete with warnings; metadata/transfer/listing errors fail the run,
   local symlinks left alone, listing-marked symlinks mirrored as local links,
   configurable download concurrency, 30 s connect / 120 s idle-read timeout,
   unlimited run
@@ -181,7 +181,7 @@ admin / operator / viewer; permission keys: `jobs.read`, `jobs.write`,
 | POST | `/workers/register` | runs.manage | worker registration → worker_id |
 | POST | `/workers/{id}/heartbeat` | runs.manage | heartbeat + lease refresh; returns run assignment / cancel request |
 | POST | `/runs/{id}/claim` | runs.manage | atomic claim (409 if taken) |
-| POST | `/runs/{id}/complete` | runs.manage | success / failed / cancelled report |
+| POST | `/runs/{id}/complete` | runs.manage | success / success_with_warnings / failed / cancelled report |
 | POST | `/workers/{id}/retire` (alias `/drain`) | workers.write | stop accepting new runs |
 | DELETE | `/workers/{id}` | workers.write | unregister (only when idle) |
 | GET | `/jobs` | jobs.read | jobs with status/next_run/size |
@@ -201,7 +201,7 @@ those endpoints. Reload requires `config.reload`, granted to admins by default.
 ## Metrics
 
 `synora_job_status{job,worker}` (gauge: 0 pending, 4 running, 5 success,
-6 failed, 9 cancelled, 10 lost), `synora_job_runs_total`, `failures_total`,
+6 failed, 9 cancelled, 10 lost, 12 completed with warnings), `synora_job_runs_total`, `failures_total`,
 `retries_total`, `duration_seconds`, `last_success/start/end_timestamp`,
 `next_run_timestamp`, `bytes_transferred_total`, `repository_size_bytes`,
 `synora_worker_status`, `synora_worker_jobs_running`.

@@ -125,7 +125,7 @@ async fn exercise(db: Db, connections: Vec<Db>) {
         .finish_active_run_fenced(
             &run.id,
             1,
-            JobStatus::Success,
+            JobStatus::SuccessWithWarnings,
             Some(0),
             None,
             Some(9_000_000_000),
@@ -153,8 +153,15 @@ async fn exercise(db: Db, connections: Vec<Db>) {
         .unwrap());
     assert_eq!(
         store.get_run(&run.id).await.unwrap().unwrap().status,
-        JobStatus::Success
+        JobStatus::SuccessWithWarnings
     );
+    let stats = store.latest_run_stats().await.unwrap();
+    let stats = stats.iter().find(|s| s.job_id == run.job_id).unwrap();
+    assert_eq!(
+        stats.last_finished_status,
+        Some(JobStatus::SuccessWithWarnings)
+    );
+    assert!(stats.last_success.is_some());
     store
         .set_repository_size("/large", 9_000_000_000)
         .await

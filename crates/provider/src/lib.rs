@@ -297,7 +297,7 @@ pub struct SyncResult {
     /// Human message (SYNORA_MESSAGE= or provider summary).
     pub message: Option<String>,
     /// Machine-readable status from the provider (SYNORA_STATUS=).
-    /// A non-success value forces failure even with exit 0. `success` is
+    /// A value other than success/success_with_warnings forces failure even with exit 0. `success` is
     /// advisory and never overrides a missing or non-zero process exit code.
     pub status: Option<String>,
 }
@@ -306,14 +306,16 @@ pub struct SyncResult {
 /// and by the engine's defensive final-status check.
 ///
 /// Success requires both an allowed exit code and either no reported status or
-/// `SYNORA_STATUS=success`. A status line can make an exit-0 process fail, but
+/// `SYNORA_STATUS=success` / `success_with_warnings`. A status line can make an exit-0 process fail, but
 /// can never turn a non-zero (or signal/no-code) exit into success.
 pub fn process_result_is_success(
     exit_code: Option<i32>,
     reported_status: Option<&str>,
     allowed_nonzero_exit_codes: &[i32],
 ) -> bool {
-    let status_ok = reported_status.map(|s| s == "success").unwrap_or(true);
+    let status_ok = reported_status
+        .map(|s| matches!(s, "success" | "success_with_warnings"))
+        .unwrap_or(true);
     let exit_ok = match exit_code {
         Some(0) => true,
         Some(code) => allowed_nonzero_exit_codes.contains(&code),
@@ -529,6 +531,21 @@ mod result_tests {
 
     #[test]
     fn reported_success_never_overrides_process_failure() {
+        assert!(process_result_is_success(
+            Some(0),
+            Some("success_with_warnings"),
+            &[]
+        ));
+        assert!(!process_result_is_success(
+            Some(1),
+            Some("success_with_warnings"),
+            &[]
+        ));
+        assert!(!process_result_is_success(
+            None,
+            Some("success_with_warnings"),
+            &[]
+        ));
         assert!(!process_result_is_success(Some(1), Some("success"), &[]));
         assert!(!process_result_is_success(None, Some("success"), &[]));
     }

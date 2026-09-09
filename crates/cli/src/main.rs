@@ -431,6 +431,7 @@ async fn cmd_run(job: String, config: Option<PathBuf>) -> Result<(), String> {
     let status = engine.clone().run_once(&job).await?;
     match status {
         JobStatus::Success => println!("{job}: SUCCESS"),
+        JobStatus::SuccessWithWarnings => println!("{job}: COMPLETED WITH WARNINGS (see run log)"),
         other => {
             println!("{job}: {other:?}");
             return Err(format!("job `{job}` finished with status {other:?}"));
@@ -456,7 +457,7 @@ async fn cmd_run_group(group: String, config: Option<PathBuf>) -> Result<(), Str
     for job in &jobs {
         let status = engine.clone().run_once(job).await?;
         println!("  {job}: {status:?}");
-        if status != JobStatus::Success {
+        if !status.is_success() {
             failed += 1;
         }
     }

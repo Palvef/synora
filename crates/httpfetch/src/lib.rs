@@ -4,7 +4,7 @@
 //! upstream. Planning is parser-driven ([`parser`] crate) and yields a
 //! [`Plan`]; [`Fetcher::execute`] runs it concurrently with a cancel token.
 //!
-//! Failed files are counted and the provider fails the run. Incomplete
+//! Missing ordinary files are warnings; other transfer errors fail the run. Incomplete
 //! listings also fail the run; destructive deletes are suppressed after any
 //! transfer/planning failure. Successful files are retained for the next retry.
 
@@ -74,6 +74,8 @@ fn append_log(log_file: Option<&std::path::Path>, line: &str) {
 pub enum FetchError {
     #[error("http error: {0}")]
     Http(String),
+    #[error("http status {0}")]
+    HttpStatus(u16),
     #[error("io error: {0}")]
     Io(String),
     #[error("cancelled")]
@@ -82,7 +84,10 @@ pub enum FetchError {
 
 impl From<reqwest::Error> for FetchError {
     fn from(e: reqwest::Error) -> Self {
-        FetchError::Http(e.to_string())
+        match e.status() {
+            Some(status) => FetchError::HttpStatus(status.as_u16()),
+            None => FetchError::Http(e.to_string()),
+        }
     }
 }
 
@@ -101,10 +106,14 @@ pub struct FetchStats {
     /// pointed at the right target).
     pub files_symlinked: u32,
     /// Files skipped after a per-file failure (download error, timeout,
-    /// failed delete). Download failures also increment `files_failed`.
+    /// failed delete). Each increments `files_failed` or `files_warned`.
     pub files_skipped: u32,
-    /// Download errors. The HTTP provider fails the run when this is > 0.
+    /// Fatal transfer, listing, or local filesystem errors.
     pub files_failed: u32,
+    /// Ordinary files missing upstream (404/410), without a fatal error.
+    pub files_warned: u32,
+    /// Bounded diagnostic paths, independent of rolling progress log lines.
+    pub warning_paths: Vec<String>,
     /// Sum of remote sizes of every regular file in the listing (the
     /// repository size), whether or not it needs downloading. `None` when
     /// any remote file's size was unknown.
@@ -148,6 +157,50 @@ struct DirectoryWork {
 
 type DownloadSuccess = (u64, String, PathBuf, std::time::Duration);
 type DownloadFailure = (FetchError, String, PathBuf, std::time::Duration);
+
+/// Repository indexes and their signatures/checksums are required even when
+/// the upstream reports them as missing. Treat every RPM repodata and APT
+/// by-hash entry as metadata, including content-addressed/compressed names.
+fn is_critical_metadata(path: &Path) -> bool {
+    let path = path.to_string_lossy().to_ascii_lowercase();
+    if path
+        .split('/')
+        .any(|part| matches!(part, "repodata" | "by-hash"))
+    {
+        return true;
+    }
+    let name = path.rsplit('/').next().unwrap_or_default();
+    let stem = [".gz", ".xz", ".bz2", ".zst", ".lz4", ".lzma"]
+        .iter()
+        .find_map(|suffix| name.strip_suffix(suffix))
+        .unwrap_or(name);
+    matches!(
+        stem,
+        "inrelease"
+            | "release"
+            | "release.gpg"
+            | "packages"
+            | "sources"
+            | "repomd.xml"
+            | "repomd.xml.asc"
+            | "index.html"
+            | "index.htm"
+            | "apkindex.tar"
+            | "checksums"
+            | "sha256sums"
+            | "sha512sums"
+            | "md5sums"
+    ) || stem.starts_with("contents-")
+        || stem.ends_with(".db")
+        || stem.ends_with(".db.tar")
+        || stem.ends_with(".files")
+        || stem.ends_with(".files.tar")
+        || stem.ends_with(".sig")
+        || stem.ends_with(".asc")
+        || stem.starts_with("specs.")
+        || stem.starts_with("latest_specs.")
+        || stem.starts_with("prerelease_specs.")
+}
 
 /// HTTP fetcher: a reqwest client with rustls, redirects followed (max 10),
 /// no proxy by default, a 30 s connect timeout plus 120 s idle-read timeout,
@@ -469,6 +522,11 @@ impl Fetcher {
             files_failed: u32::from(plan.incomplete),
             ..FetchStats::default()
         };
+        if plan.incomplete {
+            let line = "ERROR incomplete directory listing; mirror integrity cannot be established";
+            append_log(log_file, line);
+            stats.record_log(line.into());
+        }
         let transfer_counter = self
             .byte_counter
             .clone()
@@ -567,9 +625,23 @@ impl Fetcher {
                 Ok(Err((FetchError::Cancelled, _, _, _))) => cancelled = true,
                 Ok(Err((e, url, dest, elapsed))) => {
                     stats.files_skipped += 1;
-                    stats.files_failed += 1;
+                    let warning = matches!(e, FetchError::HttpStatus(404 | 410))
+                        && !is_critical_metadata(&dest);
+                    if warning {
+                        stats.files_warned += 1;
+                        if stats.warning_paths.len() < 100 {
+                            stats.warning_paths.push(dest.display().to_string());
+                        }
+                    } else {
+                        stats.files_failed += 1;
+                    }
                     let line = format!(
-                        "skipped {url} -> {} after {:.2}s: {e}",
+                        "{} {url} -> {} after {:.2}s: {e}",
+                        if warning {
+                            "WARNING missing file"
+                        } else {
+                            "ERROR skipped file"
+                        },
                         dest.display(),
                         elapsed.as_secs_f64()
                     );
@@ -613,7 +685,7 @@ impl Fetcher {
         if cancelled {
             return Err(FetchError::Cancelled);
         }
-        let allow_deletes = stats.files_failed == 0;
+        let allow_deletes = stats.files_failed == 0 && stats.files_warned == 0;
         for path in plan.deletes.iter().filter(|_| allow_deletes) {
             if cancel.is_cancelled() {
                 return Err(FetchError::Cancelled);
@@ -670,6 +742,19 @@ impl Fetcher {
                 plan.symlinks.len()
             );
         }
+        let summary = format!(
+            "sync result: {} fatal errors, {} missing-file warnings; paths: {}{}",
+            stats.files_failed,
+            stats.files_warned,
+            stats.warning_paths.join(", "),
+            if stats.files_warned as usize > stats.warning_paths.len() {
+                "; additional paths in run log"
+            } else {
+                ""
+            }
+        );
+        append_log(log_file, &summary);
+        stats.record_log(summary);
         Ok(stats)
     }
 
@@ -1042,6 +1127,7 @@ mod tests {
         files: BTreeMap<String, Vec<u8>>,
         /// Pre-baked HTML served verbatim for a directory (hostile listings).
         raw: HashMap<String, String>,
+        statuses: HashMap<String, StatusCode>,
         /// Per-file-request delay in ms (cancellation test).
         delay_ms: u64,
         /// Per-directory-listing delay and concurrency counters.
@@ -1058,6 +1144,7 @@ mod tests {
                     .map(|(k, v)| (k.to_string(), v.as_bytes().to_vec()))
                     .collect(),
                 raw: HashMap::new(),
+                statuses: HashMap::new(),
                 delay_ms: 0,
                 listing_delay_ms: 0,
                 listing_active: Default::default(),
@@ -1122,6 +1209,9 @@ mod tests {
 
     async fn handler(uri: OriginalUri, State(mirror): State<TestMirror>) -> (StatusCode, Body) {
         let path = uri.path().trim_matches('/').to_string();
+        if let Some(status) = mirror.statuses.get(&path) {
+            return (*status, Body::empty());
+        }
         if mirror.delay_ms > 0 && mirror.files.contains_key(&path) {
             tokio::time::sleep(std::time::Duration::from_millis(mirror.delay_ms)).await;
         }
@@ -1438,6 +1528,93 @@ mod tests {
         );
         assert!(!storage.join("broken.bin").exists());
         assert!(!storage.join("broken.bin.partial").exists());
+    }
+
+    #[tokio::test]
+    async fn missing_payload_warns_but_metadata_and_listing_fail() {
+        for (path, fatal) in [
+            ("payload.rpm", false),
+            ("InRelease", true),
+            ("Packages.xz", true),
+            ("repodata/abc-primary.xml.gz", true),
+            ("index.html", true),
+        ] {
+            let base = spawn_server(TestMirror::new(&[]));
+            let storage = unique_dir();
+            let stale = storage.join("keep-me");
+            std::fs::write(&stale, "old").unwrap();
+            let plan = Plan {
+                downloads: vec![(format!("{base}/{path}"), storage.join(path))],
+                deletes: vec![stale.clone()],
+                ..Plan::default()
+            };
+            let log = storage.join("run.log");
+            let stats = Fetcher::new()
+                .unwrap()
+                .execute(&plan, &CancellationToken::new(), Some(&log))
+                .await
+                .unwrap();
+            assert_eq!(stats.files_failed, u32::from(fatal), "{path}");
+            assert_eq!(stats.files_warned, u32::from(!fatal), "{path}");
+            assert!(std::fs::read_to_string(log).unwrap().contains(path));
+            assert!(stale.exists(), "missing files must suppress deletes");
+        }
+        let plan = Plan {
+            incomplete: true,
+            ..Plan::default()
+        };
+        let stats = Fetcher::new()
+            .unwrap()
+            .execute(&plan, &CancellationToken::new(), None)
+            .await
+            .unwrap();
+        assert_eq!(stats.files_failed, 1);
+        assert_eq!(stats.files_warned, 0);
+    }
+
+    #[tokio::test]
+    async fn only_missing_http_statuses_warn_and_listing_404_is_fatal() {
+        for code in [403, 404, 410, 500] {
+            let mut mirror = TestMirror::new(&[]);
+            mirror
+                .statuses
+                .insert("payload.bin".into(), StatusCode::from_u16(code).unwrap());
+            let base = spawn_server(mirror);
+            let storage = unique_dir();
+            let plan = Plan {
+                downloads: vec![(format!("{base}/payload.bin"), storage.join("payload.bin"))],
+                ..Plan::default()
+            };
+            let stats = Fetcher::new()
+                .unwrap()
+                .execute(&plan, &CancellationToken::new(), None)
+                .await
+                .unwrap();
+            let warning = matches!(code, 404 | 410);
+            assert_eq!(stats.files_warned, u32::from(warning));
+            assert_eq!(stats.files_failed, u32::from(!warning));
+        }
+        let mut mirror = TestMirror::new(&[("ok.txt", "ok")]);
+        mirror.raw.insert(
+            String::new(),
+            "<pre><a href=\"missing/\">missing/</a> 16-Aug-2026 10:00 -</pre>".into(),
+        );
+        let base = spawn_server(mirror);
+        let stats = Fetcher::new()
+            .unwrap()
+            .sync(
+                &base,
+                "nginx",
+                &unique_dir(),
+                false,
+                2,
+                &CancellationToken::new(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(stats.files_failed > 0);
+        assert_eq!(stats.files_warned, 0);
     }
 
     #[cfg(unix)]

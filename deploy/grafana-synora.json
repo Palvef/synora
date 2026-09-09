@@ -1049,6 +1049,10 @@
                   "11": {
                     "text": "等待下次同步",
                     "color": "dark-purple"
+                  },
+                  "12": {
+                    "text": "完成但有告警",
+                    "color": "yellow"
                   }
                 }
               }
@@ -1456,6 +1460,10 @@
                         "11": {
                           "text": "跳过",
                           "color": "dark-purple"
+                        },
+                        "12": {
+                          "text": "完成但有告警",
+                          "color": "yellow"
                         }
                       }
                     }
@@ -1775,6 +1783,10 @@
                         "11": {
                           "text": "跳过",
                           "color": "dark-purple"
+                        },
+                        "12": {
+                          "text": "完成但有告警",
+                          "color": "yellow"
                         }
                       }
                     }
@@ -2157,6 +2169,10 @@
                         "11": {
                           "text": "跳过",
                           "color": "dark-purple"
+                        },
+                        "12": {
+                          "text": "完成但有告警",
+                          "color": "yellow"
                         }
                       }
                     }
@@ -2519,6 +2535,10 @@
                         "11": {
                           "text": "跳过",
                           "color": "dark-purple"
+                        },
+                        "12": {
+                          "text": "完成但有告警",
+                          "color": "yellow"
                         }
                       }
                     }

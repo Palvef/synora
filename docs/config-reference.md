@@ -116,7 +116,7 @@ Worker 上始终在 `synora-scripts` 容器内执行（`[worker] scripts_image`�
 |---|---|---|
 | `command` | `string` | 脚本/命令路径。注入 `SYNORA_JOB/UPSTREAM/STORAGE/LOG_DIR/RUN_ID/API`；输出 `SYNORA_SIZE=123`（字节）、`SYNORA_STATUS=success`、`SYNORA_MESSAGE=…` |
 
-脚本和容器的退出码是最终依据：只有退出码为 0 且没有报告失败状态时才算成功。`SYNORA_STATUS=success` 不能覆盖非零退出码；`SYNORA_STATUS=failed` 则可以将退出码为 0 的运行标记为失败。`success_exit_codes` 仅用于 rsync provider 显式接受部分传输退出码。
+脚本和容器的退出码是最终依据：只有退出码为 0 且没有报告失败状态时才算成功。`SYNORA_STATUS=success` / `success_with_warnings` 不能覆盖非零退出码；`SYNORA_STATUS=failed` 则可以将退出码为 0 的运行标记为失败。`success_exit_codes` 仅用于 rsync provider 显式接受部分传输退出码。
 
 ### docker provider
 
@@ -139,6 +139,19 @@ Worker 上始终与 script 共用 `synora-scripts` 容器。配置仍是 `provid
 | `branch` | `string` | 单分支 checkout 模式；不填 = `git clone --mirror` 全引用镜像（更新走 `remote update --prune`） |
 
 ### http provider（tsumugu 式目录镜像）
+
+HTTP 同步区分三种结果：
+
+- `success`：完整完成。
+- `success_with_warnings`：普通文件返回 404/410，其他操作正常。任务完成、不重试，依赖任务可继续；TUI 显示黄色 `done (warn)`。运行 `message` 保留缺失总数和前 100 个路径，逐文件原因写入有容量上限的运行日志。
+- `failed`：关键元数据缺失、目录遍历失败或被截断、其他 HTTP 错误（含 403/5xx）、超时、网络错误、本地写入/删除/软链接错误。按任务配置重试，成功下载的文件保留。
+
+关键元数据按路径识别，包括 `InRelease`、`Release`、`Release.gpg`、`Packages`、`Sources`、`Contents-*`、`repodata/` 和 `by-hash/` 内文件、`index.html`、APKINDEX、Arch 数据库、RubyGems specs，以及签名和常用校验和文件；支持常用压缩后缀。这不是完整的包仓库依赖校验器，普通包是否仍被元数据引用不在此规则中验证。
+
+任何缺失告警或致命错误都会禁止本轮删除本地多余文件。告警完成更新最近成功时间；`synora.json` 和管理 API 保留独立状态，兼容的 `tunasync.json` 映射为 `success`。`synora_job_status` 的告警完成值为 12。
+
+升级时先更新 Manager，再更新 Worker；旧 Manager 不识别新增完成状态。历史失败记录不会自动改写。
+
 
 | 配置项 | 类型 | 说明 |
 |---|---|---|

@@ -477,12 +477,18 @@ fn outcome_to_complete(
     let result = outcome.result.as_ref().ok();
     let validation_error = result.and_then(|r| engine::sync_result_failure_reason(job, r));
     let status = match &outcome.result {
-        Ok(_) if validation_error.is_none() => "success",
+        Ok(r) if validation_error.is_none() => {
+            if r.status.as_deref() == Some("success_with_warnings") {
+                "success_with_warnings"
+            } else {
+                "success"
+            }
+        }
         Ok(_) => "failed",
         Err(provider::ProviderError::Cancelled) => "cancelled",
         Err(_) => "failed",
     };
-    let successful = (status == "success").then_some(());
+    let successful = matches!(status, "success" | "success_with_warnings").then_some(());
     let dest = storage_ctx
         .map(|ctx| ctx.resolve_storage_path(job))
         .unwrap_or_else(|| job.storage.clone());

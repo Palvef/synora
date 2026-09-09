@@ -447,11 +447,7 @@ impl Engine {
                 .store
                 .run_history(dep, 1)
                 .await
-                .map(|runs| {
-                    runs.first()
-                        .map(|r| r.status == JobStatus::Success)
-                        .unwrap_or(false)
-                })
+                .map(|runs| runs.first().map(|r| r.status.is_success()).unwrap_or(false))
                 .unwrap_or(false);
             if !dep_ok {
                 let run_id = synora_core::RunId::new().to_string();
@@ -937,6 +933,7 @@ impl Engine {
                 .ok_or_else(|| format!("run `{run_id}` disappeared while waiting"))?;
             match run.status {
                 JobStatus::Success
+                | JobStatus::SuccessWithWarnings
                 | JobStatus::Failed
                 | JobStatus::Cancelled
                 | JobStatus::Lost

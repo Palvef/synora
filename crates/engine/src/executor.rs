@@ -63,7 +63,9 @@ pub fn reported_completion_failure_reason(
     if provider::process_result_is_success(exit_code, reported_status, allowed_nonzero) {
         return None;
     }
-    if let Some(status) = reported_status.filter(|s| *s != "success") {
+    if let Some(status) =
+        reported_status.filter(|s| !matches!(*s, "success" | "success_with_warnings"))
+    {
         return Some(format!("provider reported status {status}"));
     }
     match exit_code {
@@ -980,6 +982,7 @@ pub fn status_value(s: JobStatus) -> f64 {
         JobStatus::Syncing => 3.0,
         JobStatus::Running => 4.0,
         JobStatus::Success => 5.0,
+        JobStatus::SuccessWithWarnings => 12.0,
         JobStatus::Failed => 6.0,
         JobStatus::Retrying => 7.0,
         JobStatus::Cancelling => 8.0,
@@ -1040,7 +1043,17 @@ async fn finish_run(engine: &Arc<Engine>, run_id: &str, job: &JobSpec, outcome: 
         Err(_) => false,
     };
     let final_status = if success {
-        JobStatus::Success
+        if outcome
+            .result
+            .as_ref()
+            .ok()
+            .and_then(|r| r.status.as_deref())
+            == Some("success_with_warnings")
+        {
+            JobStatus::SuccessWithWarnings
+        } else {
+            JobStatus::Success
+        }
     } else {
         JobStatus::Failed
     };
@@ -1051,7 +1064,7 @@ async fn finish_run(engine: &Arc<Engine>, run_id: &str, job: &JobSpec, outcome: 
             .store
             .finish_run(
                 run_id,
-                JobStatus::Success,
+                final_status,
                 result.and_then(|r| r.exit_code),
                 None,
                 size_after(job, result),
@@ -1087,10 +1100,31 @@ async fn finish_run(engine: &Arc<Engine>, run_id: &str, job: &JobSpec, outcome: 
         }
         let _ = engine
             .store
-            .insert_event(Some(&job.name), Some(run_id), "INFO", "run succeeded")
+            .insert_event(
+                Some(&job.name),
+                Some(run_id),
+                if final_status == JobStatus::SuccessWithWarnings {
+                    "WARN"
+                } else {
+                    "INFO"
+                },
+                if final_status == JobStatus::SuccessWithWarnings {
+                    "run completed with warnings"
+                } else {
+                    "run succeeded"
+                },
+            )
             .await;
         engine
-            .notify("sync_success", Some(&job.name), "run succeeded")
+            .notify(
+                "sync_success",
+                Some(&job.name),
+                if final_status == JobStatus::SuccessWithWarnings {
+                    "run completed with warnings"
+                } else {
+                    "run succeeded"
+                },
+            )
             .await;
     } else {
         let kind = outcome

@@ -185,7 +185,7 @@ pub struct CompleteRequest {
     /// the optional wire field lets it reject legacy requests with HTTP 409.
     #[serde(default)]
     pub attempt: Option<u32>,
-    pub status: String, // "success" | "failed" | "cancelled"
+    pub status: String, // "success" | "success_with_warnings" | "failed" | "cancelled"
     pub exit_code: Option<i64>,
     pub size_before: Option<i64>,
     pub size_after: Option<i64>,

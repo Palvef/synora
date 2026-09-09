@@ -1259,7 +1259,7 @@ impl Store {
                                 ORDER BY finished_at DESC
                             ) AS rn
                      FROM job_runs
-                     WHERE status = 'SUCCESS' AND finished_at IS NOT NULL
+                     WHERE status IN ('SUCCESS', 'SUCCESS_WITH_WARNINGS') AND finished_at IS NOT NULL
                  ) WHERE rn = 1",
                 &[],
             )
@@ -1482,6 +1482,7 @@ impl JobStatusDb for JobStatus {
             JobStatus::Syncing => "SYNCING",
             JobStatus::Running => "RUNNING",
             JobStatus::Success => "SUCCESS",
+            JobStatus::SuccessWithWarnings => "SUCCESS_WITH_WARNINGS",
             JobStatus::Failed => "FAILED",
             JobStatus::Retrying => "RETRYING",
             JobStatus::Cancelling => "CANCELLING",
@@ -1499,6 +1500,7 @@ impl JobStatusDb for JobStatus {
             "STARTING" | "SYNCING" => JobStatus::Syncing,
             "RUNNING" => JobStatus::Running,
             "SUCCESS" => JobStatus::Success,
+            "SUCCESS_WITH_WARNINGS" => JobStatus::SuccessWithWarnings,
             "FAILED" => JobStatus::Failed,
             "RETRYING" => JobStatus::Retrying,
             "CANCELLING" => JobStatus::Cancelling,

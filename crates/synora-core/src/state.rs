@@ -9,6 +9,7 @@ pub enum RunEvent {
     Starting,
     Running,
     Success,
+    SuccessWithWarnings,
     Failed,
     Retrying,
     Cancelling,
@@ -30,6 +31,9 @@ pub fn transition(cur: JobStatus, ev: RunEvent) -> Result<JobStatus, StateError>
         (JobStatus::Queued, RunEvent::Starting) => JobStatus::Syncing,
         (JobStatus::Queued, RunEvent::Cancelled) => JobStatus::Cancelled,
         (JobStatus::Syncing, RunEvent::Running) => JobStatus::Running,
+        (JobStatus::Syncing | JobStatus::Running, RunEvent::SuccessWithWarnings) => {
+            JobStatus::SuccessWithWarnings
+        }
         (JobStatus::Syncing, RunEvent::Success) => JobStatus::Success,
         (JobStatus::Syncing, RunEvent::Failed) => JobStatus::Failed,
         (JobStatus::Syncing, RunEvent::Cancelling) => JobStatus::Cancelling,
@@ -80,6 +84,18 @@ pub enum RetryDecision {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn warning_completion_is_terminal_and_successful() {
+        let status = transition(JobStatus::Syncing, RunEvent::SuccessWithWarnings).unwrap();
+        assert!(status.is_success());
+        assert_eq!(status.as_str(), "success_with_warnings");
+        assert!(transition(status, RunEvent::Retrying).is_err());
+        assert_eq!(
+            JobStatus::tunasync_status(true, status, Some(status), true),
+            "success"
+        );
+    }
 
     #[test]
     fn legal_chain() {
