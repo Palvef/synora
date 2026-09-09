@@ -1,42 +1,28 @@
-# Synora 0.2.0
+# Synora 0.2.1
 
-## Reliability and safety
+## HTTP sync outcomes
 
-- Worker claims now use fencing tokens. Lease renewal, progress and completion
-  reject stale assignments, and workers cancel execution when their lease is lost.
-- SQLite and PostgreSQL enforce one active run per job, with concurrent assignment
-  tests for both backends. Runs record the configuration generation that created them.
-- Independent mirrors on one ZFS/Btrfs backend can sync concurrently. Hierarchical
-  storage locks exclude overlapping paths and whole-backend rollback; subprocesses
-  inherit the locks so a worker exit does not immediately unlock active writers.
-- ZFS storage validates its actual mountpoint and mounted state. Btrfs rollback
-  prepares and atomically exchanges subvolumes, retaining the old tree for inspection.
-- Snapshot names are unique, and requested snapshot failures fail the run by default.
-- HTTP transfer/listing failures are reported as failures. Rsync exit 23 now fails
-  by default; exit 24 remains accepted, with explicit success-code overrides supported.
-- External control commands have timeout and output limits. Log retention, safe
-  filesystem paths, resource accounting and poisoned-lock handling are hardened.
+- Missing ordinary files (HTTP 404/410) now complete with warnings, retaining
+  missing-file counts and diagnostic paths without retrying the entire job.
+- Missing critical repository metadata, incomplete directory traversal, other
+  HTTP errors, network failures and filesystem errors still fail the run.
+- Any missing-file warning or fatal error suppresses local deletion. Partial
+  mirrors no longer claim the complete upstream size.
+- API, CLI, TUI, database history and Grafana distinguish `success_with_warnings`.
+  Completed warning runs satisfy dependencies; tunasync-compatible status maps
+  them to success. The native status metric uses value 12.
 
-## Security and TUI
+## Proxy expose
 
-- Metrics require authentication by default. Configuration reload and sensitive
-  hook/provider/storage edits have separate permissions.
-- Docker execution drops capabilities and rejects unsafe host access and extra
-  writable mounts. Configuration expansion and loading have bounded limits.
-- Fix path traversal in log access, cleanup, HTTP mirrors and the Rustup proxy script.
-- TUI editing preserves typed configuration values and reports invalid input;
-  navigation, filtering and small-terminal layouts are improved.
+- Authenticated HTTP upstream proxies support both regular HTTP and CONNECT
+  tunnels through expose listeners, with independent downstream credentials.
+- Proxy authentication works regardless of header order. Listener startup logs
+  omit upstream credentials.
 
-## Builds and upgrading
+## Upgrading
 
-- CI runs formatting, strict Clippy, workspace tests, PostgreSQL concurrency tests
-  and builds with Rust 1.98.0. Release binaries are built on Ubuntu 22.04 and checked
-  for a glibc requirement no newer than 2.35; release caches are isolated accordingly.
-- Drain all old workers before upgrading the manager and workers together: the
-  fenced assignment protocol is incompatible with older workers. Back up the
-  database and configuration before the schema migration.
-- Review Docker options, snapshot failure policy, rsync success codes, metrics
-  authentication and API permissions when upgrading existing configurations.
-- Shared-storage takeover still requires infrastructure fencing and coherent
-  filesystem locks. Automatic retry after worker loss is opt-in; application
-  tokens alone cannot stop an isolated host or detached container from writing.
+- Upgrade the Manager before Workers so it accepts the new completion status.
+  Drain running Workers before replacing their processes. No schema migration
+  is needed from 0.2.0; historical failures are not rewritten.
+- Re-import the Grafana dashboard to display completed-with-warning runs.
+- Linux release builds retain Ubuntu 22.04 / glibc 2.35 compatibility checks.
