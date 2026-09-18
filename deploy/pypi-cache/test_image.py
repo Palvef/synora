@@ -73,12 +73,25 @@ def main():
             assert (data / '.synora/initial-success.json').exists()
             assert (data / 'simple/fixture/index.v1_json').is_file()
             assert (data / 'packages' / relative).read_bytes() == blob
+            missing = relative.replace('fixture-1.0.tar.gz','missing-1.0.tar.gz')
+            for row in list(rows):
+                rows.append(dict(row,url='/pypi/packages/'+missing))
+            (logs / 'pypi.log').write_text(''.join(json.dumps(row)+'\n' for row in rows))
+            result = cycle(True)
+            assert 'SYNORA_STATUS=success_with_warnings' in result.stdout
+            warnings = json.loads((data / '.synora/cache-warnings.json').read_text())
+            assert warnings == {'count': 1, 'paths': [missing]}, warnings
             marker = (data / '.synora/last-success.json').read_bytes()
             (logs / 'pypi.log').write_text('malformed\n')
             cycle(False)
             assert (data / '.synora/last-success.json').read_bytes() == marker
             assert (data / 'packages' / relative).read_bytes() == blob
-            print('PASS: real image index + cache + marker; invalid logs fail without cache deletion')
+            (logs / 'pypi.log').write_text(''.join(json.dumps(row)+'\n' for row in rows))
+            (upstream / 'local.json').write_text('{"fixture": 2}')
+            (simple / 'index.v1_json').unlink()
+            cycle(False)
+            assert (data / '.synora/last-success.json').read_bytes() == marker
+            print('PASS: real image index/cache, missing-package warnings, invalid logs and critical metadata failures')
         finally:
             server.shutdown()
 

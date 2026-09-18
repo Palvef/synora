@@ -12,6 +12,8 @@ server after removing its previous PyPI locations. The njs HTTP module must be
 loaded. Create `/var/log/nginx/pypi-cache` with permissions suitable for Nginx
 logging. The existing site's `$is_forbidden` variable and `@forbidden` handler
 are required; unrelated access policies remain in the enclosing server.
+If using `conf.d`, install the HTTP definitions as `00-synora-pypi.conf` so the
+log format is defined before the staging server is parsed.
 
 Storage is explicitly rooted at `/data` and only the allowlisted PyPI paths are
 served. Indexes use `Vary: Accept`; selected static files retain native Nginx

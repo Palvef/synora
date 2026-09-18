@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 import logs
 import sync
+import sys
 
 NOW = 1789732800
 ITEM = dict(timestamp=NOW, clientip='192.0.2.1', url='/pypi/web/packages/aa/bb/abcd/pkg.whl?x=1', size=23, status=200, user_agent='pip/25', proxied='0')
@@ -50,6 +51,12 @@ class LogsTest(unittest.TestCase):
             with self.assertRaises(ValueError): logs.prepare(root,None,root/'out.log',NOW)
 
 class SyncTest(unittest.TestCase):
+    def test_process_collects_missing_paths(self):
+        result=sync.run([sys.executable,'-c',"print('SYNORA_MISSING=aa/bb/hash/file.whl'); print('SYNORA_MISSING=aa/bb/hash/file.whl')"])
+        self.assertEqual(result,['aa/bb/hash/file.whl'])
+    def test_process_propagates_failure(self):
+        with self.assertRaises(RuntimeError):
+            sync.run([sys.executable,'-c','raise SystemExit(2)'])
     def test_budget_and_cli(self):
         cmd=sync.cache_command(Path('/data'),Path('/logs'),'https://upstream/web/',549755813888)
         self.assertEqual(cmd[cmd.index('--size-limit')+1], '549755813888')

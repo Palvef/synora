@@ -35,6 +35,7 @@ def run(command):
             except subprocess.TimeoutExpired:
                 process.kill(); process.wait()
         for s,handler in previous.items(): signal.signal(s,handler)
+        process.stdout.close()
 
 def cache_command(root,logdir,upstream,budget):
     return ['yukina','--name','pypi','--repo-path',str(root/'packages'),'--size-limit',str(budget),'--url',upstream+'packages/','--strip-prefix','/packages','--filter',r'^[0-9a-f]{2}/[0-9a-f]{2}/[0-9a-f]+/[^/]+$','--log-path',str(logdir),'--log-format','mirror-json','--log-duration','7d','--remote-sizedb',str(root/'.synora/remote-size.db'),'--local-sizedb',str(root/'.synora/local-size.db'),'--download-error-threshold','1','--output-stats']
