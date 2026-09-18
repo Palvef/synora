@@ -41,7 +41,10 @@ from `/data/pypi/packages`. Package misses return 302 to TUNA. Install
 `nginx/server-cache.conf` as the server snippet and `nginx/proxy.conf` as
 `/etc/nginx/snippets/synora-pypi-proxy.conf`. HTTP definitions must be loaded first
 (`/etc/nginx/conf.d/00-synora-pypi.conf`). Both public sites can switch immediately;
-there is no full-index readiness gate or activation hook in this mode.
+there is no full-index readiness gate or activation hook in this mode. Install
+`nginx/directory.conf` as `/etc/nginx/snippets/synora-pypi-directory.conf`
+to retain the site's default fancyindex at `/pypi/`, alongside the JSON API
+and existing help documentation. `/pypi` redirects only to `/pypi/`.
 
 The single Synora job runs every five minutes without overlapping runs. It only
 processes package candidates from seven days of access logs; an access record is

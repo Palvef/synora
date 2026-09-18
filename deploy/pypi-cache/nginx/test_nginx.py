@@ -44,6 +44,10 @@ def main():
             dest = data / 'pypi' / path
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(content)
+        # The stock test image lacks fancyindex; test API routes here. The
+        # production directory renderer is separately checked on the target host.
+        directory = root / 'directory.conf'
+        directory.write_text('# fancyindex is supplied by the production Nginx build\n')
         config = root / 'nginx.conf'
         config.write_text('''load_module /usr/lib/nginx/modules/ngx_http_js_module.so;
 events {}
@@ -69,6 +73,7 @@ http {
             (config, '/etc/nginx/nginx.conf'),
             (HERE / 'http.conf', '/etc/nginx/pypi-http.conf'),
             (HERE / 'server.conf', '/etc/nginx/pypi-server.conf'),
+            (directory, '/etc/nginx/snippets/synora-pypi-directory.conf'),
             (HERE / 'common-static.conf', '/etc/nginx/snippets/synora-pypi-common.conf'),
             (HERE / 'synora-pypi.js', '/etc/nginx/njs/synora-pypi.js'),
             (data, '/data'),

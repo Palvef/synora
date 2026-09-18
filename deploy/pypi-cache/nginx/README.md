@@ -9,7 +9,10 @@ Install `synora-pypi.js` at `/etc/nginx/njs/synora-pypi.js`, install
 `common-static.conf` at `/etc/nginx/snippets/synora-pypi-common.conf`, include
 `http.conf` once in `http`, and include `server.conf` inside each public mirror
 server after removing its previous PyPI locations. The njs HTTP module must be
-loaded. Create `/var/log/nginx/pypi-cache` with permissions suitable for Nginx
+loaded, along with fancyindex. Install `directory.conf` as
+`/etc/nginx/snippets/synora-pypi-directory.conf`; `/pypi` redirects only to
+`/pypi/`, which uses the site's existing fancyindex appearance and help links.
+Only `simple`, `packages`, and `json` appear in that listing. Create `/var/log/nginx/pypi-cache` with permissions suitable for Nginx
 logging. The existing site's `$is_forbidden` variable and `@forbidden` handler
 are required; unrelated access policies remain in the enclosing server.
 If using `conf.d`, install the HTTP definitions as `00-synora-pypi.conf` so the
@@ -19,7 +22,7 @@ Storage is explicitly rooted at `/data` and only the allowlisted PyPI paths are
 served. Indexes use `Vary: Accept`; selected static files retain native Nginx
 HEAD, conditional requests and byte-range behavior. Metadata misses return 404;
 only valid package blob misses redirect to the fixed TUNA upstream. State files
-and directory listings are never served. Dedicated JSON logs count local static
+are never served; only the public root has a directory listing. Dedicated JSON logs count local static
 responses as `proxied: "0"` and package-miss redirects as `proxied: "1"`.
 
 For staging, use a loopback-only server with the same server snippet and the
