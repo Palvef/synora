@@ -1,0 +1,30 @@
+# Replace this image ID with the immutable result of docker image inspect.
+# Synora skips overlapping ticks during bootstrap. The success hook promotes
+# public routes only after the complete-index and real-cache marker exists.
+[[jobs]]
+name = "pypi"
+enabled = true
+worker = "worker-nvme"
+provider = "docker"
+image = "synora-pypi:production"
+storage = "pypi"
+storage_name = "nvme"
+resources = ["nvme"]
+schedule = "interval"
+every = "5m"
+upstream = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/"
+env = ["PYPI_CACHE_BYTES=549755813888", "SHADOWMIRE_WORKERS=16"]
+volumes = [
+  "/var/log/nginx/pypi-cache:/nginx-log:ro",
+  "/var/log/nginx/mirrors:/nginx-legacy/nyist:ro",
+  "/var/log/log/ha_mirrors:/nginx-legacy/ha:ro",
+]
+max_concurrency = 1
+memory_limit = "16G"
+cpu_limit = 8.0
+statistics = "filesystem"
+retry = 2
+retry_delay = "5m"
+
+[jobs.hooks]
+on_success = ["python3 /opt/synora/pypi-cache/activate.py"]
