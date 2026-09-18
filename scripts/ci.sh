@@ -5,9 +5,6 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 cargo fmt --all -- --check
-python3 -m unittest discover -s deploy/pypi-cache -p 'test_*.py'
-node deploy/pypi-cache/nginx/test_nginx.mjs
-python3 deploy/pypi-cache/nginx/test_nginx.py
 python3 - <<'PYTHON'
 import pathlib
 import tomllib

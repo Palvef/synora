@@ -2,3 +2,6 @@
 /data
 /logs
 *.db
+
+# Local production deployment files
+/deploy/pypi-cache/
