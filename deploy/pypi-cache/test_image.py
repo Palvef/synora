@@ -26,10 +26,18 @@ def main():
         package.parent.mkdir(parents=True)
         package.write_bytes(blob)
         class Handler(SimpleHTTPRequestHandler):
+            mismatch = False
             def __init__(self, *a, **kw):
                 super().__init__(*a, directory=str(upstream), **kw)
             def log_message(self, *a):
                 pass
+            def do_HEAD(self):
+                if self.mismatch and self.path == '/packages/' + relative:
+                    self.send_response(200)
+                    self.send_header('Content-Length', str(len(blob)-1))
+                    self.end_headers()
+                else:
+                    super().do_HEAD()
         server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         url = f'http://127.0.0.1:{server.server_port}/'
@@ -91,7 +99,16 @@ def main():
             (simple / 'index.v1_json').unlink()
             cycle(False)
             assert (data / '.synora/last-success.json').read_bytes() == marker
-            print('PASS: real image index/cache, missing-package warnings, invalid logs and critical metadata failures')
+            # A lying HEAD response must not publish a file larger than budgeted.
+            (upstream / 'local.json').write_text('{"fixture": 1}')
+            (data / 'packages' / relative).unlink()
+            for db in (data / '.synora').glob('*-size.db*'):
+                db.unlink()
+            Handler.mismatch = True
+            cycle(False)
+            assert not (data / 'packages' / relative).exists()
+            assert (data / '.synora/last-success.json').read_bytes() == marker
+            print('PASS: real image index/cache, missing-package warnings, invalid logs, critical metadata and size mismatch failures')
         finally:
             server.shutdown()
 
