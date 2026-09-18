@@ -69,6 +69,7 @@ function redirect(r) { return route(r).redirect || ''; }
 function allowed(r) { var v = route(r); return v.file || v.redirect || v.unacceptable ? '1' : '0'; }
 function unacceptable(r) { return route(r).unacceptable ? '1' : '0'; }
 function file(r) { return route(r).file || ''; }
+function upstreamPath(r) { return '/pypi/web/' + (route(r).file || '').substring('/pypi/'.length); }
 function logUrl(r) {
     // Use the public request path, never the internally selected index filename.
     return r.variables.request_uri.split('?')[0].replace(/^\/pypi\/web\//, '/pypi/');
@@ -82,4 +83,4 @@ function missing(r) {
         r.return(404, 'PyPI metadata not found\n');
     }
 }
-export default { normalize, representation, route, redirect, allowed, unacceptable, file, logUrl, missing };
+export default { normalize, representation, route, redirect, allowed, unacceptable, file, logUrl, upstreamPath, missing };

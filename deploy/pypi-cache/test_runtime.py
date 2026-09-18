@@ -51,6 +51,15 @@ class LogsTest(unittest.TestCase):
             with self.assertRaises(ValueError): logs.prepare(root,None,root/'out.log',NOW)
 
 class SyncTest(unittest.TestCase):
+    def test_proxy_mode_runs_only_cache_without_full_index(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d)
+            with patch.object(sync,'prepare',return_value=1), patch.object(sync,'run',return_value=[]) as run:
+                sync.cycle(root,root,None,'https://upstream/web/',512,index_mode='proxy')
+                self.assertEqual(run.call_count,1)
+                self.assertEqual(run.call_args[0][0][0],'yukina')
+                self.assertFalse((root/'.synora/initial-success.json').exists())
+                self.assertEqual(json.loads((root/'.synora/last-success.json').read_text())['index_mode'],'proxy')
     def test_process_collects_missing_paths(self):
         result=sync.run([sys.executable,'-c',"print('SYNORA_MISSING=aa/bb/hash/file.whl'); print('SYNORA_MISSING=aa/bb/hash/file.whl')"])
         self.assertEqual(result,['aa/bb/hash/file.whl'])

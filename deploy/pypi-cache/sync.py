@@ -16,13 +16,23 @@ def run(command):
     print('Running:', ' '.join(command), flush=True)
     process=subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     missing=set()
+    last_progress=time.monotonic()
+    suppressed=0
     def terminate(signum, _frame):
         process.send_signal(signum)
         raise SystemExit(128+signum)
     previous={s:signal.signal(s,terminate) for s in (signal.SIGTERM,signal.SIGINT)}
     try:
         for line in process.stdout:
-            print(line, end='', flush=True)
+            important=any(s in line for s in ('ERROR', 'WARN', 'SYNORA_', 'failed', 'All done', 'Success:'))
+            progress=('updating ' in line or '%|' in line or 'Downloading' in line or 'Downloaded:' in line or '\x1b[' in line or line.lstrip().startswith('['))
+            if progress and not important:
+                suppressed+=1
+                if time.monotonic()-last_progress >= 30:
+                    print(f'Progress: {suppressed} activity lines since last report; {line.strip()[-160:]}',flush=True)
+                    last_progress=time.monotonic();suppressed=0
+            else:
+                print(line, end='', flush=True)
             if line.startswith('SYNORA_MISSING='):
                 missing.add(line.strip().split('=',1)[1])
         code=process.wait()
@@ -38,18 +48,24 @@ def run(command):
         process.stdout.close()
 
 def cache_command(root,logdir,upstream,budget):
-    return ['yukina','--name','pypi','--repo-path',str(root/'packages'),'--size-limit',str(budget),'--url',upstream+'packages/','--strip-prefix','/packages','--filter',r'^[0-9a-f]{2}/[0-9a-f]{2}/[0-9a-f]+/[^/]+$','--log-path',str(logdir),'--log-format','mirror-json','--log-duration','7d','--remote-sizedb',str(root/'.synora/remote-size.db'),'--local-sizedb',str(root/'.synora/local-size.db'),'--download-error-threshold','1','--output-stats']
+    return ['yukina','--name','pypi','--repo-path',str(root/'packages'),'--size-limit',str(budget),'--url',upstream+'packages/','--strip-prefix','/packages','--filter',r'^[0-9a-f]{2}/[0-9a-f]{2}/[0-9a-f]+/[^/]+$','--log-path',str(logdir),'--log-format','mirror-json','--log-duration','7d','--min-vote-count','1','--include-browser-ua','--remote-sizedb',str(root/'.synora/remote-size.db'),'--local-sizedb',str(root/'.synora/local-size.db'),'--download-error-threshold','1','--output-stats']
 
-def cycle(root,source,historical,upstream,budget):
+def cycle(root,source,historical,upstream,budget,index_mode='full'):
     state=root/'.synora'; state.mkdir(parents=True,exist_ok=True)
     logdir=state/'logs';logdir.mkdir(exist_ok=True)
     with (state/'sync.lock').open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         count=prepare(source,historical,logdir/'pypi.log')
         print(f'Validated {count} recent requests',flush=True)
-        run([sys.executable,__file__,'--shadowmire','--repo',str(root),'sync','--no-sync-packages','--no-filter-metadata','--shadowmire-upstream',upstream])
+        if index_mode == 'full':
+            run([sys.executable,__file__,'--shadowmire','--repo',str(root),'sync','--no-sync-packages','--no-filter-metadata','--shadowmire-upstream',upstream])
+        elif index_mode != 'proxy':
+            raise ValueError('PYPI_INDEX_MODE must be full or proxy')
+        else:
+            print('Index mode: on-demand upstream proxy; updating only access-log package candidates',flush=True)
         # Initial index sync can take days; refresh the seven-day vote window afterwards.
-        prepare(source,historical,logdir/'pypi.log')
+        if index_mode == 'full':
+            prepare(source,historical,logdir/'pypi.log')
         (root/'packages').mkdir(exist_ok=True)
         missing=run(cache_command(root,logdir,upstream,budget)) or []
         if not isinstance(missing, list): missing=[]
@@ -60,13 +76,13 @@ def cycle(root,source,historical,upstream,budget):
             print('SYNORA_STATUS=success_with_warnings',flush=True)
             print(f'SYNORA_MESSAGE={len(missing)} upstream package files missing; paths in .synora/cache-warnings.json',flush=True)
         marker=state/'initial-success.json'
-        if not marker.exists() and not any(p.is_file() and not p.name.endswith('.tmp') for p in (root/'packages').glob('*/*/*/*')):
+        if index_mode == 'full' and not marker.exists() and not any(p.is_file() and not p.name.endswith('.tmp') for p in (root/'packages').glob('*/*/*/*')):
             raise RuntimeError('no hot package cached yet; initial sync is not complete')
-        result=dict(completed_at=int(time.time()),cache_budget_bytes=budget,upstream=upstream)
+        result=dict(completed_at=int(time.time()),cache_budget_bytes=budget,upstream=upstream,index_mode=index_mode)
         temp=state/'last-success.tmp';temp.write_text(json.dumps(result)+'\n');temp.replace(state/'last-success.json')
-        if not marker.exists():
+        if index_mode == 'full' and not marker.exists():
             temp.write_text(json.dumps(result)+'\n');temp.replace(marker)
-        print('PyPI index and cache synchronization complete',flush=True)
+        print('PyPI synchronization complete (index mode: '+index_mode+')',flush=True)
 
 def shadowmire():
     # Upstream treats None from missing/failed metadata as successful parallel work.
@@ -94,7 +110,7 @@ if __name__=='__main__':
         else:
             budget=int(os.environ.get('PYPI_CACHE_BYTES',BUDGET))
             if budget<=0: raise ValueError('PYPI_CACHE_BYTES must be positive')
-            cycle(Path('/data'),Path('/nginx-log'),Path('/nginx-legacy'),os.environ.get('PYPI_UPSTREAM',UPSTREAM).rstrip('/')+'/',budget)
+            cycle(Path('/data'),Path('/nginx-log'),Path('/nginx-legacy'),os.environ.get('PYPI_UPSTREAM',UPSTREAM).rstrip('/')+'/',budget,os.environ.get('PYPI_INDEX_MODE','full'))
     except Exception as exc:
         print(f'PyPI synchronization failed: {exc}',file=sys.stderr,flush=True)
         sys.exit(1)

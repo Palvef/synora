@@ -6,6 +6,7 @@ use std::{
     time::Duration,
 };
 use tokio::io::{AsyncRead, AsyncReadExt};
+pub mod log_tail;
 pub const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 

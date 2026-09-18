@@ -150,22 +150,19 @@ pub(crate) async fn read_pipe_tee_err(
 /// log is best-effort telemetry, not a sync point).
 pub(crate) async fn tee_log(path: &Option<std::path::PathBuf>, data: &[u8]) {
     let Some(path) = path else { return };
-    if let Ok(mut f) = tokio::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .await
-    {
-        use tokio::io::AsyncWriteExt;
-        let remaining = 16 * 1024 * 1024u64
-            - f.metadata()
-                .await
-                .map(|m| m.len().min(16 * 1024 * 1024))
-                .unwrap_or(16 * 1024 * 1024);
-        let _ = f
-            .write_all(&data[..data.len().min(remaining as usize)])
-            .await;
-    }
+    let path = path.clone();
+    let data = data.to_vec();
+    let _ = tokio::task::spawn_blocking(move || {
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = command_runner::log_tail::append(&mut file, &data);
+        }
+    })
+    .await;
 }
 
 pub(crate) async fn kill_group(child: &mut tokio::process::Child) {

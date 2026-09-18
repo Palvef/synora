@@ -2,13 +2,11 @@
 //! and retention. Legacy daily logs expire after 30 days.
 
 use std::fs::{File, OpenOptions};
-use std::io::Write;
 use std::path::Path;
 
 pub struct RunLogger {
     run: File,
 }
-const MAX_RUN_LOG_BYTES: u64 = 16 * 1024 * 1024;
 impl RunLogger {
     pub fn open(log_dir: &Path, job_name: &str) -> std::io::Result<RunLogger> {
         if job_name.is_empty()
@@ -33,6 +31,7 @@ impl RunLogger {
         );
         let run = OpenOptions::new()
             .create_new(true)
+            .read(true)
             .append(true)
             .open(dir.join(&filename))?;
         let link = dir.join(format!(".current-{}", synora_core::RunId::new()));
@@ -49,8 +48,7 @@ impl RunLogger {
         self.raw(format!("{ts} {msg}\n").as_bytes())
     }
     pub fn raw(&mut self, data: &[u8]) -> std::io::Result<()> {
-        let remaining = MAX_RUN_LOG_BYTES.saturating_sub(self.run.metadata()?.len()) as usize;
-        self.run.write_all(&data[..data.len().min(remaining)])
+        command_runner::log_tail::append(&mut self.run, data)
     }
 }
 fn prune_daily_logs(dir: &Path) {

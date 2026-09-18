@@ -1,8 +1,8 @@
 # PyPI index and popularity cache
 
-The `pypi` Synora job runs on `worker-nvme` (172.31.32.150). Shadowmire
-maintains the complete index, including links to uncached packages, then Yukina
-downloads popular packages from seven days of access logs. Sources are pinned in
+The `pypi` Synora job runs on `worker-nvme` (172.31.32.150). Production proxies
+index metadata to TUNA and Yukina downloads popular packages from seven days of
+access logs; optional full-index mode uses Shadowmire. Sources are pinned in
 the Dockerfile. The upstream is `https://mirrors.tuna.tsinghua.edu.cn/pypi/web/`.
 
 ## Storage and runtime
@@ -33,36 +33,30 @@ validated logs and atomic success markers; the Nginx allowlist makes it private.
 An initial success requires both the complete index update and a real cached
 package. Interrupted updates resume from Shadowmire's serial database.
 
-## Deployment and promotion
+## Production cache mode
 
-1. Back up both existing PyPI virtual-host configurations. Install this directory
-   at `/opt/synora/pypi-cache`, and install the Nginx artifacts following
-   [nginx/README.md](nginx/README.md). Initially include the server snippet only in
-   a private validation server listening on `127.0.0.1:18081`; public routes keep
-   their existing TUNA behavior until the complete initial sync passes validation.
-2. Install `logrotate` as `/etc/logrotate.d/synora-pypi`, adjusting its `nginx` user
-   only if the host uses a different Nginx account. Preserve the existing site's
-   security policy and log pipelines. New package misses return 302 to TUNA; local
-   cache hits remain local for campus and external clients alike.
-3. Install `pypi.toml` as `/etc/synora/jobs/pypi.toml` with the actual immutable
-   image ID. Run `synora -c /etc/synora/synora.toml check`, then `reload` and
-   trigger `synora -c /etc/synora/synora.toml run pypi` if it is not already queued.
-4. **All scheduling belongs to Synora.** Its five-minute interval skips overlapping
-   ticks during the long bootstrap. No systemd timer or cron job is installed.
-   The success hook executes `activate.py`: it checks the success marker, validates
-   private HTTP behavior and an actual pip download, switches both public sites,
-   runs `nginx -t`, reloads, and verifies both hostnames. It writes `activated.json`
-   only after those checks pass. Subsequent success hooks then do nothing.
-5. A failed promotion restores both previous routes. Synora retries promotion
-   after a later successful sync. The hook has a bounded deadline within Synora's
-   30-second command timeout. Inspect the worker journal for hook failures and
-   `.synora/activated.json` to distinguish synchronized data from activated serving.
+Production sets `PYPI_INDEX_MODE=proxy`. Nginx proxies normalized HTML/JSON
+metadata to TUNA with certificate verification and serves cached package files
+from `/data/pypi/packages`. Package misses return 302 to TUNA. Install
+`nginx/server-cache.conf` as the server snippet and `nginx/proxy.conf` as
+`/etc/nginx/snippets/synora-pypi-proxy.conf`. HTTP definitions must be loaded first
+(`/etc/nginx/conf.d/00-synora-pypi.conf`). Both public sites can switch immediately;
+there is no full-index readiness gate or activation hook in this mode.
 
-The activation script targets the two existing production virtual hosts
-`mirror.nyist.edu.cn` and `mirrors.ha.edu.cn`. It deliberately rejects an unexpected
-old location layout. Backups are stored under `/root/synora-pypi-activation-*`.
-To roll back serving, pause the PyPI job before restoring the saved site files,
-validate and reload Nginx, and retain the dataset for recovery.
+The single Synora job runs every five minutes without overlapping runs. It only
+processes package candidates from seven days of access logs; an access record is
+not necessarily a unique package. Valid blob requests, including browser downloads,
+participate from one vote; directory requests are excluded by the blob path filter. No cron or systemd timer is used. Preserve
+existing partial index files for recovery, but proxy mode does not serve them.
+
+`PYPI_INDEX_MODE=full` remains available for a complete local Shadowmire index.
+The original `nginx/server.conf` and optional `activate.py` hook support that
+mode. Full-index synchronization must not block production cache population.
+
+Runtime progress is summarized every 30 seconds instead of emitting one line per
+project or an interactive progress bar. Synora retains the latest output when a
+run log reaches 16 MiB, with an explicit truncation marker; it does not silently
+stop recording a running task.
 
 ## Verification
 

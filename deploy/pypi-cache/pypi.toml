@@ -1,6 +1,6 @@
 # Replace this image ID with the immutable result of docker image inspect.
-# Synora skips overlapping ticks during bootstrap. The success hook promotes
-# public routes only after the complete-index and real-cache marker exists.
+# Synora skips overlapping ticks. Metadata is proxied by Nginx; this job only
+# updates package candidates derived from access logs.
 [[jobs]]
 name = "pypi"
 enabled = true
@@ -13,7 +13,7 @@ resources = ["nvme"]
 schedule = "interval"
 every = "5m"
 upstream = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/"
-env = ["PYPI_CACHE_BYTES=549755813888", "SHADOWMIRE_WORKERS=16"]
+env = ["PYPI_CACHE_BYTES=549755813888", "PYPI_INDEX_MODE=proxy"]
 volumes = [
   "/var/log/nginx/pypi-cache:/nginx-log:ro",
   "/var/log/nginx/mirrors:/nginx-legacy/nyist:ro",
@@ -25,6 +25,3 @@ cpu_limit = 8.0
 statistics = "filesystem"
 retry = 2
 retry_delay = "5m"
-
-[jobs.hooks]
-on_success = ["python3 /opt/synora/pypi-cache/activate.py"]
