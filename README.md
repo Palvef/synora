@@ -31,7 +31,7 @@ to TUNA and to the authors and maintainers of these projects.
   `[24]`; exit 23 fails unless explicitly enabled), two-stage-rsync (tunasync two-pass: a fast stage-1 subset by
   profile, then the full sync), script (`SYNORA_*` env, `SYNORA_SIZE=` size reporting; workers always run these in `synora-scripts`), docker (`docker run`, storage mounted at /data,
   optional in-container command), git (`clone --mirror` + `remote update --prune`, same `synora-scripts` image on workers),
-  and HTTP directory mirroring (tsumugu-style: missing ordinary files complete with warnings; metadata/transfer/listing errors fail the run,
+  and HTTP directory mirroring (tsumugu-style: downloaded-file 404/410 responses complete with warnings; other transfer/listing errors fail the run,
   local symlinks left alone, listing-marked symlinks mirrored as local links,
   configurable download concurrency, 30 s connect / 120 s idle-read timeout,
   unlimited run

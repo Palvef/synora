@@ -15,6 +15,32 @@ def module(name):
 
 class DiscoveryTests(unittest.TestCase):
     def tearDown(self): discovery.directories.cache_clear();discovery.release_fields.cache_clear()
+    def test_selection_defaults_and_exclusion_precedence(self):
+        from repo_selection import Selection
+        with patch.dict('os.environ', {}, clear=True):
+            self.assertTrue(Selection().allows('bookworm', 'arm64', 'main'))
+        with patch.dict('os.environ', {'SYNC_VERSIONS':'book*,trixie', 'SYNC_EXCLUDE_ARCHES':'arm*', 'SYNC_EXCLUDE_COMPONENTS':'testing'}, clear=True):
+            selector=Selection()
+            self.assertTrue(selector.allows('bookworm','amd64','main'))
+            self.assertFalse(selector.allows('bullseye','amd64','main'))
+            self.assertFalse(selector.allows('bookworm','arm64','main'))
+            self.assertFalse(selector.allows('trixie','amd64','testing'))
+
+    def test_apt_selection_does_not_delete_excluded_architecture(self):
+        apt=module('apt-sync')
+        with tempfile.TemporaryDirectory() as dest, patch.dict('os.environ', {'SYNC_EXCLUDE_ARCHES':'arm64'}, clear=True), patch.object(sys,'argv',['apt-sync','--delete','https://repo.test','future','main','amd64,arm64',dest]), patch.object(apt,'apt_mirror',return_value=0) as mirror, patch.object(apt,'apt_delete_old_debs') as delete:
+            apt.main()
+            self.assertEqual(mirror.call_count,1)
+            self.assertEqual(mirror.call_args.args[3],'amd64')
+            delete.assert_not_called()
+
+    def test_apt_explicitly_excluded_suite_needs_no_metadata(self):
+        apt=module('apt-sync')
+        with tempfile.TemporaryDirectory() as dest, patch.dict('os.environ', {'SYNC_EXCLUDE_VERSIONS':'*'}, clear=True), patch.object(sys,'argv',['apt-sync','https://repo.test','future','@auto','@auto',dest]), patch.object(apt,'release_fields') as fields, patch.object(apt,'apt_mirror') as mirror:
+            apt.main()
+            fields.assert_not_called()
+            mirror.assert_not_called()
+
     def test_directory_scope_and_empty_fail_closed(self):
         response=Mock(text='<a href="../">parent</a><a href="new-release/">new</a><a href="https://evil.test/x/">evil</a><a href="../../bad/">escape</a>')
         with patch.object(discovery.requests,'get',return_value=response):

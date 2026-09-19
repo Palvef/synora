@@ -197,6 +197,8 @@ def substitute_vars(s: str, vardict: Dict[str, str]) -> str:
     return s
 
 
+from repo_selection import Selection
+
 def main():
 
     parser = argparse.ArgumentParser()
@@ -240,6 +242,7 @@ def main():
 
     logger.info(f"Configuration: {os_list=}, {component_list=}, {arch_list=}")
 
+    selection = Selection()
     failed = []
     if not args.dry_run: args.working_dir.mkdir(parents=True, exist_ok=True)
     # Hold a repository-root lock before touching interrupted createrepo state.
@@ -255,6 +258,9 @@ def main():
         for bindings, url in matrix:
             vardict = {'os_ver': os_list[0], 'comp': component_list[0], 'arch': arch, **bindings}
             name = substitute_vars(args.repo_name, vardict)
+            enabled = selection.allows(vardict['os_ver'], vardict['arch'], vardict['comp'])
+            logger.info('Selection: version=%s architecture=%s component=%s sync=%s', vardict['os_ver'], vardict['arch'], vardict['comp'], 'yes' if enabled else 'no')
+            if not enabled: continue
             if (name,url) in found: continue
             found.add((name,url))
             probe_url = url+'/repodata/repomd.xml'
@@ -271,7 +277,7 @@ def main():
         for arch in arch_list:
             for name,url in combination_os_comp(arch):
                 print(name, url, flush=True);count+=1
-        if not count: raise RuntimeError('No available RPM repositories discovered')
+        if not count and not selection.active: raise RuntimeError('No available RPM repositories discovered')
         return
     for arch in arch_list:
         dest_dirs = []
@@ -305,7 +311,7 @@ skip_if_unavailable=0
 
         if len(dest_dirs) == 0:
             logger.info("Nothing to sync")
-            failed.append(("", arch))
+            if not selection.active: failed.append(("", arch))
             continue
 
         cmd_args = [
@@ -323,7 +329,7 @@ skip_if_unavailable=0
         logger.info(f"Launching dnf reposync with command: {cmd_args}")
         ret = sp.run(cmd_args)
         if ret.returncode != 0:
-            failed.append((name, arch))
+            failed.extend((str(path), arch) for path, _ in dest_dirs)
             continue
 
         for path, repo_url in dest_dirs:

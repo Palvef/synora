@@ -1,6 +1,6 @@
 #!/bin/bash
 # Build synora-scripts:latest from synora-scripts/Dockerfile.
-# rustup-mirror is compiled in the image from jiegec/rustup-mirror.
+# Dedicated runtimes: scripts/build-sync-images.sh.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -14,7 +14,7 @@ usage() {
 Usage: scripts/build-synora-scripts-image.sh [--proxy URL] [--image NAME]
 
 Builds the git/script runtime image used by synora-worker (git, python,
-dnf, createrepo_c, awscli, ftpsync, rustup-mirror, rubygems-mirror).
+dnf, createrepo_c, awscli). Specialized runtimes are built separately.
 HELP
 }
 
@@ -43,7 +43,7 @@ done
 echo "building $IMAGE from synora-scripts/Dockerfile"
 BUILD_ARGS=(--network host -t "$IMAGE" -f "$ROOT/synora-scripts/Dockerfile" "$ROOT/synora-scripts")
 if [ -n "$PROXY" ]; then
-  echo "using HTTPS fetch proxy $PROXY (apt stays direct)"
+  echo "using configured HTTPS fetch proxy (apt stays direct)"
   BUILD_ARGS+=(--build-arg "FETCH_HTTPS_PROXY=$PROXY")
 fi
 docker build "${BUILD_ARGS[@]}"

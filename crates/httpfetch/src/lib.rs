@@ -4,7 +4,7 @@
 //! upstream. Planning is parser-driven ([`parser`] crate) and yields a
 //! [`Plan`]; [`Fetcher::execute`] runs it concurrently with a cancel token.
 //!
-//! Missing ordinary files are warnings; other transfer errors fail the run. Incomplete
+//! Missing downloaded files are warnings; other transfer errors fail the run. Incomplete
 //! listings also fail the run; destructive deletes are suppressed after any
 //! transfer/planning failure. Successful files are retained for the next retry.
 
@@ -110,7 +110,7 @@ pub struct FetchStats {
     pub files_skipped: u32,
     /// Fatal transfer, listing, or local filesystem errors.
     pub files_failed: u32,
-    /// Ordinary files missing upstream (404/410), without a fatal error.
+    /// Downloaded files missing upstream (404/410), without a fatal error.
     pub files_warned: u32,
     /// Bounded diagnostic paths, independent of rolling progress log lines.
     pub warning_paths: Vec<String>,
@@ -159,50 +159,6 @@ struct DirectoryWork {
 
 type DownloadSuccess = (u64, String, PathBuf, std::time::Duration);
 type DownloadFailure = (FetchError, String, PathBuf, std::time::Duration);
-
-/// Repository indexes and their signatures/checksums are required even when
-/// the upstream reports them as missing. Treat every RPM repodata and APT
-/// by-hash entry as metadata, including content-addressed/compressed names.
-fn is_critical_metadata(path: &Path) -> bool {
-    let path = path.to_string_lossy().to_ascii_lowercase();
-    if path
-        .split('/')
-        .any(|part| matches!(part, "repodata" | "by-hash"))
-    {
-        return true;
-    }
-    let name = path.rsplit('/').next().unwrap_or_default();
-    let stem = [".gz", ".xz", ".bz2", ".zst", ".lz4", ".lzma"]
-        .iter()
-        .find_map(|suffix| name.strip_suffix(suffix))
-        .unwrap_or(name);
-    matches!(
-        stem,
-        "inrelease"
-            | "release"
-            | "release.gpg"
-            | "packages"
-            | "sources"
-            | "repomd.xml"
-            | "repomd.xml.asc"
-            | "index.html"
-            | "index.htm"
-            | "apkindex.tar"
-            | "checksums"
-            | "sha256sums"
-            | "sha512sums"
-            | "md5sums"
-    ) || stem.starts_with("contents-")
-        || stem.ends_with(".db")
-        || stem.ends_with(".db.tar")
-        || stem.ends_with(".files")
-        || stem.ends_with(".files.tar")
-        || stem.ends_with(".sig")
-        || stem.ends_with(".asc")
-        || stem.starts_with("specs.")
-        || stem.starts_with("latest_specs.")
-        || stem.starts_with("prerelease_specs.")
-}
 
 /// HTTP fetcher: a reqwest client with rustls, redirects followed (max 10),
 /// no proxy by default, a 30 s connect timeout plus 120 s idle-read timeout,
@@ -660,8 +616,7 @@ impl Fetcher {
                 Ok(Err((FetchError::Cancelled, _, _, _))) => cancelled = true,
                 Ok(Err((e, url, dest, elapsed))) => {
                     stats.files_skipped += 1;
-                    let warning = matches!(e, FetchError::HttpStatus(404 | 410))
-                        && !is_critical_metadata(&dest);
+                    let warning = matches!(e, FetchError::HttpStatus(404 | 410));
                     if warning {
                         stats.files_warned += 1;
                         if stats.warning_paths.len() < 100 {
@@ -722,7 +677,7 @@ impl Fetcher {
         }
         // Never re-fetch repomd here: the upstream may have changed since planning.
         // Publish the exact generation whose referenced metadata was downloaded.
-        if stats.files_failed == 0 {
+        if stats.files_failed == 0 && stats.files_warned == 0 {
             for (dest, body) in &plan.manifests {
                 if cancel.is_cancelled() {
                     return Err(FetchError::Cancelled);
@@ -1327,7 +1282,8 @@ mod tests {
                 .await
                 .unwrap();
             if missing {
-                assert!(stats.files_failed > 0);
+                assert_eq!(stats.files_failed, 0);
+                assert_eq!(stats.files_warned, 1);
                 assert_eq!(
                     std::fs::read_to_string(storage.join("repodata/repomd.xml")).unwrap(),
                     "old manifest"
@@ -1716,13 +1672,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_payload_warns_but_metadata_and_listing_fail() {
+    async fn missing_downloads_warn_but_listing_fails() {
         for (path, fatal) in [
             ("payload.rpm", false),
-            ("InRelease", true),
-            ("Packages.xz", true),
-            ("repodata/abc-primary.xml.gz", true),
-            ("index.html", true),
+            ("InRelease", false),
+            ("Packages.xz", false),
+            ("repodata/abc-primary.xml.gz", false),
+            ("index.html", false),
         ] {
             let base = spawn_server(TestMirror::new(&[]));
             let storage = unique_dir();

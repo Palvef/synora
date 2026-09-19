@@ -143,10 +143,10 @@ Worker 上始终与 script 共用 `synora-scripts` 容器。配置仍是 `provid
 HTTP 同步区分三种结果：
 
 - `success`：完整完成。
-- `success_with_warnings`：普通文件返回 404/410，其他操作正常。任务完成、不重试，依赖任务可继续；TUI 显示黄色 `done (warn)`。运行 `message` 保留缺失总数和前 100 个路径，逐文件原因写入有容量上限的运行日志。
-- `failed`：关键元数据缺失、目录遍历失败或被截断、其他 HTTP 错误（含 403/5xx）、超时、网络错误、本地写入/删除/软链接错误。按任务配置重试，成功下载的文件保留。
+- `success_with_warnings`：下载阶段文件返回 404/410（包括被清单引用的元数据），其他操作正常。任务完成、不重试，依赖任务可继续；TUI 显示黄色 `done (warn)`。运行 `message` 保留缺失总数和前 100 个路径，逐文件原因写入有容量上限的运行日志。
+- `failed`：规划阶段清单获取/解析失败、目录遍历失败或被截断、其他 HTTP 错误（含 403/5xx）、超时、网络错误、本地写入/删除/软链接错误。按任务配置重试，成功下载的文件保留。
 
-关键元数据按路径识别，包括 `InRelease`、`Release`、`Release.gpg`、`Packages`、`Sources`、`Contents-*`、`repodata/` 和 `by-hash/` 内文件、`index.html`、APKINDEX、Arch 数据库、RubyGems specs，以及签名和常用校验和文件；支持常用压缩后缀。这不是完整的包仓库依赖校验器，普通包是否仍被元数据引用不在此规则中验证。
+下载阶段不再仅凭元数据文件名将 404/410 升级为失败。有缺失时保留旧 RPM 清单，不发布本轮新清单；因此告警完成不代表上游仓库完整。规划所需的目录或 `repomd.xml` 不可读取时仍然失败。
 
 任何缺失告警或致命错误都会禁止本轮删除本地多余文件。告警完成更新最近成功时间；`synora.json` 和管理 API 保留独立状态，兼容的 `tunasync.json` 映射为 `success`。`synora_job_status` 的告警完成值为 12。
 

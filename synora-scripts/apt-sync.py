@@ -367,6 +367,8 @@ def apt_delete_old_debs(dest_base_dir: Path, remote_set: Dict[str, int], dry_run
             (dest_base_dir / i).unlink()
 
 
+from repo_selection import Selection
+
 def main():
 
     parser = argparse.ArgumentParser()
@@ -412,37 +414,44 @@ def main():
     component_lists = generate_list_for_oses(args.component, "component")
     arch_lists = generate_list_for_oses(args.arch, "arch")
 
+    selection = Selection()
     # Discover metadata before creating directories or deleting any old package.
     for i, suite in enumerate(os_list):
+        if not selection.matches('VERSIONS', suite):
+            logger.info('Selection: version=%s sync=no', suite)
+            continue
         if '@auto' in component_lists[i] or '@auto' in arch_lists[i]:
             fields = release_fields(args.base_url, suite)
             if '@auto' in component_lists[i]: component_lists[i] = fields['Components'].split()
             if '@auto' in arch_lists[i]: arch_lists[i] = fields['Architectures'].split()
     logger.info(f"Configuration: {os_list=}, {component_lists=}, {arch_lists=}")
 
-    if args.dry_run:
+    selected = []
+    for suite, arches, components in zip(os_list, arch_lists, component_lists):
+        for component in components:
+            for arch in arches:
+                enabled = selection.allows(suite, arch, component)
+                logger.info('Selection: version=%s architecture=%s component=%s sync=%s', suite, arch, component, 'yes' if enabled else 'no')
+                if enabled: selected.append((suite, component, arch))
+    if args.dry_run or not selected:
+        if not selected: logger.info('No repositories selected; keeping existing content')
         return
     args.working_dir.mkdir(parents=True, exist_ok=True)
     failed = []
     deb_set = {}
 
-    for os, arch_list, comp_list in zip(os_list, arch_lists, component_lists):
-        for comp in comp_list:
-            for arch in arch_list:
-                if (
-                    apt_mirror(
-                        args.base_url, os, comp, arch, args.working_dir, deb_set=deb_set
-                    )
-                    != 0
-                ):
-                    failed.append((os, comp, arch))
+    for os, comp, arch in selected:
+        if apt_mirror(args.base_url, os, comp, arch, args.working_dir, deb_set=deb_set) != 0:
+            failed.append((os, comp, arch))
     if len(failed) > 0:
         logger.error(f"Failed APT repos of {args.base_url}: {failed}")
         sys.exit(1)
     retained_suites = {str(p.parent.relative_to(args.working_dir / 'dists'))
                        for p in (args.working_dir / 'dists').rglob('Release')
                        if '.tmp' not in p.parts} - set(os_list)
-    if retained_suites and (args.delete or args.delete_dry_run):
+    if selection.active and (args.delete or args.delete_dry_run):
+        logger.info("Selection filters active; skipping deletion to retain excluded content")
+    elif retained_suites and (args.delete or args.delete_dry_run):
         logger.warning('Keeping packages for suites outside this run: %s; skipping deletion', sorted(retained_suites))
     elif args.delete or args.delete_dry_run:
         apt_delete_old_debs(args.working_dir, deb_set, args.delete_dry_run)

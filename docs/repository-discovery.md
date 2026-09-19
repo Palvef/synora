@@ -31,8 +31,10 @@ repository retains its own upstream URL when downloading metadata.
 
 The native HTTP provider reads RPM metadata from `repomd.xml`, rather than stale
 HTML directory listings. It stages the exact manifest and publishes it only after
-referenced downloads succeed. Missing current metadata still fails; failed runs
-keep the old manifest and suppress deletion. Upstream changes during a long run
+referenced downloads succeed. Downloaded files missing with HTTP 404/410 (including referenced metadata)
+produce success_with_warnings. Any missing file holds back the staged RPM manifest
+and suppresses deletion. Directory traversal, malformed manifests, network errors,
+and other transfer errors still fail. Upstream changes during a long run
 may still require retrying against a fresh manifest.
 
 Validation: `python3 -m unittest discover -s synora-scripts/tests`, shell syntax
@@ -40,3 +42,29 @@ checks, and `cargo test -p httpfetch --lib`.
 
 APT deletion is suppressed when local Release files describe suites outside the
 current run, preserving packages referenced by retained distribution indexes.
+
+## Per-job selection
+
+Every APT/YUM script uses the same optional environment policy. Unset/empty lists
+select all combinations discovered by that script; there is no implicit new
+exclusion. Comma-separated shell-style patterns are supported; exclusions win.
+
+| Variable | Select / exclude |
+| --- | --- |
+| `SYNC_VERSIONS`, `SYNC_EXCLUDE_VERSIONS` | APT suite (including nested MongoDB release path), or YUM OS version |
+| `SYNC_ARCHES`, `SYNC_EXCLUDE_ARCHES` | APT architecture / YUM repository architecture |
+| `SYNC_COMPONENTS`, `SYNC_EXCLUDE_COMPONENTS` | Component, including YUM product releases such as Elastic `8.x` and MongoDB `8.0` |
+
+Example Synora job configuration (merge with any existing `env` entries):
+
+```toml
+env = ["SYNC_VERSIONS=bookworm,trixie", "SYNC_ARCHES=amd64,arm64", "SYNC_EXCLUDE_ARCHES=arm64"]
+```
+
+For each discovered combination logs show `version=... architecture=...
+component=... sync=yes/no`. Run `apt-sync.py --dry-run ...` or `yum-sync.py
+--dry-run ...` with the same arguments/environment to inspect the upstream
+inventory and selections without downloading packages. Discovery errors still
+fail; an explicitly empty selection preserves existing data. APT deletion is
+suppressed while filters are active so excluded suites/architectures keep their
+packages. YUM only processes selected repository directories.

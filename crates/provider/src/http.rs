@@ -1,7 +1,7 @@
 //! HTTP directory-mirroring provider (spec §14/§60, tsumugu-style): parse the
 //! upstream index and download only files that differ. Per-file download
 //! errors are logged and the rest of the tree still transfers, but the run
-//! completes with warnings for missing ordinary files; integrity errors fail it. Local symlinks are left
+//! completes with warnings for downloaded-file 404/410 responses; integrity errors fail it. Local symlinks are left
 //! alone; listing-marked symlinks are mirrored as local links.
 
 use crate::{ProviderError, SyncContext, SyncResult};
