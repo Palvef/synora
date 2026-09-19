@@ -221,6 +221,7 @@ def main():
         help="""pass --arch to reposync to further filter packages by 'arch' field in metadata (NOT recommended, prone to missing packages in some repositories, e.g. mysql)""",
     )
     parser.add_argument("--dry-run", action="store_true", help="probe discovered repositories without syncing")
+    parser.add_argument("--legacy-x86-repo-names", action="store_true", help="omit the x86_64 suffix for compatibility with existing MongoDB mirrors")
     args = parser.parse_args()
 
     raw_os_list = args.os_version.split(",")
@@ -258,6 +259,8 @@ def main():
         for bindings, url in matrix:
             vardict = {'os_ver': os_list[0], 'comp': component_list[0], 'arch': arch, **bindings}
             name = substitute_vars(args.repo_name, vardict)
+            if args.legacy_x86_repo_names and vardict["arch"] == "x86_64":
+                name = name.removesuffix("-x86_64")
             enabled = selection.allows(vardict['os_ver'], vardict['arch'], vardict['comp'])
             logger.info('Selection: version=%s architecture=%s component=%s sync=%s', vardict['os_ver'], vardict['arch'], vardict['comp'], 'yes' if enabled else 'no')
             if not enabled: continue
@@ -279,84 +282,45 @@ def main():
                 print(name, url, flush=True);count+=1
         if not count and not selection.active: raise RuntimeError('No available RPM repositories discovered')
         return
+    # Isolate each repository: one broken historical branch must not stop all others.
+    import mongodb_rpm
+    repaired = []
     for arch in arch_list:
-        dest_dirs = []
-        conf = tempfile.NamedTemporaryFile("w", suffix=".conf")
-        conf.write(
-            """
-[main]
-reposdir=/dev/null
-keepcache=0
-skip_if_unavailable=0
-"""
-        )
-        for name, url in combination_os_comp(arch):
-            conf.write(
-                f"""
-[{name}]
-name={name}
-baseurl={url}
-repo_gpgcheck=0
-gpgcheck=0
-enabled=1
-skip_if_unavailable=0
-"""
-            )
-            dst = (args.working_dir / name).absolute()
-            dst.mkdir(parents=True, exist_ok=True)
-            dest_dirs.append((dst, url))
-        conf.flush()
-        # sp.run(["cat", conf.name])
-        # sp.run(["ls", "-la", cache_dir])
-
-        if len(dest_dirs) == 0:
-            logger.info("Nothing to sync")
-            if not selection.active: failed.append(("", arch))
-            continue
-
-        cmd_args = [
-            "dnf",
-            "--disableplugin=local,system_upgrade",
-            "reposync",
-            "-c",
-            conf.name,
-            "--delete",
-            "-p",
-            str(args.working_dir.absolute()),
-        ]
-        if args.pass_arch_to_reposync:
-            cmd_args += ["--arch", arch]
-        logger.info(f"Launching dnf reposync with command: {cmd_args}")
-        ret = sp.run(cmd_args)
-        if ret.returncode != 0:
-            failed.extend((str(path), arch) for path, _ in dest_dirs)
-            continue
-
-        for path, repo_url in dest_dirs:
-            path.mkdir(exist_ok=True)
-            if args.download_repodata:
-                result = download_repodata(repo_url, path)
-                if result:
-                    failed.append((str(path), arch))
-                    continue
-            else:
-                shutil.rmtree(path / ".repodata", True)
-                cmd_args = [
-                    "createrepo_c",
-                    "--update",
-                    "-v",
-                    "-c",
-                    cache_dir,
-                    "-o",
-                    str(path),
-                    str(path),
-                ]
-                logger.info(f"Launching createrepo with command: {cmd_args}")
-                ret = sp.run(cmd_args)
-                if ret.returncode:
-                    failed.append((str(path), arch))
-                    continue
-            calc_repo_size(path)
+        found = False
+        for name, repo_url in combination_os_comp(arch):
+            found = True
+            path = (args.working_dir / name).absolute()
+            path.mkdir(parents=True, exist_ok=True)
+            try:
+                recovery = mongodb_rpm.needs_repair(repo_url)
+                if recovery:
+                    mongodb_rpm.recover(repo_url, path)
+                    repaired.append(repo_url)
+                else:
+                    with tempfile.NamedTemporaryFile('w', suffix='.conf') as conf:
+                        conf.write(f"[main]\nreposdir=/dev/null\nkeepcache=0\nskip_if_unavailable=0\n[{name}]\nname={name}\nbaseurl={repo_url}\nrepo_gpgcheck=0\ngpgcheck=0\nenabled=1\nskip_if_unavailable=0\n")
+                        conf.flush()
+                        command = ['dnf', '--disableplugin=local,system_upgrade', 'reposync', '-c', conf.name, '--delete', '-p', str(args.working_dir.absolute())]
+                        if args.pass_arch_to_reposync:
+                            command += ['--arch', arch]
+                        logger.info('Syncing repository %s from %s', name, repo_url)
+                        sp.run(command, check=True)
+                if args.download_repodata and not recovery:
+                    if download_repodata(repo_url, path):
+                        raise RuntimeError('Failed to download repository metadata')
+                else:
+                    shutil.rmtree(path / '.repodata', True)
+                    sp.run(['createrepo_c', '--update', '-c', cache_dir, '-o', str(path), str(path)], check=True)
+                calc_repo_size(path)
+            except Exception as error:
+                logger.error('Repository %s failed: %s; retaining metadata and continuing other repositories', name, error)
+                failed.append((str(path), arch))
+        if not found and not selection.active:
+            failed.append(('', arch))
+    shutil.rmtree(cache_dir)
+    if repaired and not failed:
+        print('SYNORA_STATUS=success_with_warnings')
+        logger.warning('Rebuilt missing upstream RPM indexes: %s', repaired)
 
     if len(failed) > 0:
         logger.error(f"Failed YUM repos: {failed}")

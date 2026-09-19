@@ -106,3 +106,23 @@ canonical `stable/<architecture>/main` repository, with architectures discovered
 from the upstream index. APT suites, components and architectures are likewise
 discovered rather than inferred from OS release lists. RPM content is stored under
 `yum/stable-<architecture>`; old `yum/el*` directories are left in place.
+
+## Official-upstream recovery
+
+XanMod's official server serves Release/Packages files but does not expose a
+`dists/` directory listing. `xanmod.sh` uses the codenames currently advertised on
+xanmod.org (`@xanmod`) and discovers each suite's components and architectures
+from its Release file. Failure to discover the list is fatal; no static version
+fallback is used.
+
+MongoDB's historical RPM indexes can reference primary metadata that no longer
+exists in its public S3 bucket. YUM synchronization now runs repositories
+individually, so a failing branch does not block attempts for the others. For
+this specific MongoDB condition, it enumerates the official repository's RPM
+objects, checks sizes, single-part S3 ETags and downloaded RPM digests, then
+rebuilds metadata with createrepo. Repaired branches produce a warning; incomplete
+inventory, corrupt packages and other repository failures still fail the run.
+Existing packages are retained during recovery. Other upstreams do not use this
+fallback. `MONGO_RPM_THREADS` controls recovery downloads (default 4, maximum 16).
+MongoDB also attempts both APT families even when YUM fails, and keeps existing
+x86_64 repository names while giving other architectures separate directories.

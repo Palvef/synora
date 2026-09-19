@@ -106,9 +106,26 @@ def rpm_versions(template):
     if not values:raise RuntimeError(f'No current RPM releases for {template}')
     return values
 
+class PageText(HTMLParser):
+    def __init__(self):
+        super().__init__(); self.parts=[]
+    def handle_data(self, data): self.parts.append(data)
+
+def xanmod_suites():
+    r=requests.get('https://xanmod.org/',timeout=(30,60));r.raise_for_status()
+    parser=PageText();parser.feed(r.text)
+    match=re.search(r'Supported distribution codenames:\s*(.+?)\.', ' '.join(parser.parts), re.S)
+    if not match: raise RuntimeError('XanMod did not publish its supported codenames; refusing a guessed list')
+    names=[n for n in re.split(r'[,\s*]+',match.group(1).strip()) if n and n!='and']
+    if not names or any(not re.fullmatch(r'[a-z][a-z0-9-]*',n) for n in names):
+        raise RuntimeError('Invalid XanMod codenames')
+    return list(dict.fromkeys(names))
+
 def apt_suites(base,patterns):
     result=[]
     for pattern in patterns.split(','):
+        if pattern == '@xanmod':
+            result.extend(xanmod_suites());continue
         match=re.search(r'@\{(ubuntu-lts|debian-current|debian-latest2|debian-latest)\}|@(ubuntu-lts|debian-current|debian-latest2|debian-latest)',pattern)
         if match:
             result.extend(pattern[:match.start()]+v+pattern[match.end():] for v in distro_versions(match.group(1) or match.group(2)))

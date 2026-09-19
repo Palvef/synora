@@ -52,6 +52,27 @@ class DiscoveryTests(unittest.TestCase):
         with patch.object(discovery.requests,'get',return_value=response):
             self.assertEqual(discovery.directories('https://repos.influxdata.com/stable/'), ['futurearch'])
 
+    def test_xanmod_official_codenames_are_discovered(self):
+        response=Mock(text='<p>Supported distribution codenames: <b>future*</b>, next and rolling.</p>')
+        with patch.object(discovery.requests,'get',return_value=response):
+            self.assertEqual(discovery.apt_suites('https://deb.xanmod.org','@xanmod'), ['future','next','rolling'])
+
+    def test_yum_failure_does_not_block_next_repository(self):
+        import subprocess
+        import mongodb_rpm
+        yum=module('yum-sync')
+        matrix=[({'os_ver':'1','comp':'broken','arch':'x86_64'},'https://repo.test/broken'),({'os_ver':'1','comp':'healthy','arch':'x86_64'},'https://repo.test/healthy')]
+        response=Mock(status_code=200,content=b'<repomd/>')
+        calls=[]
+        def execute(args, **kwargs):
+            calls.append(args[0])
+            if len(calls)==1: raise subprocess.CalledProcessError(1,args)
+            return subprocess.CompletedProcess(args,0)
+        with tempfile.TemporaryDirectory() as d, patch.object(sys,'argv',['yum-sync','https://repo.test/@{comp}','1','broken,healthy','x86_64','@{comp}',d]), patch.object(yum,'repository_matrix',return_value=matrix), patch.object(yum.requests,'get',return_value=response), patch.object(mongodb_rpm,'needs_repair',return_value=False), patch.object(yum.sp,'run',side_effect=execute), patch.object(yum,'calc_repo_size') as calc:
+            with self.assertRaises(SystemExit): yum.main()
+            self.assertEqual(calls,['dnf','dnf','createrepo_c'])
+            self.assertEqual(calc.call_count,1)
+
     def test_future_nested_versions(self):
         def listing(url):return ['future-os'] if url.rstrip('/').endswith('/dists') else ['12.0','13.0']
         with patch.object(discovery,'directories',side_effect=listing):
