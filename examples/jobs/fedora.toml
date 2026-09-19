@@ -1,4 +1,4 @@
-# weekly job (spec §6.3)
+# weekly job
 [[jobs]]
 name = "fedora"
 enabled = true

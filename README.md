@@ -208,7 +208,7 @@ those endpoints. Reload requires `config.reload`, granted to admins by default.
 
 ## Repository size
 
-Priority (spec §17): provider report (`--stats` / `SYNORA_SIZE=`) → script
+Priority: provider report (`--stats` / `SYNORA_SIZE=`) → script
 output → filesystem walk when `statistics = "filesystem"`. Stored as raw
 bytes + human form (KiB/MiB/GiB/TiB).
 

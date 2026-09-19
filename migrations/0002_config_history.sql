@@ -1,4 +1,4 @@
--- Config audit (spec §86): every reload records what changed per job.
+-- Config audit: every reload records what changed per job.
 
 CREATE TABLE config_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

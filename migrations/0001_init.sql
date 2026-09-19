@@ -1,4 +1,4 @@
--- Core schema (spec §27). Shared by SQLite and PostgreSQL:
+-- Core schema. Shared by SQLite and PostgreSQL:
 -- TEXT primary keys, INTEGER 0/1 booleans, INTEGER unix-seconds timestamps (UTC).
 -- `schema_migrations` itself is created by the migrator, not here.
 

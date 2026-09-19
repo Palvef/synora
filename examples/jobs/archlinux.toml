@@ -1,4 +1,4 @@
-# script job, daily at a fixed time (spec §6.2/§16).
+# script job, daily at a fixed time.
 # The script gets SYNORA_JOB / SYNORA_UPSTREAM / SYNORA_STORAGE / SYNORA_LOG_DIR.
 # A line like `SYNORA_SIZE=39710000000` on stdout updates the repo size.
 [[jobs]]

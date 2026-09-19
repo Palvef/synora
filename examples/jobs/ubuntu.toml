@@ -1,4 +1,4 @@
-# rsync job, fixed period, no drift (spec §6.4/§13)
+# rsync job, fixed period, no drift
 [[jobs]]
 name = "ubuntu"
 enabled = true

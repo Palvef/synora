@@ -1,4 +1,4 @@
-# cron job (spec §6.1): every 4 hours on the hour
+# cron job: every 4 hours on the hour
 [[jobs]]
 name = "debian"
 enabled = true
