@@ -6,6 +6,8 @@ cd "$(dirname "$0")/.."
 
 cargo fmt --all -- --check
 python3 -m unittest discover -s synora-scripts/tests
+python3 -m unittest discover -s deploy/pushsync/tests
+bash -n deploy/pushsync/pushsync.sh
 for script in synora-scripts/*.sh; do bash -n "$script"; done
 python3 - <<'PYTHON'
 import pathlib

@@ -5,7 +5,7 @@ FROM debian:trixie
 
 RUN apt-get update \
  && apt-get upgrade -y \
- && apt-get install -y --no-install-recommends tzdata openssh-server curl ca-certificates \
+ && apt-get install -y --no-install-recommends tzdata openssh-server curl ca-certificates jq util-linux \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p /run/sshd /home/tunasync/.ssh \
  && chmod 0755 /run/sshd \

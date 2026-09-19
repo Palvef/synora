@@ -160,6 +160,11 @@ struct DirectoryWork {
 type DownloadSuccess = (u64, String, PathBuf, std::time::Duration);
 type DownloadFailure = (FetchError, String, PathBuf, std::time::Duration);
 
+struct ExcludePattern {
+    prefix: String,
+    glob: Option<glob::Pattern>,
+}
+
 /// HTTP fetcher: a reqwest client with rustls, redirects followed (max 10),
 /// no proxy by default, a 30 s connect timeout plus 120 s idle-read timeout,
 /// and up to `threads` concurrent downloads.
@@ -168,7 +173,7 @@ pub struct Fetcher {
     threads: usize,
     /// Root-relative path prefixes that are neither crawled/downloaded nor
     /// considered by `delete`. Leading/trailing slashes are ignored.
-    excludes: Vec<String>,
+    excludes: Vec<ExcludePattern>,
     byte_counter: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
 
@@ -209,7 +214,8 @@ impl Fetcher {
         self
     }
 
-    /// Exclude root-relative path prefixes from both traversal and deletion.
+    /// Exclude root-relative path prefixes or glob patterns from traversal and deletion.
+    /// Globs match complete path components; matching a directory excludes descendants.
     /// `/repos/yum/` and `repos/yum` are equivalent and match the directory
     /// itself plus every descendant.
     pub fn with_excludes(mut self, excludes: Vec<String>) -> Self {
@@ -217,6 +223,10 @@ impl Fetcher {
             .into_iter()
             .map(|value| value.trim_matches('/').to_string())
             .filter(|value| !value.is_empty())
+            .map(|prefix| ExcludePattern {
+                glob: glob::Pattern::new(&prefix).ok(),
+                prefix,
+            })
             .collect();
         self
     }
@@ -941,7 +951,7 @@ async fn local_matches(dest: &Path, entry: &parser::Entry) -> bool {
 async fn local_extras(
     storage: &Path,
     remote: &HashSet<String>,
-    excludes: &[String],
+    excludes: &[ExcludePattern],
 ) -> Result<Vec<PathBuf>, FetchError> {
     let mut deletes = Vec::new();
     let mut stack = vec![storage.to_path_buf()];
@@ -972,13 +982,24 @@ async fn local_extras(
     Ok(deletes)
 }
 
-fn is_excluded(rel: &str, excludes: &[String]) -> bool {
+fn is_excluded(rel: &str, excludes: &[ExcludePattern]) -> bool {
     let rel = rel.trim_matches('/');
-    excludes.iter().any(|prefix| {
-        rel == prefix
+    let options = glob::MatchOptions {
+        case_sensitive: true,
+        require_literal_separator: true,
+        require_literal_leading_dot: false,
+    };
+    excludes.iter().any(|excluded| {
+        rel == excluded.prefix
             || rel
-                .strip_prefix(prefix)
+                .strip_prefix(&excluded.prefix)
                 .is_some_and(|rest| rest.starts_with('/'))
+            || excluded.glob.as_ref().is_some_and(|pattern| {
+                rel.match_indices('/')
+                    .map(|(index, _)| index)
+                    .chain(std::iter::once(rel.len()))
+                    .any(|end| pattern.matches_with(&rel[..end], options))
+            })
     })
 }
 
@@ -1539,6 +1560,32 @@ mod tests {
         assert!(!storage.join("excluded/remote.txt").exists());
         assert!(storage.join("excluded/local.txt").exists());
         assert!(!storage.join("stale.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn glob_excludes_keep_only_stable_python_architectures() {
+        let mirror = TestMirror::new(&[
+            ("3.13.0/amd64/core.msi", "stable"),
+            ("3.13.0/arm64/core.msi", "stable"),
+            ("3.13.0/win32/core.msi", "stable"),
+            ("3.13.0/Python.tar.xz", "source"),
+            ("3.13.0/amd64b2/core.msi", "beta"),
+            ("3.13.0/arm64rc1/core.msi", "rc"),
+            ("3.13.0/win32a1/core.msi", "alpha"),
+        ]);
+        let base = spawn_server(mirror);
+        let storage = unique_dir();
+        let plan = Fetcher::new()
+            .unwrap()
+            .with_excludes(vec![
+                "*/amd64?*".into(),
+                "*/arm64?*".into(),
+                "*/win32?*".into(),
+            ])
+            .plan(&base, "nginx", &storage, false, 2, None)
+            .await
+            .unwrap();
+        assert_eq!(plan.downloads.len(), 4);
     }
 
     #[tokio::test]
