@@ -7,7 +7,7 @@ MIRROR_BASE_URL="${MIRROR_BASE_URL:-https://mirrors.tuna.tsinghua.edu.cn/nix}"
 ORIG_BASE_URL_OLD="https://nixos.org/releases/nix"
 ORIG_BASE_URL="https://releases.nixos.org/nix"
 
-EXCLUDES=(--exclude "*/*/*" \
+EXCLUDES=(--exclude "latest" --exclude "latest/*" --exclude "*/*/*" \
     --exclude "nix-[01].*" \
     --exclude "nix-2.[01][./]*" \
     --exclude "*-broken*")
@@ -17,7 +17,7 @@ trap 'rm -rf "$INSTALL_TEMP"' EXIT
 
 [[ ! -d "${SYNORA_STORAGE}" ]] && mkdir -p "${SYNORA_STORAGE}"
 cd "${SYNORA_STORAGE}"
-aws --no-sign-request s3 sync --delete ${SYNORA_AWS_OPTIONS:-} \
+aws --no-sign-request s3 sync ${SYNORA_AWS_OPTIONS:-} \
     "${EXCLUDES[@]}" \
     --exclude "*/install" \
     --exclude "*/install.asc" \
@@ -26,7 +26,7 @@ aws --no-sign-request s3 sync --delete ${SYNORA_AWS_OPTIONS:-} \
 
 # Create install script
 
-aws --no-sign-request s3 sync --delete ${SYNORA_AWS_OPTIONS:-} \
+aws --no-sign-request s3 sync ${SYNORA_AWS_OPTIONS:-} \
     --exclude "*" \
     --include "*/install" \
     "${EXCLUDES[@]}" \
@@ -44,5 +44,12 @@ for version in $(ls "$INSTALL_TEMP"); do
         > "${INSTALL_TEMP}/${version}/.install.sha256"
     mv "${INSTALL_TEMP}/${version}/.install.sha256" "${version}/install.sha256"
 done
+
+# Download all payloads and generated installers successfully before cleanup.
+# The generated latest alias is protected, so deleting it cannot traverse its target.
+aws --no-sign-request s3 sync --delete ${SYNORA_AWS_OPTIONS:-} \
+    "${EXCLUDES[@]}" \
+    --exclude "*/install" --exclude "*/install.asc" --exclude "*/install.sha256" \
+    "${SYNORA_UPSTREAM}" .
 
 ln -sfn "$(ls -d nix-* | sort -rV | head -1)" latest
