@@ -136,6 +136,7 @@ impl FetchStats {
 pub struct Plan {
     pub downloads: Vec<(String, PathBuf)>,
     pub deletes: Vec<PathBuf>,
+    delete_dirs: Vec<PathBuf>,
     pub symlinks: Vec<(PathBuf, String)>,
     /// Exact RPM manifests fetched while planning, published only after payloads succeed.
     manifests: Vec<(PathBuf, Vec<u8>)>,
@@ -174,6 +175,7 @@ pub struct Fetcher {
     /// Root-relative path prefixes that are neither crawled/downloaded nor
     /// considered by `delete`. Leading/trailing slashes are ignored.
     excludes: Vec<ExcludePattern>,
+    warn_on_forbidden_files: bool,
     byte_counter: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
 
@@ -203,6 +205,7 @@ impl Fetcher {
             client: builder.build()?,
             threads: DEFAULT_THREADS,
             excludes: Vec::new(),
+            warn_on_forbidden_files: false,
             byte_counter: None,
         })
     }
@@ -228,6 +231,12 @@ impl Fetcher {
                 prefix,
             })
             .collect();
+        self
+    }
+
+    /// Treat an inaccessible noncritical payload as a warning, never a failed listing.
+    pub fn with_forbidden_file_warnings(mut self, enabled: bool) -> Self {
+        self.warn_on_forbidden_files = enabled;
         self
     }
 
@@ -493,7 +502,8 @@ impl Fetcher {
                 storage.display()
             );
         } else if delete {
-            plan.deletes = local_extras(storage, &remote, &self.excludes).await?;
+            (plan.deletes, plan.delete_dirs) =
+                local_extras(storage, &remote, &self.excludes).await?;
         }
         plan.total_size_hint = if plan.size_unknown {
             None
@@ -626,7 +636,11 @@ impl Fetcher {
                 Ok(Err((FetchError::Cancelled, _, _, _))) => cancelled = true,
                 Ok(Err((e, url, dest, elapsed))) => {
                     stats.files_skipped += 1;
-                    let warning = matches!(e, FetchError::HttpStatus(404 | 410));
+                    let critical = is_critical_metadata(&dest);
+                    let warning = !critical
+                        && (matches!(e, FetchError::HttpStatus(404 | 410))
+                            || (self.warn_on_forbidden_files
+                                && matches!(e, FetchError::HttpStatus(403))));
                     if warning {
                         stats.files_warned += 1;
                         if stats.warning_paths.len() < 100 {
@@ -638,7 +652,7 @@ impl Fetcher {
                     let line = format!(
                         "{} {url} -> {} after {:.2}s: {e}",
                         if warning {
-                            "WARNING missing file"
+                            "WARNING unavailable file"
                         } else {
                             "ERROR skipped file"
                         },
@@ -727,6 +741,30 @@ impl Fetcher {
             }
             stats.files_deleted += 1;
             stats.record_log(format!("deleted {}", path.display()));
+        }
+        for path in plan.delete_dirs.iter().filter(|_| allow_deletes) {
+            if cancel.is_cancelled() {
+                return Err(FetchError::Cancelled);
+            }
+            // Never recursively remove a directory: concurrent or protected content survives.
+            if has_symlink_ancestor(path) {
+                continue;
+            }
+            match tokio::fs::remove_dir(path).await {
+                Ok(()) => stats.record_log(format!("deleted empty directory {}", path.display())),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+                    ) => {}
+                Err(error) => {
+                    stats.files_failed += 1;
+                    stats.record_log(format!(
+                        "failed deleting directory {}: {error}",
+                        path.display()
+                    ));
+                }
+            }
         }
         // Symlink entries are mirrored after downloads and deletes so a
         // stale regular file at the same path is gone before the link goes
@@ -945,15 +983,16 @@ async fn local_matches(dest: &Path, entry: &parser::Entry) -> bool {
 
 /// Walk the local mirror; anything not present in the remote index is
 /// planned for deletion — regular files and symlinks alike (a stale
-/// symlink is unlinked, its target untouched). Leftover dirs are ignored,
-/// not deleted. DirEntry::file_type does not follow symlinks, so the walk
+/// symlink is unlinked, its target untouched). Obsolete directories are
+/// removed bottom-up, only when empty. DirEntry::file_type does not follow symlinks, so the walk
 /// never recurses through one.
 async fn local_extras(
     storage: &Path,
     remote: &HashSet<String>,
     excludes: &[ExcludePattern],
-) -> Result<Vec<PathBuf>, FetchError> {
+) -> Result<(Vec<PathBuf>, Vec<PathBuf>), FetchError> {
     let mut deletes = Vec::new();
+    let mut directories = Vec::new();
     let mut stack = vec![storage.to_path_buf()];
     while let Some(dir) = stack.pop() {
         let mut rd = tokio::fs::read_dir(&dir).await?;
@@ -965,6 +1004,9 @@ async fn local_extras(
                     .strip_prefix(storage)
                     .map_err(|_| FetchError::Io("storage walk escaped its root".to_string()))?;
                 if !is_excluded(rel.to_str().unwrap_or_default(), excludes) {
+                    if !remote.contains(rel.to_str().unwrap_or_default()) {
+                        directories.push(path.clone());
+                    }
                     stack.push(path);
                 }
             } else if ft.is_file() || ft.is_symlink() {
@@ -979,7 +1021,21 @@ async fn local_extras(
             }
         }
     }
-    Ok(deletes)
+    directories.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
+    Ok((deletes, directories))
+}
+
+fn is_critical_metadata(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    path.components().any(|part| part.as_os_str() == "repodata")
+        || matches!(
+            name,
+            "Release" | "Release.gpg" | "InRelease" | "repomd.xml" | "index.html"
+        )
+        || matches!(name.split('.').next(), Some("Packages" | "Sources"))
 }
 
 fn is_excluded(rel: &str, excludes: &[ExcludePattern]) -> bool {
@@ -1303,8 +1359,8 @@ mod tests {
                 .await
                 .unwrap();
             if missing {
-                assert_eq!(stats.files_failed, 0);
-                assert_eq!(stats.files_warned, 1);
+                assert_eq!(stats.files_failed, 1);
+                assert_eq!(stats.files_warned, 0);
                 assert_eq!(
                     std::fs::read_to_string(storage.join("repodata/repomd.xml")).unwrap(),
                     "old manifest"
@@ -1563,9 +1619,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_removes_obsolete_directories_but_preserves_remote_and_excluded_dirs() {
+        let base = spawn_server(TestMirror::new(&[("current/file", "new")]));
+        let storage = unique_dir();
+        for dir in ["obsolete/nested", "excluded/empty", "current"] {
+            tokio::fs::create_dir_all(storage.join(dir)).await.unwrap();
+        }
+        tokio::fs::write(storage.join("obsolete/nested/old"), "old")
+            .await
+            .unwrap();
+        Fetcher::new()
+            .unwrap()
+            .with_excludes(vec!["excluded".into()])
+            .sync(
+                &base,
+                "nginx",
+                &storage,
+                true,
+                4,
+                &CancellationToken::new(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!storage.join("obsolete").exists());
+        assert!(storage.join("excluded/empty").is_dir());
+        assert!(storage.join("current/file").is_file());
+    }
+
+    #[tokio::test]
     async fn glob_excludes_keep_only_stable_python_architectures() {
         let mirror = TestMirror::new(&[
             ("3.13.0/amd64/core.msi", "stable"),
+            ("doc/3.8.2/index.html", "stable docs"),
+            ("doc/3.8.2rc2/index.html", "rc docs"),
+            ("3.13.0/Python-3.13.0b2.tar.xz", "beta source"),
             ("3.13.0/arm64/core.msi", "stable"),
             ("3.13.0/win32/core.msi", "stable"),
             ("3.13.0/Python.tar.xz", "source"),
@@ -1581,11 +1669,13 @@ mod tests {
                 "*/amd64?*".into(),
                 "*/arm64?*".into(),
                 "*/win32?*".into(),
+                "**/*[0-9]rc[0-9]*".into(),
+                "**/*[0-9]b[0-9]*".into(),
             ])
             .plan(&base, "nginx", &storage, false, 2, None)
             .await
             .unwrap();
-        assert_eq!(plan.downloads.len(), 4);
+        assert_eq!(plan.downloads.len(), 5);
     }
 
     #[tokio::test]
@@ -1722,10 +1812,10 @@ mod tests {
     async fn missing_downloads_warn_but_listing_fails() {
         for (path, fatal) in [
             ("payload.rpm", false),
-            ("InRelease", false),
-            ("Packages.xz", false),
-            ("repodata/abc-primary.xml.gz", false),
-            ("index.html", false),
+            ("InRelease", true),
+            ("Packages.xz", true),
+            ("repodata/abc-primary.xml.gz", true),
+            ("index.html", true),
         ] {
             let base = spawn_server(TestMirror::new(&[]));
             let storage = unique_dir();
@@ -1758,6 +1848,45 @@ mod tests {
             .unwrap();
         assert_eq!(stats.files_failed, 1);
         assert_eq!(stats.files_warned, 0);
+    }
+
+    #[tokio::test]
+    async fn forbidden_payload_warnings_are_opt_in_and_never_hide_metadata_or_listing_errors() {
+        for (path, fatal) in [
+            ("payload.bin", false),
+            ("InRelease", true),
+            ("repodata/primary.xml.gz", true),
+        ] {
+            let mut mirror = TestMirror::new(&[]);
+            mirror.statuses.insert(path.into(), StatusCode::FORBIDDEN);
+            let base = spawn_server(mirror);
+            let storage = unique_dir();
+            let stale = storage.join("old");
+            std::fs::write(&stale, "old").unwrap();
+            let plan = Plan {
+                downloads: vec![(format!("{base}/{path}"), storage.join(path))],
+                deletes: vec![stale.clone()],
+                ..Plan::default()
+            };
+            let stats = Fetcher::new()
+                .unwrap()
+                .with_forbidden_file_warnings(true)
+                .execute(&plan, &CancellationToken::new(), None)
+                .await
+                .unwrap();
+            assert_eq!(stats.files_failed, u32::from(fatal));
+            assert_eq!(stats.files_warned, u32::from(!fatal));
+            assert!(stale.exists());
+        }
+        let mut mirror = TestMirror::new(&[]);
+        mirror.statuses.insert(String::new(), StatusCode::FORBIDDEN);
+        let base = spawn_server(mirror);
+        assert!(Fetcher::new()
+            .unwrap()
+            .with_forbidden_file_warnings(true)
+            .plan(&base, "nginx", &unique_dir(), true, 2, None)
+            .await
+            .is_err());
     }
 
     #[tokio::test]

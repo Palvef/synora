@@ -25,7 +25,7 @@ function repo_init() {
 function repo_sync() {
 	cd $SYNORA_STORAGE
 	set +e
-	$REPO sync -f -j"$AOSP_SYNC_JOBS"
+	$REPO sync --prune -f -j"$AOSP_SYNC_JOBS"
 	repo_sync_rc=$?
 	set -e
 	if [[ "$repo_sync_rc" -ne 0 ]]; then

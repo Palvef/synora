@@ -121,3 +121,36 @@ class DiscoveryTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):yum.calc_repo_size(p)
 
 if __name__=='__main__':unittest.main()
+
+class AptCleanupTests(unittest.TestCase):
+    def test_component_release_does_not_disable_package_cleanup(self):
+        apt = module('apt-sync')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            component = root/'dists/stable/main/binary-amd64/Release'
+            component.parent.mkdir(parents=True)
+            component.write_text('Archive: stable\nComponent: main\nArchitecture: amd64\n')
+            self.assertEqual(apt.retained_apt_suites(root, {'stable'}, 'https://repo.test'), set())
+    def test_only_confirmed_missing_suites_are_removed(self):
+        apt = module('apt-sync')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            release = root/'dists/obsolete/Release'
+            release.parent.mkdir(parents=True)
+            release.write_text('Components: main\nArchitectures: amd64\n')
+            response = Mock(status_code=404)
+            with patch.object(apt.requests, 'get', return_value=response):
+                self.assertEqual(apt.retained_apt_suites(root, {'stable'}, 'https://repo.test', True), set())
+            self.assertFalse(release.parent.exists())
+    def test_network_failure_preserves_old_suite(self):
+        apt = module('apt-sync')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            release = root/'dists/obsolete/Release'
+            release.parent.mkdir(parents=True)
+            release.write_text('Components: main\nArchitectures: amd64\n')
+            response = Mock(status_code=503)
+            response.raise_for_status.side_effect = RuntimeError('upstream unavailable')
+            with patch.object(apt.requests, 'get', return_value=response), self.assertRaises(RuntimeError):
+                apt.retained_apt_suites(root, {'stable'}, 'https://repo.test', True)
+            self.assertTrue(release.exists())

@@ -188,6 +188,8 @@ pub struct JobDoc {
     pub parser: Option<String>,
     #[serde(default = "no")]
     pub delete: bool,
+    #[serde(default = "no")]
+    pub warn_on_forbidden_files: bool,
     /// http provider: max concurrent directory listings and downloads
     /// (tunasync `TUNASYNC_TSUMUGU_THREADS`; None = 5, 0 clamped to 1).
     pub threads: Option<u32>,

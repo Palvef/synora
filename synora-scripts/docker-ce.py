@@ -303,6 +303,9 @@ def _on_signal(signum, _frame):
     raise SystemExit(143)
 
 
+sys.path.insert(0, str(Path(__file__).resolve().parent / 'helpers'))
+from package_policy import excluded_file
+
 def main():
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
@@ -339,6 +342,9 @@ def main():
             create_symlink(working_dir / from_dir, working_dir / to_dir)
         else:
             dst_file = working_dir / rs.relpath(url)
+            if excluded_file(dst_file):
+                print('Filtered debug/test package:', dst_file.name, flush=True)
+                continue
             remote_filelist.append(dst_file.relative_to(working_dir))
 
             if dst_file.is_file():

@@ -511,11 +511,13 @@ pub fn build_provider(job: &JobSpec) -> Result<Provider, ProviderError> {
         synora_core::ProviderConfig::Http {
             parser,
             delete,
+            warn_on_forbidden_files,
             threads,
             exclude,
         } => Ok(Provider::Http(http::HttpProvider {
             parser: parser.clone(),
             delete: *delete,
+            warn_on_forbidden_files: *warn_on_forbidden_files,
             threads: *threads,
             exclude: exclude.clone(),
         })),

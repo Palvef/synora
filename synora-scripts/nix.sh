@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
 SYNORA_STORAGE="${SYNORA_STORAGE:-nix}"
 SYNORA_UPSTREAM="${SYNORA_UPSTREAM:-s3://nix-releases/nix/}"
@@ -16,7 +17,7 @@ trap 'rm -rf "$INSTALL_TEMP"' EXIT
 
 [[ ! -d "${SYNORA_STORAGE}" ]] && mkdir -p "${SYNORA_STORAGE}"
 cd "${SYNORA_STORAGE}"
-aws --no-sign-request s3 sync ${SYNORA_AWS_OPTIONS} \
+aws --no-sign-request s3 sync --delete ${SYNORA_AWS_OPTIONS:-} \
     "${EXCLUDES[@]}" \
     --exclude "*/install" \
     --exclude "*/install.asc" \
@@ -25,7 +26,7 @@ aws --no-sign-request s3 sync ${SYNORA_AWS_OPTIONS} \
 
 # Create install script
 
-aws --no-sign-request s3 sync ${SYNORA_AWS_OPTIONS} \
+aws --no-sign-request s3 sync --delete ${SYNORA_AWS_OPTIONS:-} \
     --exclude "*" \
     --include "*/install" \
     "${EXCLUDES[@]}" \

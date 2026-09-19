@@ -245,6 +245,7 @@ def main():
 
     selection = Selection()
     failed = []
+    missing_repositories = set()
     if not args.dry_run: args.working_dir.mkdir(parents=True, exist_ok=True)
     # Hold a repository-root lock before touching interrupted createrepo state.
     sync_lock = None
@@ -270,6 +271,7 @@ def main():
             r = requests.get(probe_url, timeout=(30,60))
             if r.status_code in (404,410):
                 logger.info('Unavailable repository: %s', probe_url)
+                missing_repositories.add(name)
                 continue
             r.raise_for_status()
             if not ET.fromstring(r.content).tag.endswith('repomd'): raise RuntimeError(f'Invalid repomd: {probe_url}')
@@ -284,6 +286,7 @@ def main():
         return
     # Isolate each repository: one broken historical branch must not stop all others.
     import mongodb_rpm
+    from package_policy import NAME_PATTERNS, prune_excluded
     repaired = []
     for arch in arch_list:
         found = False
@@ -298,7 +301,7 @@ def main():
                     repaired.append(repo_url)
                 else:
                     with tempfile.NamedTemporaryFile('w', suffix='.conf') as conf:
-                        conf.write(f"[main]\nreposdir=/dev/null\nkeepcache=0\nskip_if_unavailable=0\n[{name}]\nname={name}\nbaseurl={repo_url}\nrepo_gpgcheck=0\ngpgcheck=0\nenabled=1\nskip_if_unavailable=0\n")
+                        conf.write(f"[main]\nreposdir=/dev/null\nkeepcache=0\nskip_if_unavailable=0\n[{name}]\nname={name}\nbaseurl={repo_url}\nrepo_gpgcheck=0\ngpgcheck=0\nenabled=1\nskip_if_unavailable=0\nexclude={' '.join(NAME_PATTERNS)}\n")
                         conf.flush()
                         command = ['dnf', '--disableplugin=local,system_upgrade', 'reposync', '-c', conf.name, '--delete', '-p', str(args.working_dir.absolute())]
                         if args.pass_arch_to_reposync:
@@ -308,15 +311,24 @@ def main():
                 if args.download_repodata and not recovery:
                     if download_repodata(repo_url, path):
                         raise RuntimeError('Failed to download repository metadata')
-                else:
-                    shutil.rmtree(path / '.repodata', True)
-                    sp.run(['createrepo_c', '--update', '-c', cache_dir, '-o', str(path), str(path)], check=True)
+                logger.info('Removed %d excluded debug/test packages', prune_excluded(path))
+                # Regenerate indexes for the filtered payload inventory.
+                shutil.rmtree(path / '.repodata', True)
+                sp.run(['createrepo_c', '--update', '-c', cache_dir, '-o', str(path), str(path)], check=True)
                 calc_repo_size(path)
             except Exception as error:
                 logger.error('Repository %s failed: %s; retaining metadata and continuing other repositories', name, error)
                 failed.append((str(path), arch))
         if not found and not selection.active:
             failed.append(('', arch))
+    if not failed and not selection.active:
+        for name in missing_repositories:
+            obsolete = args.working_dir / name
+            if obsolete.exists():
+                if obsolete.is_symlink() or not obsolete.resolve().is_relative_to(args.working_dir.resolve()):
+                    raise RuntimeError('RPM cleanup path escapes repository')
+                logger.info('Removing unavailable upstream repository %s', name)
+                shutil.rmtree(obsolete)
     shutil.rmtree(cache_dir)
     if repaired and not failed:
         print('SYNORA_STATUS=success_with_warnings')

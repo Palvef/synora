@@ -1647,6 +1647,7 @@ fn resolve_provider(
             Ok(ProviderConfig::Http {
                 parser: parser.to_string(),
                 delete: doc.delete,
+                warn_on_forbidden_files: doc.warn_on_forbidden_files,
                 threads: doc.threads,
                 exclude: doc.exclude.clone(),
             })

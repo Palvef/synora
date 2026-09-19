@@ -382,7 +382,7 @@ fn http_threads_none_zero_and_some() {
         &job(
             "five",
             "schedule = \"manual\"",
-            "provider = \"http\"\nparser = \"nginx\"\nthreads = 5\nexclude = [\"/gone/\"]\nupstream = \"https://x/pub/\"\nstorage = \"/srv/five\"",
+            "provider = \"http\"\nparser = \"nginx\"\nthreads = 5\nwarn_on_forbidden_files = true\nexclude = [\"/gone/\"]\nupstream = \"https://x/pub/\"\nstorage = \"/srv/five\"",
         ),
     );
     let cfg = load(&dir).unwrap();
@@ -396,7 +396,11 @@ fn http_threads_none_zero_and_some() {
     };
     assert!(matches!(
         threads("none"),
-        synora_core::ProviderConfig::Http { threads: None, .. }
+        synora_core::ProviderConfig::Http {
+            threads: None,
+            warn_on_forbidden_files: false,
+            ..
+        }
     ));
     assert!(matches!(
         threads("zero"),
@@ -409,6 +413,7 @@ fn http_threads_none_zero_and_some() {
         threads("five"),
         synora_core::ProviderConfig::Http {
             threads: Some(5),
+            warn_on_forbidden_files: true,
             exclude,
             ..
         } if exclude == vec!["/gone/"]

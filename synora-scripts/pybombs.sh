@@ -12,6 +12,12 @@ function pybombs_mirror() {
 	cp "${PYBOMBS_MIRROR_SCRIPT_PATH}/upstream-recipe-repos.urls" "${SYNORA_STORAGE}/"
 	cp "${PYBOMBS_MIRROR_SCRIPT_PATH}/pre-replace-upstream.urls" "${SYNORA_STORAGE}/"
 	cp "${PYBOMBS_MIRROR_SCRIPT_PATH}/ignore.urls" "${SYNORA_STORAGE}/"
+    local repo
+    shopt -s nullglob
+    for repo in "${SYNORA_STORAGE}"/git/*; do
+        [ -d "$repo" ] || continue
+        git -C "$repo" config remote.origin.prune true
+    done
 	"${PYBOMBS_MIRROR_SCRIPT_PATH}/pybombs-mirror.sh"
 }
 function calculate_size() {
@@ -47,4 +53,5 @@ MIRROR_BASE_URL="${MIRROR_BASE_URL:-"https://pybombs.tuna.tsinghua.edu.cn"}"
 
 pybombs_mirror
 publish_repositories
+python3 "$(dirname "${BASH_SOURCE[0]}")/helpers/pybombs_cleanup.py" "${SYNORA_STORAGE}"
 calculate_size

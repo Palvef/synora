@@ -242,3 +242,12 @@ client), `netroute` (proxy probing/serving), `manager`, `worker`, `cli`,
 ## License
 
 [GPL-3.0](LICENSE)
+
+Repository cleanup and package filtering:
+
+- HTTP `delete = true` removes files and empty directories absent from a complete upstream listing. Failed or incomplete listings and failed transfers suppress cleanup. `exclude` accepts path globs and protects matching local content; changing an exclusion does not itself purge existing files.
+- APT/YUM helpers exclude debug symbols and test packages by default (`dbg`, `debug`, `dbgsym`, `debuginfo`, `debugsource`, `test`, `tests`, `testing`, `testsuite` as package-name segments). Runtime and development packages remain included. `SYNC_EXCLUDE_PACKAGES` adds package-name globs. APT retains upstream signed indexes; explicitly excluded packages are intentionally unavailable. YUM regenerates metadata for the filtered package set.
+- Rsync jobs can share `synora-scripts/helpers/package-filters.rules` via `--filter "merge /path/to/package-filters.rules"`. Its receiver rules remove existing excluded packages without deleting unrelated protected files. The ftpsync image applies the same package patterns.
+- APT only removes retired suites after both upstream Release and InRelease return 404/410; metadata/network failures stop cleanup. Component Release files no longer disable package garbage collection. MongoDB recovery prunes obsolete RPMs only after complete object discovery and successful downloads.
+
+HTTP `warn_on_forbidden_files = true` makes ordinary file 403 responses warnings (disabled by default). Missing or forbidden repository metadata, failed directory listings, checksum errors, and server/transport failures remain fatal; any warning suppresses destructive cleanup. Python production excludes `**/*.rekor` and prerelease paths separately.

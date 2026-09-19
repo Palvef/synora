@@ -29,3 +29,17 @@ class MongoRpmTests(unittest.TestCase):
             with patch.object(mongo.requests,'get',return_value=response),self.assertRaises(RuntimeError):
                 mongo.download('https://example.test/a.rpm',path,3,'0'*32)
             self.assertEqual(path.read_bytes(),b'old')
+
+    def test_recovery_prunes_only_after_successful_inventory_download(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            old=root/'old-1-1.x86_64.rpm';old.write_bytes(b'old')
+            def download(url,path,size,etag): path.write_bytes(b'new')
+            with patch.object(mongo,'inventory',return_value={'new-1-1.x86_64.rpm':(3,'')}),patch.object(mongo,'download',side_effect=download):
+                mongo.recover('https://repo.mongodb.org/example',root)
+            self.assertFalse(old.exists())
+            self.assertTrue((root/'new-1-1.x86_64.rpm').exists())
+            old.write_bytes(b'old')
+            with patch.object(mongo,'inventory',return_value={'new-1-1.x86_64.rpm':(3,'')}),patch.object(mongo,'download',side_effect=RuntimeError('transfer failed')),self.assertRaises(RuntimeError):
+                mongo.recover('https://repo.mongodb.org/example',root)
+            self.assertTrue(old.exists())

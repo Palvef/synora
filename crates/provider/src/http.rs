@@ -9,6 +9,7 @@ use crate::{ProviderError, SyncContext, SyncResult};
 pub struct HttpProvider {
     pub parser: String,
     pub delete: bool,
+    pub warn_on_forbidden_files: bool,
     /// Max concurrent directory-listing requests and downloads;
     /// `None` = httpfetch default (5).
     pub threads: Option<u32>,
@@ -65,6 +66,7 @@ impl HttpProvider {
             .map_err(|e| ProviderError::Other(e.to_string()))?
             .with_threads(self.threads.unwrap_or(httpfetch::DEFAULT_THREADS as u32) as usize)
             .with_excludes(self.exclude.clone())
+            .with_forbidden_file_warnings(self.warn_on_forbidden_files)
             .with_byte_counter(bytes);
         let started = std::time::Instant::now();
         let stats = fetcher

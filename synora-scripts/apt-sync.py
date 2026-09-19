@@ -309,6 +309,11 @@ def apt_mirror(
             traceback.print_exc()
             err = 1
             continue
+        package_name = re.search(r"^Package: (.+)$", pkg, re.MULTILINE)
+        section = re.search(r"^Section: (.+)$", pkg, re.MULTILINE)
+        if excluded_file(pkg_filename) or excluded(package_name.group(1) if package_name else Path(pkg_filename).name.split('_')[0], section.group(1) if section else ''):
+            logger.info('Filtered debug/test package: %s', pkg_filename)
+            continue
         deb_count += 1
         deb_size += pkg_size
 
@@ -316,7 +321,7 @@ def apt_mirror(
         dest_dir = dest_filename.parent
         if not dest_dir.is_dir():
             dest_dir.mkdir(parents=True, exist_ok=True)
-        if dest_filename.suffix == ".deb":
+        if dest_filename.suffix in (".deb", ".udeb", ".ddeb"):
             deb_set[str(dest_filename.relative_to(dest_base_dir))] = pkg_size
         if dest_filename.is_file() and dest_filename.stat().st_size == pkg_size:
             logger.info(f"Skipping {pkg_filename}, size {pkg_size}")
@@ -353,7 +358,7 @@ def apt_mirror(
 
 def apt_delete_old_debs(dest_base_dir: Path, remote_set: Dict[str, int], dry_run: bool):
     on_disk = set(
-        [str(i.relative_to(dest_base_dir)) for i in dest_base_dir.glob("**/*.deb")]
+        [str(i.relative_to(dest_base_dir)) for extension in ("deb", "udeb", "ddeb") for i in dest_base_dir.glob("**/*."+extension)]
     )
     deleting = on_disk - remote_set.keys()
     # print(on_disk)
@@ -367,7 +372,40 @@ def apt_delete_old_debs(dest_base_dir: Path, remote_set: Dict[str, int], dry_run
             (dest_base_dir / i).unlink()
 
 
+def retained_apt_suites(root, selected, base_url, remove_missing=False):
+    retained = set()
+    dists = root / 'dists'
+    for release in dists.rglob('Release'):
+        if '.tmp' in release.parts or release.is_symlink():
+            continue
+        # Component/binary Release files are not suites and must not disable GC.
+        fields = dict(line.split(':', 1) for line in release.read_text(errors='replace').splitlines() if ':' in line and not line.startswith(' '))
+        if 'Components' not in fields or 'Architectures' not in fields:
+            continue
+        suite = str(release.parent.relative_to(dists))
+        if suite in selected:
+            continue
+        if remove_missing and not any(s.startswith(suite+'/') for s in selected):
+            statuses = []
+            for filename in ('Release', 'InRelease'):
+                response = requests.get(base_url.rstrip('/')+'/dists/'+suite+'/'+filename, stream=True, timeout=(30,60))
+                try:
+                    statuses.append(response.status_code)
+                    if response.status_code not in (404,410): response.raise_for_status()
+                finally:
+                    response.close()
+            if all(code in (404,410) for code in statuses):
+                if not release.parent.resolve().is_relative_to(dists.resolve()):
+                    raise RuntimeError('APT cleanup path escapes repository')
+                logger.info('Removing retired upstream suite %s', suite)
+                shutil.rmtree(release.parent)
+                continue
+        retained.add(suite)
+    return retained
+
+
 from repo_selection import Selection
+from package_policy import excluded, excluded_file, prune_excluded
 
 def main():
 
@@ -446,9 +484,9 @@ def main():
     if len(failed) > 0:
         logger.error(f"Failed APT repos of {args.base_url}: {failed}")
         sys.exit(1)
-    retained_suites = {str(p.parent.relative_to(args.working_dir / 'dists'))
-                       for p in (args.working_dir / 'dists').rglob('Release')
-                       if '.tmp' not in p.parts} - set(os_list)
+    if not args.delete_dry_run:
+        logger.info('Removed %d excluded debug/test packages', prune_excluded(args.working_dir))
+    retained_suites = retained_apt_suites(args.working_dir, set(os_list), args.base_url, args.delete and not selection.active)
     if selection.active and (args.delete or args.delete_dry_run):
         logger.info("Selection filters active; skipping deletion to retain excluded content")
     elif retained_suites and (args.delete or args.delete_dry_run):

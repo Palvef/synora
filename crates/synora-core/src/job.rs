@@ -200,6 +200,8 @@ pub enum ProviderConfig {
         /// Delete local files absent from the index (like rsync --delete).
         #[serde(default)]
         delete: bool,
+        #[serde(default)]
+        warn_on_forbidden_files: bool,
         /// Max concurrent directory-listing requests and downloads (tunasync
         /// `TUNASYNC_TSUMUGU_THREADS`); `None` = the httpfetch default (5).
         /// `0` is clamped to 1.

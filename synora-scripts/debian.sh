@@ -66,6 +66,7 @@ MAILTO=""
 ERRORMAILTO=""
 LOGDIR="${FTPSYNC_LOG_DIR}"
 SLEEP="${SLEEP}"
+EXCLUDE="--exclude-from=/usr/lib/synora/scripts/helpers/package-excludes.txt"
 CONF
 
 if [[ ! -x "$(command -v "$FTPSYNC" || true)" ]]; then

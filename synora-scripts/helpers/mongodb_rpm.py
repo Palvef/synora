@@ -117,8 +117,9 @@ def download(url, path, size, etag):
 
 
 def recover(url, destination):
-    objects = inventory(url)
-    logging.warning('Recovering %s from %d official RPM objects; retaining existing packages', url, len(objects))
+    from package_policy import excluded_file
+    objects = {name: value for name, value in inventory(url).items() if not excluded_file(name)}
+    logging.warning('Recovering %s from %d official RPM objects; removing packages absent from complete inventory', url, len(objects))
     def fetch(item):
         name, (size, etag) = item
         target = (destination/name).resolve()
@@ -128,4 +129,10 @@ def recover(url, destination):
     threads = max(1, min(16, int(os.getenv('MONGO_RPM_THREADS', '4'))))
     with ThreadPoolExecutor(max_workers=threads) as executor:
         list(executor.map(fetch, objects.items()))
+    # Full inventory + successful payload validation is required before pruning.
+    for path in destination.rglob('*.rpm'):
+        if str(path.relative_to(destination)) not in objects:
+            if not path.resolve().is_relative_to(destination.resolve()):
+                raise RuntimeError('MongoDB cleanup path escapes repository')
+            path.unlink()
     # The caller invokes createrepo only after every package passed validation.
