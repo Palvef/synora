@@ -48,6 +48,9 @@ jobs:
         with:
           cache-on-failure: true
 
+      - name: Install repository helper test dependency
+        run: python3 -m pip install 'requests>=2.32,<3'
+
       - name: Format, versions, Clippy, tests and build
         env:
           SYNORA_TEST_PG_URL: postgresql://synora_test:synora_ci@127.0.0.1:5432/synora_test

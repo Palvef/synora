@@ -11,7 +11,13 @@ import requests
 DOWNLOAD_TIMEOUT = int(os.getenv('DOWNLOAD_TIMEOUT', '1800'))
 BASE_PATH = os.getenv('SYNORA_STORAGE')
 BASE_URL = os.getenv('SYNORA_UPSTREAM', "https://packages.adoptium.net/artifactory")
-FEATURE_VERSIONS = [8, 11, 17, 21, 25]
+def feature_versions():
+    r = requests.get('https://api.adoptium.net/v3/info/available_releases', timeout=(30,60))
+    r.raise_for_status()
+    versions = r.json()['available_lts_releases']
+    if not versions or not all(isinstance(v,int) and v>0 for v in versions):
+        raise RuntimeError('Invalid Adoptium release inventory')
+    return versions
 
 def download_file(url: str, dst_file: Path)->bool:
     try:
@@ -96,7 +102,7 @@ def delete_old_files(ver: int, alive_files: Set[str]):
 if __name__ == "__main__":
     here = Path(os.path.abspath(__file__)).parent
     # =================== standalone ==========================
-    for v in FEATURE_VERSIONS:
+    for v in feature_versions():
         filelist = set()
         download_release(v, 'hotspot', filelist)
         delete_old_files(v, filelist)

@@ -18,3 +18,4 @@ regex.workspace = true
 reqwest.workspace = true
 libc.workspace = true
 axum.workspace = true
+roxmltree = "0.20"

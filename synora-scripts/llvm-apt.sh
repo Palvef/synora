@@ -15,15 +15,15 @@ function get_codenames() {
     local dist_meta_url="${BASE_URL}/${os}/conf/distributions"
     local codenames=$(curl -sSfL $dist_meta_url 2>/dev/null | grep -oP '^Codename: \K.*' | tr '\n' ',' | sed 's/,$//')
     if [ -z "$codenames" ]; then
-        echo "Unable to fetch codename from $dist_meta_url, using default" >&2
-        prefix=llvm-toolchain-$os
-        codenames="$prefix,$prefix-20,$prefix-21"
+        echo "Unable to fetch codenames from $dist_meta_url" >&2
+        return 1
     fi
     echo "Codenames for $os: $codenames" >&2
     echo $codenames
 }
 
-for os in "jammy" "noble" "bullseye" "bookworm" "trixie"; do
+oses=$(python3 "${_here}/helpers/repo_discovery.py" distros ubuntu-lts && python3 "${_here}/helpers/repo_discovery.py" distros debian-current)
+for os in $oses; do
     codenames=$(get_codenames $os)
     "$apt_sync" --delete "$BASE_URL/$os" "$codenames" main amd64,arm64 "$BASE_PATH/$os"
 done

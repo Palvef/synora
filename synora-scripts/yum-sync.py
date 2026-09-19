@@ -2,6 +2,7 @@
 import argparse
 import bz2
 import gzip
+import lzma
 import logging
 import os
 import re
@@ -43,48 +44,51 @@ DOWNLOAD_TIMEOUT = int(os.getenv("DOWNLOAD_TIMEOUT", "1800"))
 REPO_STAT = {}
 
 
-OS_TEMPLATE = {
-    "rhel-current": ["9", "10"],
-    "fedora-current": ["41", "42"],
-}
+from repo_discovery import directories, rpm_versions
 
-pattern_os_template = re.compile(r"@\{(.+)\}")
-
-def replace_os_template(os_list: List[str]) -> List[str]:
-    ret = []
-    for i in os_list:
-        matched = pattern_os_template.search(i)
-        if matched:
-            for os in OS_TEMPLATE[matched.group(1)]:
-                ret.append(pattern_os_template.sub(os, i))
-        elif i.startswith("@"):
-            ret.extend(OS_TEMPLATE[i[1:]])
-        else:
-            ret.append(i)
-    return ret
+def repository_matrix(template, os_values, components, arches):
+    values = {'os_ver': os_values, 'comp': components, 'arch': arches}
+    def walk(url, remaining, bindings):
+        if not remaining:
+            yield bindings, url.rstrip('/')
+            return
+        part, *tail = remaining
+        keys = re.findall(r'@\{(os_ver|comp|arch)\}', part)
+        if not keys:
+            yield from walk(url+'/'+part, tail, bindings)
+            return
+        if len(keys) != 1: raise ValueError('Only one discovery field per URL segment is supported')
+        key=keys[0]
+        candidates=values[key]
+        if key == 'os_ver' and len(candidates)==1 and candidates[0] in ('@rhel-current','@fedora-current'):
+            candidates=rpm_versions(candidates[0])
+        elif any(v.startswith('@') for v in candidates):
+            rx=re.compile(re.escape(part).replace(re.escape('@{'+key+'}'), '(.+)')+'$')
+            candidates=[m.group(1) for name in directories(url) if (m:=rx.fullmatch(name))]
+        for value in candidates:
+            yield from walk(url+'/'+part.replace('@{'+key+'}',value),tail,{**bindings,key:value})
+    origin, path = template.split('://',1)
+    host, _, path = path.partition('/')
+    yield from walk(origin+'://'+host,path.rstrip('/').split('/'),{})
 
 def calc_repo_size(path: Path):
-    dbfiles = path.glob("repodata/*primary.*")
+    # repomd.xml is authoritative; stale primary files must not be selected.
+    root = ET.parse(path / 'repodata/repomd.xml').getroot()
+    ns = {'r': 'http://linux.duke.edu/metadata/repo'}
+    primary = root.find("r:data[@type='primary']/r:location", ns)
+    if primary is None: raise RuntimeError(f'No primary metadata in {path}')
+    db = (path / primary.attrib['href']).resolve()
+    if not db.is_relative_to(path.resolve()): raise RuntimeError('Unsafe primary metadata path')
+    suffixes = db.suffixes
     with tempfile.NamedTemporaryFile() as tmp:
-        dec = None
-        dbfile = None
-        for db in dbfiles:
-            dbfile = db
-            suffixes = db.suffixes
-            if suffixes[-1] == ".bz2":
-                dec = bz2.decompress
-                suffixes = suffixes[:-1]
-            elif suffixes[-1] == ".gz":
-                dec = gzip.decompress
-                suffixes = suffixes[:-1]
-            elif suffixes[-1] in (".sqlite", ".xml"):
-                dec = lambda x: x
-        if dec is None:
-            logger.error(f"Failed to read from {path}: {list(dbfiles)}")
-            return
-        with db.open("rb") as f:
-            tmp.write(dec(f.read()))
-            tmp.flush()
+        if suffixes[-1] == '.zst':
+            sp.run(['zstd', '-dc', str(db)], stdout=tmp, check=True)
+            suffixes = suffixes[:-1]
+        else:
+            dec = {'.gz': gzip.decompress, '.bz2': bz2.decompress, '.xz': lzma.decompress}.get(suffixes[-1])
+            tmp.write(dec(db.read_bytes()) if dec else db.read_bytes())
+            if dec: suffixes = suffixes[:-1]
+        tmp.flush()
 
         if suffixes[-1] == ".sqlite":
             conn = sqlite3.connect(tmp.name)
@@ -105,10 +109,9 @@ def calc_repo_size(path: Path):
                     cnt += 1
             except:
                 traceback.print_exc()
-                return
+                raise
         else:
-            logger.error(f"Unknown suffix {suffixes}")
-            return
+            raise RuntimeError(f"Unknown suffix {suffixes}")
 
         logger.info(f"Repository {path}:")
         logger.info(f"  {cnt} packages, {size} bytes in total")
@@ -214,13 +217,13 @@ def main():
         action="store_true",
         help="""pass --arch to reposync to further filter packages by 'arch' field in metadata (NOT recommended, prone to missing packages in some repositories, e.g. mysql)""",
     )
+    parser.add_argument("--dry-run", action="store_true", help="probe discovered repositories without syncing")
     args = parser.parse_args()
 
     raw_os_list = args.os_version.split(",")
-    raw_os_list = replace_os_template(raw_os_list)
     os_list = []
     for os_version in raw_os_list:
-        if "-" in os_version and "-stream" not in os_version:
+        if re.fullmatch(r"[0-9]+-[0-9]+", os_version):
             dash = os_version.index("-")
             os_list = os_list + [
                 str(i)
@@ -237,32 +240,33 @@ def main():
     logger.info(f"Configuration: {os_list=}, {component_list=}, {arch_list=}")
 
     failed = []
-    args.working_dir.mkdir(parents=True, exist_ok=True)
+    if not args.dry_run: args.working_dir.mkdir(parents=True, exist_ok=True)
     cache_dir = tempfile.mkdtemp()
 
-    def combination_os_comp(arch: str):
-        for os in os_list:
-            for comp in component_list:
-                vardict = {
-                    "arch": arch,
-                    "os_ver": os,
-                    "comp": comp,
-                }
+    def combination_os_comp(arch):
+        matrix = list(repository_matrix(args.base_url, os_list, component_list, [arch]))
+        found = set()
+        for bindings, url in matrix:
+            vardict = {'os_ver': os_list[0], 'comp': component_list[0], 'arch': arch, **bindings}
+            name = substitute_vars(args.repo_name, vardict)
+            if (name,url) in found: continue
+            found.add((name,url))
+            probe_url = url+'/repodata/repomd.xml'
+            r = requests.get(probe_url, timeout=(30,60))
+            if r.status_code in (404,410):
+                logger.info('Unavailable repository: %s', probe_url)
+                continue
+            r.raise_for_status()
+            if not ET.fromstring(r.content).tag.endswith('repomd'): raise RuntimeError(f'Invalid repomd: {probe_url}')
+            yield name,url
 
-                name = substitute_vars(args.repo_name, vardict)
-                url = substitute_vars(args.base_url, vardict)
-                try:
-                    probe_url = (
-                        url + ("" if url.endswith("/") else "/") + "repodata/repomd.xml"
-                    )
-                    r = requests.head(probe_url, timeout=(30, 60))
-                    if r.status_code < 400 or r.status_code == 403:
-                        yield (name, url)
-                    else:
-                        logger.warning(f"{probe_url} -> {r.status_code}")
-                except:
-                    traceback.print_exc()
-
+    if args.dry_run:
+        count=0
+        for arch in arch_list:
+            for name,url in combination_os_comp(arch):
+                print(name, url, flush=True);count+=1
+        if not count: raise RuntimeError('No available RPM repositories discovered')
+        return
     for arch in arch_list:
         dest_dirs = []
         conf = tempfile.NamedTemporaryFile("w", suffix=".conf")
@@ -270,7 +274,7 @@ def main():
             """
 [main]
 keepcache=0
-skip_if_unavailable=1
+skip_if_unavailable=0
 """
         )
         for name, url in combination_os_comp(arch):
@@ -282,12 +286,12 @@ baseurl={url}
 repo_gpgcheck=0
 gpgcheck=0
 enabled=1
-skip_if_unavailable=1
+skip_if_unavailable=0
 """
             )
             dst = (args.working_dir / name).absolute()
             dst.mkdir(parents=True, exist_ok=True)
-            dest_dirs.append(dst)
+            dest_dirs.append((dst, url))
         conf.flush()
         # sp.run(["cat", conf.name])
         # sp.run(["ls", "-la", cache_dir])
@@ -314,10 +318,13 @@ skip_if_unavailable=1
             failed.append((name, arch))
             continue
 
-        for path in dest_dirs:
+        for path, repo_url in dest_dirs:
             path.mkdir(exist_ok=True)
             if args.download_repodata:
-                download_repodata(url, path)
+                result = download_repodata(repo_url, path)
+                if result:
+                    failed.append((str(path), arch))
+                    continue
             else:
                 shutil.rmtree(".repodata", True)
                 cmd_args = [
@@ -332,6 +339,9 @@ skip_if_unavailable=1
                 ]
                 logger.info(f"Launching createrepo with command: {cmd_args}")
                 ret = sp.run(cmd_args)
+                if ret.returncode:
+                    failed.append((str(path), arch))
+                    continue
             calc_repo_size(path)
 
     if len(failed) > 0:

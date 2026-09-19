@@ -5,6 +5,8 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 cargo fmt --all -- --check
+python3 -m unittest discover -s synora-scripts/tests
+for script in synora-scripts/*.sh; do bash -n "$script"; done
 python3 - <<'PYTHON'
 import pathlib
 import tomllib

@@ -78,6 +78,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         dnf \
         dnf-plugins-core \
         createrepo-c \
+        zstd \
         rpm \
         awscli \
         ruby \

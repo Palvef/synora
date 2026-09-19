@@ -53,12 +53,7 @@ if USE_ADDR_FAMILY != "":
         socket.AF_INET if USE_ADDR_FAMILY == "ipv4" else socket.AF_INET6
     )
 
-OS_TEMPLATE = {
-    "ubuntu-lts": ["jammy", "noble", "resolute"],
-    "debian-current": ["bullseye", "bookworm", "trixie"],
-    "debian-latest2": ["bookworm", "trixie"],
-    "debian-latest": ["trixie"],
-}
+from repo_discovery import apt_suites, release_fields
 ARCH_NO_PKGIDX = ["dep11", "i18n", "cnf", "neon"]
 MAX_RETRY = int(os.getenv("MAX_RETRY", "3"))
 DOWNLOAD_TIMEOUT = int(os.getenv("DOWNLOAD_TIMEOUT", "1800"))
@@ -76,19 +71,6 @@ def check_args(prop: str, lst: List[str]):
         if len(s) == 0 or " " in s:
             raise ValueError(f"Invalid item in {prop}: {repr(s)}")
 
-
-def replace_os_template(os_list: List[str]) -> List[str]:
-    ret = []
-    for i in os_list:
-        matched = pattern_os_template.search(i)
-        if matched:
-            for os in OS_TEMPLATE[matched.group(1)]:
-                ret.append(pattern_os_template.sub(os, i))
-        elif i.startswith("@"):
-            ret.extend(OS_TEMPLATE[i[1:]])
-        else:
-            ret.append(i)
-    return ret
 
 
 def check_and_download(url: str, dst_file: Path, caching=False) -> int:
@@ -401,12 +383,13 @@ def main():
         action="store_true",
         help="print package files to be deleted only",
     )
+    parser.add_argument("--dry-run", action="store_true", help="discover and validate metadata without writing packages")
     args = parser.parse_args()
 
     # generate lists of os codenames
     os_list = args.os_version.split(",")
     check_args("os_version", os_list)
-    os_list = replace_os_template(os_list)
+    os_list = apt_suites(args.base_url, args.os_version)
 
     # generate a list of components and archs for each os codename
     def generate_list_for_oses(raw: str, name: str) -> List[List[str]]:
@@ -429,8 +412,16 @@ def main():
     component_lists = generate_list_for_oses(args.component, "component")
     arch_lists = generate_list_for_oses(args.arch, "arch")
 
+    # Discover metadata before creating directories or deleting any old package.
+    for i, suite in enumerate(os_list):
+        if '@auto' in component_lists[i] or '@auto' in arch_lists[i]:
+            fields = release_fields(args.base_url, suite)
+            if '@auto' in component_lists[i]: component_lists[i] = fields['Components'].split()
+            if '@auto' in arch_lists[i]: arch_lists[i] = fields['Architectures'].split()
     logger.info(f"Configuration: {os_list=}, {component_lists=}, {arch_lists=}")
 
+    if args.dry_run:
+        return
     args.working_dir.mkdir(parents=True, exist_ok=True)
     failed = []
     deb_set = {}

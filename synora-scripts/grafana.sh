@@ -21,7 +21,7 @@ echo "APT finished"
 
 
 # =================== YUM/DNF repos ==========================
-"$yum_sync" "${YUM_URL}" 7 rpm x86_64 "@{comp}" "$YUM_PATH"
+"$yum_sync" "${YUM_URL}" unused rpm x86_64 "@{comp}" "$YUM_PATH"
 echo "YUM finished"
 
 "${_here}/helpers/size-sum.sh" $REPO_SIZE_FILE --rm

@@ -8,8 +8,8 @@ apt_sync="${_here}/apt-sync.py"
 
 BASE_PATH="${SYNORA_STORAGE}"
 BASE_URL=${SYNORA_UPSTREAM:-"https://packages.openmediavault.org/public"}
-DISTS=sandworm,sandworm-proposed,shaitan-proposed,shaitan,usul-proposed,usul
-EXTRA_DISTS=sandworm,shaitan-beta,shaitan-testing,shaitan,usul-beta,usul-extras,usul-testing,usul
+DISTS=@auto
+EXTRA_DISTS=@auto
 ARCHS=amd64,i386,arm64,armel,armhf
 export REPO_SIZE_FILE=/tmp/reposize.$RANDOM
 

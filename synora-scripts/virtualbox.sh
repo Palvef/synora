@@ -45,7 +45,8 @@ echo "Debian and ubuntu finished"
 timeout -s INT 30 wget ${WGET_OPTIONS:-} -q -O "/tmp/index.html" "${BASE_URL}/"
 timeout -s INT 30 wget ${WGET_OPTIONS:-} -q -O "${BASE_PATH}/LATEST.TXT" "${BASE_URL}/LATEST.TXT"
 
-for((major=4;major<=7;major++));do
+majors=$(python3 "${_here}/helpers/repo_discovery.py" dirs "$BASE_URL" --pattern "[0-9]+\.[0-9]+\.[0-9]+" | cut -d. -f1 | sort -nu)
+for major in $majors; do
 	LATEST_VERSION=$(grep -P -o "\"$major\.[\\d\\.]+/\"" -r /tmp/index.html|tail -n 1)
 	LATEST_VERSION=${LATEST_VERSION%/\"}
 	LATEST_VERSION=${LATEST_VERSION#\"}

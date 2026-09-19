@@ -11,7 +11,8 @@ BASE_URL=${SYNORA_UPSTREAM:-"https://artifacts.elastic.co"}
 BASE_PATH="${SYNORA_STORAGE%/}"
 BASE_URL="${BASE_URL%/}"
 
-ELASTIC_VERSION=("6.x" "7.x" "8.x" "9.x")
+versions=$(python3 "${_here}/helpers/repo_discovery.py" elastic)
+mapfile -t ELASTIC_VERSION <<< "$versions"
 
 YUM_PATH="${BASE_PATH}/yum"
 APT_PATH="${BASE_PATH}/apt"
@@ -28,7 +29,7 @@ done
 # # ================ YUM/DNF repos ===============================
 components="${ELASTIC_VERSION[@]}"
 components=${components// /,}
-"$yum_sync" "${BASE_URL}/packages/@{comp}/yum" 7 "$components" x86_64 "elastic-@{comp}" "$YUM_PATH"
+"$yum_sync" "${BASE_URL}/packages/@{comp}/yum" unused "$components" x86_64 "elastic-@{comp}" "$YUM_PATH"
 
 for elsver in ${ELASTIC_VERSION[@]}; do
 	mkdir -p "${BASE_PATH}/${elsver}"

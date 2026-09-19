@@ -137,6 +137,8 @@ pub struct Plan {
     pub downloads: Vec<(String, PathBuf)>,
     pub deletes: Vec<PathBuf>,
     pub symlinks: Vec<(PathBuf, String)>,
+    /// Exact RPM manifests fetched while planning, published only after payloads succeed.
+    manifests: Vec<(PathBuf, Vec<u8>)>,
     // Planning internals feeding `total_size_hint`; not part of the public
     // shape so users can't fake a hint.
     size_sum: u64,
@@ -340,7 +342,15 @@ impl Fetcher {
                 let client = self.client.clone();
                 let task_cancel = cancel.clone();
                 listings.spawn(async move {
-                    let result = get_listing(&client, &work.url, &task_cancel).await;
+                    let manifest = work.url.trim_end_matches('/').ends_with("/repodata");
+                    let fetch_url = if manifest {
+                        join_slash(&work.url, "repomd.xml")
+                            .trim_end_matches('/')
+                            .to_string()
+                    } else {
+                        work.url.clone()
+                    };
+                    let result = get_listing(&client, &fetch_url, &task_cancel).await;
                     (work, result)
                 });
             }
@@ -387,7 +397,28 @@ impl Fetcher {
                 }
             };
 
-            for entry in parser.parse(&body) {
+            let entries = if work.url.trim_end_matches('/').ends_with("/repodata") {
+                let entries = rpm_manifest_entries(&body)?;
+                let rel = if work.rel.is_empty() {
+                    "repomd.xml".to_string()
+                } else {
+                    format!("{}/repomd.xml", work.rel.trim_end_matches('/'))
+                };
+                remote.insert(rel.clone());
+                plan.manifests.push((storage.join(&rel), body));
+                append_log(
+                    log_file,
+                    &format!(
+                        "planning: {} uses repomd.xml ({} current metadata files)",
+                        work.url,
+                        entries.len()
+                    ),
+                );
+                entries
+            } else {
+                parser.parse(&body)
+            };
+            for entry in entries {
                 if seen >= MAX_ENTRIES {
                     tracing::warn!("index entry cap ({MAX_ENTRIES}) reached at {}", work.url);
                     append_log(
@@ -685,6 +716,26 @@ impl Fetcher {
         if cancelled {
             return Err(FetchError::Cancelled);
         }
+        // Never re-fetch repomd here: the upstream may have changed since planning.
+        // Publish the exact generation whose referenced metadata was downloaded.
+        if stats.files_failed == 0 {
+            for (dest, body) in &plan.manifests {
+                if cancel.is_cancelled() {
+                    return Err(FetchError::Cancelled);
+                }
+                if has_symlink_ancestor(dest) {
+                    return Err(FetchError::Io("manifest path contains symlink".into()));
+                }
+                if let Some(parent) = dest.parent() {
+                    tokio::fs::create_dir_all(parent).await?;
+                }
+                let temporary = dest.with_extension("xml.partial");
+                tokio::fs::write(&temporary, body).await?;
+                tokio::fs::rename(&temporary, dest).await?;
+                stats.files_downloaded += 1;
+                stats.downloaded_bytes += body.len() as u64;
+            }
+        }
         let allow_deletes = stats.files_failed == 0 && stats.files_warned == 0;
         for path in plan.deletes.iter().filter(|_| allow_deletes) {
             if cancel.is_cancelled() {
@@ -790,6 +841,50 @@ impl Default for Fetcher {
     fn default() -> Self {
         Self::new().expect("reqwest client with default TLS setup cannot fail to build")
     }
+}
+
+/// RPM directory HTML can lag behind the object store by a full generation.
+/// Only the manifest defines which content-addressed metadata is current.
+fn rpm_manifest_entries(body: &[u8]) -> Result<Vec<parser::Entry>, FetchError> {
+    let text = std::str::from_utf8(body).map_err(|e| FetchError::Http(e.to_string()))?;
+    let doc = roxmltree::Document::parse(text).map_err(|e| FetchError::Http(e.to_string()))?;
+    let root = doc.root_element();
+    if root.tag_name().name() != "repomd" {
+        return Err(FetchError::Http("invalid RPM manifest".into()));
+    }
+    let mut entries = Vec::new();
+    let mut primary = false;
+    for data in root.children().filter(|n| n.has_tag_name("data")) {
+        primary |= data.attribute("type") == Some("primary");
+        let href = data
+            .children()
+            .find(|n| n.has_tag_name("location"))
+            .and_then(|n| n.attribute("href"))
+            .ok_or_else(|| FetchError::Http("RPM location missing".into()))?;
+        let name = href
+            .strip_prefix("repodata/")
+            .filter(|p| !p.contains('/') && is_safe_rel(p))
+            .ok_or_else(|| FetchError::Http("unsafe RPM metadata path".into()))?;
+        if name == "repomd.xml" {
+            return Err(FetchError::Http("recursive RPM manifest".into()));
+        }
+        let size = data
+            .children()
+            .find(|n| n.has_tag_name("size"))
+            .and_then(|n| n.text())
+            .and_then(|s| s.parse().ok());
+        entries.push(parser::Entry {
+            path: name.into(),
+            size,
+            modified: None,
+            kind: parser::EntryKind::File,
+            symlink_target: None,
+        });
+    }
+    if !primary || entries.is_empty() {
+        return Err(FetchError::Http("RPM primary metadata missing".into()));
+    }
+    Ok(entries)
 }
 
 async fn get_listing(
@@ -1190,6 +1285,70 @@ mod tests {
         }
         html.push_str("</pre><hr></body></html>");
         html
+    }
+
+    #[tokio::test]
+    async fn rpm_manifest_is_published_only_after_current_metadata_downloads() {
+        let xml = r#"<repomd xmlns="http://linux.duke.edu/metadata/repo"><data type="primary"><location href="repodata/current.xml"/><size>7</size></data></repomd>"#;
+        for missing in [false, true] {
+            let files = if missing {
+                vec![("repodata/repomd.xml", xml)]
+            } else {
+                vec![
+                    ("repodata/repomd.xml", xml),
+                    ("repodata/current.xml", "payload"),
+                ]
+            };
+            let mut mirror = TestMirror::new(&files);
+            mirror.raw.insert(
+                "repodata/".into(),
+                "<pre><a href=\"obsolete.xml\">obsolete.xml</a> 16-Aug-2026 10:00 7</pre>".into(),
+            );
+            let base = spawn_server(mirror);
+            let storage = unique_dir();
+            std::fs::create_dir_all(storage.join("repodata")).unwrap();
+            std::fs::write(storage.join("repodata/repomd.xml"), "old manifest").unwrap();
+            std::fs::write(storage.join("repodata/stale.xml"), "old").unwrap();
+            let stats = Fetcher::new()
+                .unwrap()
+                .sync(
+                    &base,
+                    "nginx",
+                    &storage,
+                    true,
+                    4,
+                    &CancellationToken::new(),
+                    None,
+                )
+                .await
+                .unwrap();
+            if missing {
+                assert!(stats.files_failed > 0);
+                assert_eq!(
+                    std::fs::read_to_string(storage.join("repodata/repomd.xml")).unwrap(),
+                    "old manifest"
+                );
+                assert!(storage.join("repodata/stale.xml").exists());
+            } else {
+                assert_eq!(stats.files_failed, 0);
+                assert_eq!(
+                    std::fs::read_to_string(storage.join("repodata/repomd.xml")).unwrap(),
+                    xml
+                );
+                assert!(!storage.join("repodata/stale.xml").exists());
+            }
+        }
+    }
+
+    #[test]
+    fn rpm_manifest_uses_current_generation_and_rejects_unsafe_paths() {
+        let xml = br#"<repomd xmlns="http://linux.duke.edu/metadata/repo"><data type="primary"><location href="repodata/current-primary.xml.zst"/><size>12</size></data></repomd>"#;
+        let entries = rpm_manifest_entries(xml).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].path, "current-primary.xml.zst");
+        assert_eq!(entries[0].size, Some(12));
+        assert!(rpm_manifest_entries(b"<html>login</html>").is_err());
+        assert!(rpm_manifest_entries(br#"<repomd><data type="primary"><location href="repodata/../../escape"/></data></repomd>"#).is_err());
     }
 
     fn spawn_server(mirror: TestMirror) -> String {
