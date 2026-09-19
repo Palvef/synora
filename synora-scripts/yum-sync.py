@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import fcntl
 import bz2
 import gzip
 import lzma
@@ -241,6 +242,11 @@ def main():
 
     failed = []
     if not args.dry_run: args.working_dir.mkdir(parents=True, exist_ok=True)
+    # Hold a repository-root lock before touching interrupted createrepo state.
+    sync_lock = None
+    if not args.dry_run:
+        sync_lock = (args.working_dir / '.yum-sync.lock').open('a')
+        fcntl.flock(sync_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     cache_dir = tempfile.mkdtemp()
 
     def combination_os_comp(arch):
@@ -328,7 +334,7 @@ skip_if_unavailable=0
                     failed.append((str(path), arch))
                     continue
             else:
-                shutil.rmtree(".repodata", True)
+                shutil.rmtree(path / ".repodata", True)
                 cmd_args = [
                     "createrepo_c",
                     "--update",
