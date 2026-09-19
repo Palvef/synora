@@ -22,7 +22,7 @@ function get_codenames() {
     echo $codenames
 }
 
-oses=$(python3 "${_here}/helpers/repo_discovery.py" distros ubuntu-lts && python3 "${_here}/helpers/repo_discovery.py" distros debian-current)
+oses="${LLVM_DISTROS:-jammy noble resolute bullseye bookworm trixie}"
 for os in $oses; do
     codenames=$(get_codenames $os)
     "$apt_sync" --delete "$BASE_URL/$os" "$codenames" main amd64,arm64 "$BASE_PATH/$os"

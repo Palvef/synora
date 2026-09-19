@@ -11,8 +11,7 @@ BASE_URL=${SYNORA_UPSTREAM:-"https://artifacts.elastic.co"}
 BASE_PATH="${SYNORA_STORAGE%/}"
 BASE_URL="${BASE_URL%/}"
 
-versions=$(python3 "${_here}/helpers/repo_discovery.py" elastic)
-mapfile -t ELASTIC_VERSION <<< "$versions"
+IFS=, read -ra ELASTIC_VERSION <<< "${ELASTIC_MAJORS:-6.x,7.x,8.x,9.x}"
 
 YUM_PATH="${BASE_PATH}/yum"
 APT_PATH="${BASE_PATH}/apt"

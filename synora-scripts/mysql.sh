@@ -16,12 +16,13 @@ APT_PATH="${BASE_PATH}/apt"
 UBUNTU_PATH="${APT_PATH}/ubuntu"
 DEBIAN_PATH="${APT_PATH}/debian"
 
-# The upstream Release file supplies components and architectures for each suite.
-"$apt_sync" --delete "${BASE_URL}/apt/ubuntu" @auto @auto @auto "$UBUNTU_PATH"
-"$apt_sync" --delete "${BASE_URL}/apt/debian" @auto @auto @auto "$DEBIAN_PATH"
+# Match the TUNA repository scope; distro aliases still resolve dynamically.
+MYSQL_APT_REPOS="${MYSQL_APT_REPOS:-mysql-tools,mysql-8.0,mysql-8.4-lts}"
+"$apt_sync" --delete "${BASE_URL}/apt/ubuntu" @ubuntu-lts "$MYSQL_APT_REPOS" amd64,i386 "$UBUNTU_PATH"
+"$apt_sync" --delete "${BASE_URL}/apt/debian" @debian-current "$MYSQL_APT_REPOS" amd64,i386 "$DEBIAN_PATH"
 
 # =================== YUM/DNF repos ==========================
-COMPONENTS="@auto"
+COMPONENTS="${MYSQL_YUM_REPOS:-mysql-connectors-community,mysql-tools-community,mysql-8.0-community,mysql-8.4-community}"
 "$yum_sync" "${BASE_URL}/yum/@{comp}/el/@{os_ver}/@{arch}/" @rhel-current "$COMPONENTS" x86_64,aarch64 "@{comp}-el@{os_ver}-@{arch}" "$YUM_PATH"
 echo "YUM finished"
 

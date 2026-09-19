@@ -126,3 +126,36 @@ Existing packages are retained during recovery. Other upstreams do not use this
 fallback. `MONGO_RPM_THREADS` controls recovery downloads (default 4, maximum 16).
 MongoDB also attempts both APT families even when YUM fails, and keeps existing
 x86_64 repository names while giving other architectures separate directories.
+
+## TUNA APT/YUM scope
+
+The following production wrappers follow the architecture and version selections
+in [tunasync-scripts at b7e131d](https://github.com/tuna/tunasync-scripts/tree/b7e131dc4a1c4711f84cbbe6c6168f0f95ac3fbc).
+Architecture names are specific to each APT/RPM invocation, not a global union.
+
+| Wrapper | APT architectures | RPM architectures | Version scope |
+|---|---|---|---|
+| MongoDB | Ubuntu: amd64,i386,arm64; Debian: amd64,i386 | x86_64 | MongoDB 4.2,4.4,5.0,6.0,7.0,8.0; Ubuntu LTS, current Debian/RHEL |
+| MySQL | amd64,i386 | x86_64,aarch64 | 8.0,8.4 LTS and tools/connectors; Ubuntu LTS, current Debian/RHEL |
+| InfluxData | amd64,i386,armhf,arm64 | x86_64 | stable payloads and current Debian/Ubuntu LTS aliases |
+| Elastic | amd64,i386 | x86_64 | 6.x,7.x,8.x,9.x |
+| LLVM | amd64,arm64 | — | jammy,noble,resolute,bullseye,bookworm,trixie; toolchain suites fetched from each distribution |
+| XanMod | amd64,i386 | — | Ubuntu LTS and current Debian; main,non-free |
+| Mozilla | all,amd64,arm64 | — | mozilla |
+| Grafana | amd64,armhf,arm64 | x86_64 | stable,beta |
+| Termux | aarch64,arm,i686,x86_64 | — | main,x11,root repositories |
+| Proxmox | amd64 | — | current Debian |
+| VirtualBox | amd64,i386 | x86_64 | current Debian/RHEL and Ubuntu LTS |
+| Adoptium | amd64,armhf,arm64 | x86_64,aarch64 | current Debian/RHEL/Fedora and Ubuntu LTS |
+
+Distro aliases still resolve dynamically. Helpers retain `@auto` discovery for
+repositories without an explicit version selection. Explicit product scopes can
+be overridden with comma-separated `MONGO_VERSIONS`, `MYSQL_APT_REPOS`,
+`MYSQL_YUM_REPOS`, `ELASTIC_MAJORS`, or space-separated `LLVM_DISTROS`.
+Existing `SYNC_*` include/exclude filters further restrict these scopes.
+
+InfluxData uses its repaired `/stable/<arch>/main/` RPM endpoint instead of the
+obsolete per-RHEL URLs. MongoDB retains HTTPS and missing RPM metadata recovery.
+Debug/test package filtering remains enabled. Narrowing scope does not forcibly
+remove still-published historical suites: shared-package cleanup keeps its
+existing integrity checks.
