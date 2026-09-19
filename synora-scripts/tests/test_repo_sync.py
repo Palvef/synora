@@ -47,6 +47,11 @@ class DiscoveryTests(unittest.TestCase):
             self.assertEqual(discovery.directories('https://repo.test/dists'),['new-release'])
         discovery.directories.cache_clear();response.text='<html>Login</html>'
         with patch.object(discovery.requests,'get',return_value=response),self.assertRaises(RuntimeError): discovery.directories('https://repo.test/dists')
+    def test_directory_label_without_slash_in_href(self):
+        response=Mock(text='<a href="/stable">..</a><a href="/stable/futurearch">futurearch/</a><a href="/stable/readme">readme</a><a href="https://evil.test/x">x/</a>')
+        with patch.object(discovery.requests,'get',return_value=response):
+            self.assertEqual(discovery.directories('https://repos.influxdata.com/stable/'), ['futurearch'])
+
     def test_future_nested_versions(self):
         def listing(url):return ['future-os'] if url.rstrip('/').endswith('/dists') else ['12.0','13.0']
         with patch.object(discovery,'directories',side_effect=listing):

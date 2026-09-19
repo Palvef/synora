@@ -15,6 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         wget \
         git \
+        subversion \
         rsync \
         lftp \
         findutils \
@@ -59,6 +60,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=source /usr/local/bin/repo /usr/local/bin/repo
 RUN ln -s /usr/local/bin/repo /usr/local/bin/aosp-repo
+
+# Source pinned to the helper used by tuna/tunasync-scripts/pybombs.sh.
+ARG PYBOMBS_MIRROR_REV=d7a8a9925c0b91dc9695a31a07b62eff8546909e
+RUN HTTPS_PROXY="$FETCH_HTTPS_PROXY" https_proxy="$FETCH_HTTPS_PROXY" \
+    git clone https://github.com/scateu/pybombs-mirror.git /opt/pybombs-mirror \
+    && git -C /opt/pybombs-mirror checkout --detach "$PYBOMBS_MIRROR_REV" \
+    && rm -rf /opt/pybombs-mirror/.git
 
 COPY . /usr/lib/synora/scripts
 

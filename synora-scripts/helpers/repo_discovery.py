@@ -13,9 +13,20 @@ import requests
 
 class Links(HTMLParser):
     def __init__(self):
-        super().__init__(); self.links=[]
+        super().__init__(); self.links=[]; self.directory_links=set(); self.anchor=None; self.anchor_text=[]
     def handle_starttag(self, tag, attrs):
-        if tag == 'a': self.links.extend(v for k,v in attrs if k == 'href' and v)
+        if tag == 'a':
+            self.anchor = next((v for k,v in attrs if k == 'href' and v), None)
+            self.anchor_text = []
+            if self.anchor: self.links.append(self.anchor)
+    def handle_data(self, data):
+        if self.anchor: self.anchor_text.append(data)
+    def handle_endtag(self, tag):
+        if tag == 'a':
+            if self.anchor and ''.join(self.anchor_text).strip().endswith('/'):
+                self.directory_links.add(self.anchor)
+            self.anchor = None
+            self.anchor_text = []
 
 @functools.lru_cache(maxsize=512)
 def directories(url):
@@ -49,7 +60,7 @@ def directories(url):
         target=urlsplit(urljoin(url,href)); base=urlsplit(url)
         if target.netloc != base.netloc or target.query or not target.path.startswith(base.path): continue
         name=unquote(target.path[len(base.path):]).rstrip('/')
-        if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._+-]*',name) and target.path.endswith('/'): names.add(name)
+        if re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._+-]*',name) and (target.path.endswith('/') or href in parser.directory_links): names.add(name)
     if not names: raise RuntimeError(f'No repository directories discovered at {url}; refusing an empty sync')
     return sorted(names)
 

@@ -10,6 +10,8 @@ import re
 import requests
 import subprocess
 import sys
+import shutil
+import urllib3
 
 from pyquery import PyQuery as pq
 from datetime import datetime, timedelta
@@ -35,7 +37,10 @@ else:
 PATH_BATCH = int(os.getenv('NIX_MIRROR_PATH_BATCH', 8192))
 THREADS = int(os.getenv('NIX_MIRROR_THREADS', 10))
 DELETE_OLD = os.getenv('NIX_MIRROR_DELETE_OLD', '1') == '1'
-RETAIN_DAYS = float(os.getenv('NIX_MIRROR_RETAIN_DAYS', 30))
+RETAIN_DAYS = float(os.getenv('NIX_MIRROR_RETAIN_DAYS', 14))
+if RETAIN_DAYS <= 0:
+    raise ValueError('NIX_MIRROR_RETAIN_DAYS must be positive')
+CLONE_SINCE_DAYS = float(os.getenv('NIX_MIRROR_CLONE_SINCE_DAYS', 360))
 
 STORE_DIR = 'store'
 RELEASES_DIR = 'releases'
@@ -44,7 +49,7 @@ RELEASES_DIR = 'releases'
 # be too old and defunct.
 #
 # [1]: https://discourse.nixos.org/t/announcement-moving-nixos-org-to-netlify/6212
-CLONE_SINCE = datetime(2020, 3, 6, tzinfo=pytz.utc)
+CLONE_SINCE = datetime.now(pytz.utc) - timedelta(days=CLONE_SINCE_DAYS)
 TIMEOUT = 60
 
 working_dir = Path(WORKING_DIR)
@@ -138,7 +143,9 @@ def download(url, dest):
     download_dest.rename(dest)
 
 credentials = Credentials(provider=Static())
-client = minio.Minio('s3.amazonaws.com', credentials=credentials)
+proxy = os.getenv('HTTPS_PROXY') or os.getenv('https_proxy')
+http_client = urllib3.ProxyManager(proxy) if proxy else urllib3.PoolManager()
+client = minio.Minio('s3.amazonaws.com', credentials=credentials, http_client=http_client)
 
 def get_channels():
     return [
@@ -162,7 +169,11 @@ def clone_channels():
             continue
 
         chan_obj = client.get_object('nix-channels', channel)
-        chan_location = chan_obj.headers['x-amz-website-redirect-location']
+        try:
+            chan_location = chan_obj.headers['x-amz-website-redirect-location']
+        finally:
+            chan_obj.close()
+            chan_obj.release_conn()
 
         chan_release = chan_location.split('/')[-1]
 
@@ -194,7 +205,11 @@ def clone_channels():
 
         tagline = node('p').text()
 
-        tagline_res = re.match(r'^Released on (.+) from', tagline)
+        # Examples:
+        #
+        # Released on yyyy-mm-dd hh:mm:ss UTC from Git commit ...
+        # Released on yyyy-mm-dd hh:mm:ss from ...
+        tagline_res = re.match(r'^Released on (.+?) (?:UTC )?from', tagline)
 
         if tagline_res is None:
             logging.warning(f'    - Invalid tagline: {tagline}')
@@ -260,6 +275,7 @@ def hash_part(path):
     return path.split('/')[-1].split('-', 1)[0]
 
 def update_channels(channels):
+    global failure
     logging.info(f'- Updating binary cache')
 
     has_cache_info = False
@@ -358,8 +374,10 @@ def update_channels(channels):
                     channel_failure = True
 
         if channel_failure:
+            failure = True
             logging.info(f'    - Finished with errors, not updating symlink')
         else:
+            (chan_path_update / '.sync-complete').touch()
             chan_path_update.rename(chan_path)
             logging.info(f'    - Finished with success, symlink updated')
 
@@ -373,7 +391,16 @@ def parse_narinfo(narinfo):
 def garbage_collect():
     logging.info(f'- Collecting garbage')
 
-    time_threshold = datetime.now() - timedelta(days=RETAIN_DAYS)
+    for directory in (RELEASES_DIR, STORE_DIR, f'{STORE_DIR}/nar'):
+        (working_dir / directory).mkdir(parents=True, exist_ok=True)
+    if any(working_dir.glob('.*.update')):
+        logging.info('  - Retaining cache while interrupted channel downloads resume')
+        return
+    time_threshold = datetime.now(pytz.utc) - timedelta(days=RETAIN_DAYS)
+    # Published channels remain usable even when upstream stops updating them.
+    published = {p.resolve() for p in working_dir.iterdir()
+                 if p.is_symlink() and not p.name.startswith('.')}
+    completed = set()
 
     last_updated = {}
     latest = {}
@@ -381,11 +408,19 @@ def garbage_collect():
 
     for release in (working_dir / RELEASES_DIR).iterdir():
         # This release never finished downloading
-        if not (release / 'binary-cache-url').exists(): continue
+        if not (release / '.sync-complete').exists() and release.resolve() not in published:
+            continue
+        completed.add(release)
 
         channel = release.name.split('@')[0]
         date_str = (release / '.released-time').read_text()
-        released_date = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
+        date_match = re.match(r'\d+-\d+-\d+ \d+:\d+:\d+', date_str)
+        assert date_match is not None, f'Release {release!r} has invalid time {date_str!r}'
+        date_str = date_match[0]
+        released_date = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S').replace(tzinfo=pytz.utc)
+
+        if release.resolve() in published:
+            alive.add(release)
 
         if released_date >= time_threshold:
             alive.add(release)
@@ -425,7 +460,12 @@ def garbage_collect():
                 stdout=subprocess.PIPE
             )
 
-            for path in process.stdout.decode().splitlines():
+            if process.returncode != 0:
+                raise RuntimeError(f'Cannot calculate cache closure for {release}; refusing garbage collection')
+            result_paths = process.stdout.decode().splitlines()
+            if not result_paths:
+                raise RuntimeError(f'Empty cache closure for {release}; refusing garbage collection')
+            for path in result_paths:
                 closure.add(hash_part(path))
 
     logging.info(f'  - {len(closure)} narinfo files in closure')
@@ -459,10 +499,6 @@ def garbage_collect():
                 path.unlink()
             except:
                 pass
-            try:
-                (working_dir / STORE_DIR / narinfo['URL']).unlink()
-            except:
-                pass
 
     for path in (working_dir / STORE_DIR / 'nar').iterdir():
         if f'nar/{path.name}' in closure_nar:
@@ -477,6 +513,8 @@ def garbage_collect():
                 pass
 
     if DELETE_OLD:
+        for release in completed - alive:
+            shutil.rmtree(release)
         logging.info(f'  - {deleted_narinfo} narinfo files deleted')
         logging.info(f'  - {deleted_nar} nar files deleted')
     else:

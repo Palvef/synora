@@ -33,7 +33,7 @@ Job commands stay `/usr/lib/synora/scripts/<name>`.
 | `SYNORA_API` | manager API URL as seen from the job (`[worker].manager`; docker rewrites loopback to `172.17.0.1`) |
 | `SYNORA_PROXY` / `ALL_PROXY` / `HTTP(S)_PROXY` | assigned proxy |
 | `SYNORA_SIZE=` | bytes, printed on stdout when known |
-| `SYNORA_STATUS=success\|failed` | optional explicit outcome |
+| `SYNORA_STATUS=success\|success_with_warnings\|failed` | optional explicit outcome |
 | `MIRROR_BASE_URL` | rustup: public URL written into manifests |
 | `RUSTUP_TARGETS` | rustup: comma-separated rustc targets (default: Tier 1, no i686) |
 | `RUSTUP_GC` | rustup: nightly retention days (default 30) |
@@ -79,3 +79,30 @@ These scripts started as [tunasync-scripts](https://github.com/tuna/tunasync-scr
 from TUNA (Tsinghua University TUNA Association). Synora rewrites them to
 `SYNORA_*` environment variables and runs them in its own image. Thank you
 to TUNA and the tunasync-scripts authors and maintainers.
+
+## Channel and recipe mirrors
+
+The Nix channel port follows `tuna/tunasync-scripts` at
+`b7e131dc4a1c4711f84cbbe6c6168f0f95ac3fbc`. Its dedicated image includes the
+matching Nix 2.3.2 CLI and MinIO 5 API used by that script. Set
+`NIX_MIRROR_RETAIN_DAYS=14` (default) and `MIRROR_BASE_URL` to the public
+`/nix-channels` URL. Garbage collection retains current published channels and
+recent releases, aborts before deletion if closure calculation fails, and keeps
+partial downloads while an interrupted update resumes. Historical releases no
+longer referenced after the retention interval are removed. Current channels can
+therefore reference cache objects older than 14 days.
+
+The general image installs the PyBOMBS mirror helper pinned at
+`scateu/pybombs-mirror@d7a8a9925c0b91dc9695a31a07b62eff8546909e`.
+Run `pybombs.sh` with `MIRROR_BASE_URL` pointing to the public `/pybombs` URL.
+The wrapper generates Git HTTP indexes, checks that usable recipes were produced,
+and reports failed source URLs as warnings. No usable recipe repository is a
+failure. The upstream helper does not implement SVN mirroring; these recipes
+keep their original upstream URLs and are included in the warning report.
+
+Git repositories and complete rsync mirrors can use native Synora providers
+instead of wrapping the equivalent TUNA scripts. InfluxData RPM packages now use its
+canonical `stable/<architecture>/main` repository, with architectures discovered
+from the upstream index. APT suites, components and architectures are likewise
+discovered rather than inferred from OS release lists. RPM content is stored under
+`yum/stable-<architecture>`; old `yum/el*` directories are left in place.
