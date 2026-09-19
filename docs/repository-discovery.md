@@ -5,7 +5,7 @@ arrays. Failed or empty discovery aborts the job before package deletion.
 
 | Consumers | Discovery source |
 | --- | --- |
-| All `@ubuntu-lts` / `@debian-current` templates (Chef, GitLab, Wine, Proxmox, ROS, Adoptium, etc.) | Debian distro-info-data maintained release CSVs; release dates and support windows |
+| All `@ubuntu-lts` / `@debian-current` templates (Chef, GitLab, Wine, Proxmox, ROS, Adoptium, etc.) | Debian distro-info-data maintained release CSVs; release dates and rolling release counts (three Debian releases by default) |
 | All `@rhel-current` / `@fedora-current` templates | AlmaLinux major-release directory / Fedora Bodhi current Fedora releases, followed by upstream repomd probes |
 | Elastic | Official artifacts versions API; stable major branches |
 | MySQL | Upstream APT suites and Release components/architectures; YUM component and OS directories |
@@ -37,3 +37,6 @@ may still require retrying against a fresh manifest.
 
 Validation: `python3 -m unittest discover -s synora-scripts/tests`, shell syntax
 checks, and `cargo test -p httpfetch --lib`.
+
+APT deletion is suppressed when local Release files describe suites outside the
+current run, preserving packages referenced by retained distribution indexes.

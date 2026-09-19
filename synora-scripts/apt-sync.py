@@ -439,7 +439,12 @@ def main():
     if len(failed) > 0:
         logger.error(f"Failed APT repos of {args.base_url}: {failed}")
         sys.exit(1)
-    if args.delete or args.delete_dry_run:
+    retained_suites = {str(p.parent.relative_to(args.working_dir / 'dists'))
+                       for p in (args.working_dir / 'dists').rglob('Release')
+                       if '.tmp' not in p.parts} - set(os_list)
+    if retained_suites and (args.delete or args.delete_dry_run):
+        logger.warning('Keeping packages for suites outside this run: %s; skipping deletion', sorted(retained_suites))
+    elif args.delete or args.delete_dry_run:
         apt_delete_old_debs(args.working_dir, deb_set, args.delete_dry_run)
 
     if len(REPO_SIZE_FILE) > 0:

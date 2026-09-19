@@ -32,7 +32,7 @@ class DiscoveryTests(unittest.TestCase):
         response=Mock(text='version,codename,series,created,release,eol,eol-lts\n1,Old,old,2000-01-01,2000-01-01,2001-01-01,2002-01-01\n2,Current,current,2020-01-01,2020-01-01,,\n3,Future,future,2099-01-01,2099-01-01,,\n')
         discovery.distro_versions.cache_clear()
         with patch.object(discovery.requests,'get',return_value=response):
-            self.assertEqual(discovery.distro_versions('debian-current'),['current'])
+            self.assertEqual(discovery.distro_versions('debian-latest'),['current'])
         discovery.distro_versions.cache_clear()
     def test_rpm_inventory_does_not_mix_epel_into_fedora(self):
         response=Mock();response.json.return_value={'releases':[{'name':'F99','version':'99'},{'name':'EPEL12','version':'12'}]}

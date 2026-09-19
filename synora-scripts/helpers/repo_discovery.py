@@ -77,9 +77,8 @@ def distro_versions(template):
     rows=[row for row in csv.DictReader(io.StringIO(r.text)) if row.get('release') and row['release']<=today]
     if distro=='ubuntu':rows=[row for row in rows if 'LTS' in row['version']][-3:]
     else:
-        rows=[row for row in rows if (row.get('eol-lts') or row.get('eol') or '9999-12-31')>=today]
-        if template=='debian-latest':rows=rows[-1:]
-        elif template=='debian-latest2':rows=rows[-2:]
+        count={'debian-current':3,'debian-latest2':2,'debian-latest':1}[template]
+        rows=rows[-count:]
     values=[row['series'] for row in rows]
     if not values:raise RuntimeError(f'No maintained releases from {url}')
     return values
