@@ -449,7 +449,11 @@ impl Fetcher {
                     continue;
                 }
                 seen += 1;
-                remote.insert(rel_key.clone());
+                // Some upstream index builders repeat anchors for the same file.
+                // Scheduling both races on the shared .partial destination.
+                if !remote.insert(rel_key.clone()) {
+                    continue;
+                }
                 match entry.kind {
                     parser::EntryKind::Dir => {
                         if work.depth == 0 {
@@ -1338,6 +1342,28 @@ mod tests {
                 assert!(!storage.join("repodata/stale.xml").exists());
             }
         }
+    }
+
+    #[tokio::test]
+    async fn repeated_listing_anchors_download_each_destination_once() {
+        let mut mirror = TestMirror::new(&[("file.bin", "payload")]);
+        mirror.raw.insert("".into(), "<pre><a href=\"file.bin\">file.bin</a> 16-Aug-2026 10:00 7\n<a href=\"file.bin\">file.bin</a> 16-Aug-2026 10:00 7</pre>".into());
+        let base = spawn_server(mirror);
+        let stats = Fetcher::new()
+            .unwrap()
+            .sync(
+                &base,
+                "nginx",
+                &unique_dir(),
+                false,
+                2,
+                &CancellationToken::new(),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(stats.files_downloaded, 1);
+        assert_eq!(stats.files_failed, 0);
     }
 
     #[test]
