@@ -159,3 +159,18 @@ obsolete per-RHEL URLs. MongoDB retains HTTPS and missing RPM metadata recovery.
 Debug/test package filtering remains enabled. Narrowing scope does not forcibly
 remove still-published historical suites: shared-package cleanup keeps its
 existing integrity checks.
+
+To match the pinned TUNA aliases exactly, production jobs set:
+
+```toml
+env = [
+  "SYNC_RELEASES_UBUNTU_LTS=jammy,noble,resolute",
+  "SYNC_RELEASES_DEBIAN_CURRENT=bullseye,bookworm,trixie",
+  "SYNC_RELEASES_RHEL_CURRENT=9,10",
+  "SYNC_RELEASES_FEDORA_CURRENT=41,42",
+]
+```
+
+These settings replace alias expansion only; they do not widen wrapper scopes.
+If a setting is absent, that alias continues fetching its release list from
+upstream. An empty or malformed setting fails before synchronization.

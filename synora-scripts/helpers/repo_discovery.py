@@ -2,6 +2,7 @@
 import argparse
 import csv
 import io
+import os
 import datetime
 import xml.etree.ElementTree as ET
 import functools
@@ -79,8 +80,22 @@ def expand_path(base, pattern):
     if not paths: raise RuntimeError(f'No versions matched {pattern} at {base}')
     return [p.rstrip('/') for p in paths]
 
+def configured_releases(template):
+    """Optional per-job alias scope; absent settings retain upstream discovery."""
+    key = 'SYNC_RELEASES_' + template.lstrip('@').replace('-', '_').upper()
+    raw = os.environ.get(key)
+    if raw is None:
+        return None
+    values = list(dict.fromkeys(value.strip() for value in raw.split(',')))
+    pattern = r'[0-9]+' if template.lstrip('@') in ('rhel-current', 'fedora-current') else r'[a-z][a-z0-9-]*'
+    if not values or any(not re.fullmatch(pattern, value) for value in values):
+        raise ValueError(f'Invalid release list in {key}')
+    return values
+
 @functools.lru_cache(maxsize=8)
 def distro_versions(template):
+    configured = configured_releases(template)
+    if configured is not None: return configured
     distro='ubuntu' if template=='ubuntu-lts' else 'debian'
     url=f'https://salsa.debian.org/debian/distro-info-data/-/raw/main/{distro}.csv'
     r=requests.get(url,timeout=(30,60));r.raise_for_status()
@@ -96,6 +111,8 @@ def distro_versions(template):
 
 @functools.lru_cache(maxsize=4)
 def rpm_versions(template):
+    configured = configured_releases(template)
+    if configured is not None: return configured
     if template == '@fedora-current':
         r=requests.get('https://bodhi.fedoraproject.org/releases/',params={'state':'current'},timeout=(30,60));r.raise_for_status()
         values=sorted({str(v['version']) for v in r.json()['releases'] if str(v.get('version','')).isdigit() and str(v.get('name','')).startswith('F')},key=int)
