@@ -273,6 +273,7 @@ def main():
         conf.write(
             """
 [main]
+reposdir=/dev/null
 keepcache=0
 skip_if_unavailable=0
 """
@@ -303,6 +304,7 @@ skip_if_unavailable=0
 
         cmd_args = [
             "dnf",
+            "--disableplugin=local,system_upgrade",
             "reposync",
             "-c",
             conf.name,
