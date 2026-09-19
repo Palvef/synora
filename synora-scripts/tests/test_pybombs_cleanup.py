@@ -7,7 +7,7 @@ class CleanupTests(unittest.TestCase):
     def test_complete_inventory_removes_only_unreferenced_assets(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);(root/'git').mkdir()
-            (root/'recipes-origin.urls').write_text('git+https://example.test/org/current.git\n')
+            (root/'recipes-origin.urls').write_text('git+https://example.test/org/current.git/\n')
             (root/'git/org_current.git').mkdir();(root/'git/org_old.git').mkdir()
             self.assertEqual(cleanup(root),1)
             self.assertTrue((root/'git/org_current.git').exists())

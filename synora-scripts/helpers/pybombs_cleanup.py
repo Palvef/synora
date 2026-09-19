@@ -19,6 +19,7 @@ def cleanup(root):
         protocol, separator, url = line.strip().partition('+')
         if not separator or protocol not in ('git', 'wget', 'svn'):
             raise RuntimeError('Invalid PyBOMBS source inventory; cleanup refused')
+        url = url.rstrip('/')
         name = posixpath.basename(posixpath.dirname(url))+'_'+posixpath.basename(url)
         expected.add((protocol, name))
     if not expected:
