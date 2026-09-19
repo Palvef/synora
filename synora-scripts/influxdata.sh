@@ -17,15 +17,15 @@ export REPO_SIZE_FILE=/tmp/reposize.$RANDOM
 
 # =================== APT repos ===============================
 
-# Stable payloads plus the distribution aliases maintained by TUNA.
-"$apt_sync" --delete "${BASE_URL}/debian" stable main amd64,i386,armhf,arm64 "$DEBIAN_PATH"
-"$apt_sync" "${BASE_URL}/debian" @debian-current,@ubuntu-lts stable amd64,i386,armhf,arm64 "$DEBIAN_PATH"
+# Discover every published suite and its declared components/architectures.
+# This also preserves historical aliases without inventing missing distro codenames.
+"$apt_sync" --delete "${BASE_URL}/debian" @auto @auto @auto "$DEBIAN_PATH"
 ln -sTf debian "$UBUNTU_PATH"
 echo "Debian/Ubuntu finished"
 
 
 # =================== YUM/DNF repos ==========================
-"$yum_sync" "${BASE_URL}/stable/@{arch}/main/" stable influxdata x86_64 "stable-@{arch}" "$YUM_PATH"
+"$yum_sync" "${BASE_URL}/stable/@{arch}/main/" stable influxdata @auto "stable-@{arch}" "$YUM_PATH"
 echo "YUM finished"
 
 "${_here}/helpers/size-sum.sh" $REPO_SIZE_FILE --rm

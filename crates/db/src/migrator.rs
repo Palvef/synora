@@ -1,11 +1,11 @@
-//! Hand-rolled migration runner (spec §96): numbered `NNNN_*.sql` files run
+//! Hand-rolled migration runner: numbered `NNNN_*.sql` files run
 //! in order against either backend, tracked in `schema_migrations`.
 
 use crate::sqlite::{DbError, DbResult, Param};
 use crate::Db;
 use std::path::Path;
 
-/// Migrations shipped inside the binary (spec §96). The on-disk
+/// Migrations shipped inside the binary. The on-disk
 /// `migrations/` dir is an override for development; when it is missing —
 /// e.g. systemd services with CWD=/ — the embedded set runs instead.
 const EMBEDDED: &[(u64, &str)] = &[

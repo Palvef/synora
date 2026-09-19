@@ -1,8 +1,8 @@
-//! Rsync provider (spec §13): spawn rsync with argv (never shell-concat,
-//! spec §102), capture exit code + `--stats` output.
+//! Rsync provider: spawn rsync with an argument vector and capture its exit
+//! code and `--stats` output.
 //!
-//! `success_exit_codes` (23/24 = "done with transfer errors") count as
-//! success — tunasync convention, alignment decision.
+//! Configured `success_exit_codes` determine which partial transfers are
+//! accepted; the strict policy rejects exit 23 and permits exit 24.
 
 use crate::{ProviderError, SyncContext, SyncResult};
 use std::process::Stdio;
@@ -193,7 +193,7 @@ impl RsyncProvider {
         for pat in &self.exclude {
             cmd.arg(format!("--exclude={pat}"));
         }
-        // Absolute delete cap handed to rsync itself (spec §53): rsync
+        // Absolute delete cap handed to rsync itself: rsync
         // aborts with exit 25 when it would delete more, before touching
         // the mirror. The ratio/size checks still run in the engine.
         if let Some(max) = ctx.job.safety.max_delete_files {

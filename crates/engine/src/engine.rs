@@ -105,16 +105,16 @@ pub type WorkerPlanner = Arc<dyn Fn(&JobSpec) -> Option<String> + Send + Sync>;
 
 pub struct Engine {
     pub config_gate: tokio::sync::RwLock<()>,
-    /// Static daemon config: NOT hot-reloadable (spec §85). Reloadable job
+    /// Static daemon config: NOT hot-reloadable. Reloadable job
     /// definitions live in `live_jobs`.
     pub cfg: ResolvedConfig,
     pub store: Store,
     pub metrics: Arc<Metrics>,
     /// Live job definitions — swapped by `reload()`.
     live_jobs: std::sync::RwLock<HashMap<String, JobSpec>>,
-    /// Per-job mutex: serializes dispatch decisions (spec §8).
+    /// Per-job mutex: serializes dispatch decisions.
     job_locks: std::sync::RwLock<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
-    /// Global concurrency gate (spec §8).
+    /// Global concurrency gate.
     global_sem: Arc<tokio::sync::Semaphore>,
     /// Active runs per job (per-job concurrency gate).
     pub(crate) active: std::sync::Mutex<HashMap<String, usize>>,
@@ -124,7 +124,7 @@ pub struct Engine {
     config_source: std::sync::RwLock<Option<(PathBuf, CliOverrides)>>,
     /// Storage/snapshot runtime (None when no storage sections configured).
     pub run_storage: Option<RunStorageCtx>,
-    /// Consecutive-failure counters per job (alert dedup, spec §91).
+    /// Consecutive-failure counters per job (alert dedup).
     pub failure_streak: std::sync::Mutex<std::collections::HashMap<String, u32>>,
     /// Network routing (proxies/egress). Built when any proxy/egress config
     /// exists; None = pure direct mode.
@@ -409,7 +409,7 @@ impl Engine {
     }
 
     /// Dispatch one job: create a QUEUED run row. Serialized per job.
-    /// Dependencies (spec §93): a dep whose latest run is not Success marks
+    /// Dependencies: a dep whose latest run is not Success marks
     /// this run SKIPPED (a terminal status — it never executes).
     /// Queue a run. `forced` (operator-triggered) runs get priority 1 and
     /// jump ahead of the scheduled backlog.
@@ -493,7 +493,7 @@ impl Engine {
                 return Ok(existing.id);
             }
         }
-        // Manager mode: planner picks (None = stay QUEUED, visible, spec §8).
+        // Manager mode: planner picks (None = stay QUEUED, visible).
         // Standalone: everything runs on the local worker.
         let worker: Option<String> = {
             let planner = self.planner.read().unwrap_or_else(|e| e.into_inner());
@@ -549,7 +549,7 @@ impl Engine {
         Ok(())
     }
 
-    /// Send a webhook notification (spec §90) with alert dedup (spec §91):
+    /// Send a webhook notification with alert dedup:
     /// consecutive failures alert once after the threshold, then RECOVERED.
     pub async fn notify(&self, event: &str, job: Option<&str>, message: &str) {
         let Some(url) = self.cfg.notifications.webhook_url.clone() else {
@@ -565,7 +565,7 @@ impl Engine {
                 "sync_failed" => {
                     let n = streaks.entry(dedup_key.to_string()).or_insert(0);
                     *n += 1;
-                    // dedup: only alert once, at the threshold (spec §91)
+                    // dedup: only alert once, at the threshold
                     (
                         *n == self.cfg.notifications.alert_after_failures.max(1),
                         event,
@@ -650,7 +650,7 @@ impl Engine {
             .unwrap_or_else(|e| e.into_inner()) = Some((path, overrides));
     }
 
-    /// Hot reload (spec §85, Yuki's `yukictl reload` convention): re-read the
+    /// Hot reload (Yuki's `yukictl reload` convention): re-read the
     /// config, apply job/schedule changes, reject non-reloadable changes
     /// (db backend, listen address, tls, log dir) as a whole.
     pub async fn reload(&self) -> Result<usize, String> {
@@ -662,7 +662,7 @@ impl Engine {
             .clone()
             .ok_or_else(|| "no config source set (started without -c?)".to_string())?;
         let new_cfg = ConfigLoader::load(&path, &overrides).map_err(|e| e.to_string())?;
-        // Non-reloadable fields (spec §85).
+        // Non-reloadable fields.
         let old = &self.cfg;
         let reject = |field: &str, a: &dyn std::fmt::Debug, b: &dyn std::fmt::Debug| {
             Err(format!(
@@ -827,7 +827,7 @@ impl Engine {
         Ok(changed)
     }
 
-    /// Cancel a running run of `job` (spec §5 cancel path). The provider's
+    /// Cancel a running run of `job`. The provider's
     /// cancel token kills the child; the executor records CANCELLED.
     pub async fn stop_job(&self, job_name: &str) -> Result<(), String> {
         let token = self

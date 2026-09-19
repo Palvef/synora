@@ -425,6 +425,7 @@ def main():
     )
     parser.add_argument("--dry-run", action="store_true", help="discover and validate metadata without writing packages")
     args = parser.parse_args()
+    selection = Selection('APT', args.base_url)
 
     # generate lists of os codenames
     os_list = args.os_version.split(",")
@@ -450,9 +451,8 @@ def main():
         return lists
 
     component_lists = generate_list_for_oses(args.component, "component")
-    arch_lists = generate_list_for_oses(args.arch, "arch")
+    arch_lists = generate_list_for_oses(selection.architectures or args.arch, "arch")
 
-    selection = Selection()
     # Discover metadata before creating directories or deleting any old package.
     for i, suite in enumerate(os_list):
         if not selection.matches('VERSIONS', suite):

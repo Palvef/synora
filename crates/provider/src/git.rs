@@ -1,4 +1,4 @@
-//! Git mirror provider (spec §59): keep a local clone of a remote repository
+//! Git mirror provider: keep a local clone of a remote repository
 //! in sync. Default is a full `--mirror` clone (all refs, no checkout) —
 //! the right shape for serving mirrors; `branch` opts into a single-branch
 //! checkout instead. Updates are `remote update --prune` (mirror) or

@@ -1,11 +1,11 @@
 //! TOML document shapes. `[[jobs]]` entries are extracted per file (to keep
 //! their file:line), so `RootDoc` covers everything else: daemon, api, and
-//! the sections that are parsed but inert in P0/P1 (proxy/egress/storage/worker).
+//! proxy, egress, storage, and worker settings.
 
 use serde::Deserialize;
 use std::collections::HashMap;
 
-/// Integer seconds (spec §5: `timeout = 7200`) or human duration (spec §78: `"2h"`).
+/// Integer seconds (`timeout = 7200`) or human duration (`"2h"`).
 #[derive(Debug, Clone)]
 pub enum TomlDuration {
     Seconds(u64),
@@ -48,7 +48,7 @@ pub struct RootDoc {
     pub daemon: DaemonDoc,
     #[serde(default)]
     pub api: ApiDoc,
-    /// Parsed-but-inert sections (proxy/proxy_groups/egress/storage/worker).
+    /// Named proxy, proxy-group, egress, storage, and worker sections.
     #[serde(flatten)]
     pub extras: HashMap<String, toml::Value>,
 }
@@ -148,7 +148,7 @@ pub struct TokenDoc {
     pub permissions: Vec<String>,
 }
 
-/// TOML shape of one job table (spec §5/§78). Unknown fields are rejected.
+/// TOML shape of one job table. Unknown fields are rejected.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JobDoc {
@@ -184,7 +184,7 @@ pub struct JobDoc {
     pub docker_command: Vec<String>,
     // git
     pub branch: Option<String>,
-    // http (Phase 5)
+    // HTTP directory synchronization.
     pub parser: Option<String>,
     #[serde(default = "no")]
     pub delete: bool,
@@ -249,10 +249,10 @@ pub struct JobDoc {
     pub snapshot: SnapshotJobDoc,
     #[serde(default)]
     pub verify: VerifyDoc,
-    // P2+: cgroup limits (user-requested; tunasync parity)
+    // Per-job cgroup resource limits.
     pub memory_limit: Option<String>,
     pub cpu_limit: Option<f64>,
-    /// Dependencies: jobs that must have succeeded recently (spec §93).
+    /// Dependencies: jobs that must have succeeded recently.
     #[serde(default)]
     pub depends_on: Vec<String>,
 }

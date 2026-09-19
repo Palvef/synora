@@ -1,4 +1,4 @@
-//! REST DTOs + typed client (spec §46/§9). The worker talks to the manager
+//! REST DTOs + typed client. The worker talks to the manager
 //! exclusively through this crate; the wire format is the contract.
 
 use serde::{Deserialize, Serialize};
@@ -242,7 +242,7 @@ impl Client {
     }
 
     /// With a CA certificate to verify the manager's TLS (tunasync-style
-    /// `ca_cert`, spec §64).
+    /// `ca_cert`).
     pub fn new_with_ca(base: &str, token: &str, ca_pem: &[u8]) -> Result<Client, ApiError> {
         Self::build(base, token, Some(ca_pem))
     }

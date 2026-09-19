@@ -1,4 +1,4 @@
-//! `synora` — unified CLI (spec §45).
+//! `synora` — unified CLI.
 
 use clap::{Parser, Subcommand};
 use config::{CliOverrides, ConfigLoader, DbKind};
@@ -47,7 +47,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Validate configuration; errors report file:line (spec §44)
+    /// Validate configuration; errors report file:line
     Check {},
     /// Configuration subcommands
     Config {
@@ -62,7 +62,7 @@ enum Command {
     },
     /// Trigger one job now and wait for it to finish
     Run { job: String },
-    /// Trigger every job in a config `[groups.<name>]` group (spec §94)
+    /// Trigger every job in a config `[groups.<name>]` group
     RunGroup { group: String },
     /// Show job statuses and next run times
     Status {},
@@ -91,7 +91,7 @@ enum Command {
         #[arg(long)]
         token: Option<String>,
     },
-    /// Snapshot management for a job's storage (spec §35)
+    /// Snapshot management for a job's storage
     Snapshot {
         #[command(subcommand)]
         cmd: SnapshotCmd,
@@ -344,7 +344,7 @@ async fn cmd_start(config: Option<PathBuf>, db: Option<String>) -> Result<(), St
         Err(e) => tracing::warn!("{e}"),
     }
 
-    // Metrics endpoint (spec §36).
+    // Metrics endpoint.
     let metrics_engine = engine.clone();
     let listen = metrics_engine.cfg.api.listen;
     let metrics_task = tokio::spawn(async move {
@@ -440,7 +440,7 @@ async fn cmd_run(job: String, config: Option<PathBuf>) -> Result<(), String> {
     Ok(())
 }
 
-/// Run every job in a config group, in order (spec §94).
+/// Run every job in a config group, in order.
 async fn cmd_run_group(group: String, config: Option<PathBuf>) -> Result<(), String> {
     let (cfg, _) = load_config(config, None)?;
     let jobs = cfg
@@ -617,7 +617,7 @@ async fn cmd_stop(job: String, config: Option<PathBuf>) -> Result<(), String> {
     Ok(())
 }
 
-/// Snapshot provider for a job's storage (spec §35).
+/// Snapshot provider for a job's storage.
 fn snapshot_provider_for_job(
     cfg: &config::ResolvedConfig,
     job_name: &str,

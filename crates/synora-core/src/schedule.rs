@@ -1,4 +1,4 @@
-//! Schedule model + no-drift next-run computation (spec §6).
+//! Schedule model + no-drift next-run computation.
 //!
 //! The no-drift invariant: `next_run` is always computed from the wall clock
 //! (`schedule.next_after(now)`), never from "last run end + interval".
@@ -20,7 +20,7 @@ pub struct Schedule {
     pub kind: ScheduleKind,
 }
 
-/// All schedule kinds of spec §6.1–§6.4. `Manual`/`Startup` have no fixed
+/// Supported schedule kinds. `Manual`/`Startup` have no fixed
 /// next time: manual runs via `synora run`, startup fires on daemon boot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
@@ -141,8 +141,7 @@ fn weekly_next(
 }
 
 /// Next slot on the anchor grid strictly after `now`: anchor is the alignment
-/// point; run times are anchor + k*every. Immune to run duration and restarts
-/// (spec §6.5).
+/// point; run times are anchor + k*every. Immune to run duration and restarts.
 pub fn interval_next(
     anchor: OffsetDateTime,
     every: Duration,
@@ -400,7 +399,7 @@ pub fn parse_cron_expr(expr: &str) -> Result<String, String> {
     Ok(normalized)
 }
 
-/// Parse a human duration like "6h", "5m", "1h30m", "2d" (spec §6.4).
+/// Parse a human duration like "6h", "5m", "1h30m", "2d".
 pub fn parse_duration_human(s: &str) -> Result<Duration, String> {
     let mut total = Duration::ZERO;
     let mut num: u64 = 0;
@@ -446,7 +445,7 @@ pub fn parse_duration_human(s: &str) -> Result<Duration, String> {
     Ok(total)
 }
 
-/// Parse a clock time "HH:MM[:SS]" (spec §6.2).
+/// Parse a clock time "HH:MM[:SS]".
 pub fn parse_time_at(s: &str) -> Result<Time, String> {
     let with_secs = if s.split(':').count() == 2 {
         format!("{s}:00")
@@ -459,7 +458,7 @@ pub fn parse_time_at(s: &str) -> Result<Time, String> {
         .map_err(|e| format!("invalid time `{s}`: expected HH:MM[:SS] ({e})"))
 }
 
-/// Parse a weekday name, case-insensitive ("sunday".."saturday", spec §6.3).
+/// Parse a weekday name, case-insensitive ("sunday".."saturday").
 pub fn parse_weekday(s: &str) -> Result<Weekday, String> {
     match s.to_ascii_lowercase().as_str() {
         "sunday" | "sun" => Ok(Weekday::Sunday),

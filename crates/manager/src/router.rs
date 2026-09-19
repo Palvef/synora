@@ -1,4 +1,4 @@
-//! REST API surface (spec §46) + worker picker + TLS serving.
+//! REST API surface + worker picker + TLS serving.
 
 use crate::auth::{has_perm, require, AuthUser};
 use api::{
@@ -83,7 +83,7 @@ impl WorkerPicker {
         *self.snapshot.write().unwrap_or_else(|e| e.into_inner()) = map;
     }
 
-    /// Pick a worker for a job (spec §8/§10): explicit worker id, else a
+    /// Pick a worker for a job: explicit worker id, else a
     /// worker-group (label) member, else any worker whose labels cover the
     /// job's resource tags. Least-loaded first; workers at their cap are
     /// skipped. `None` = stay QUEUED (visible, no crash loop).
@@ -176,7 +176,7 @@ pub fn build(
     (router.with_state(state.clone()), state)
 }
 
-/// Native status JSON (spec §89).
+/// Native status JSON.
 async fn synora_json(State(state): State<AppState>) -> axum::Json<serde_json::Value> {
     axum::Json(serde_json::json!({
         "jobs": status_entries(&state).await,
@@ -398,7 +398,7 @@ async fn register(
     axum::Json(body): axum::Json<RegisterRequest>,
 ) -> Result<axum::Json<RegisterResponse>, StatusCode> {
     require(&auth, "runs.manage")?;
-    // Worker id: the requested name, or the token name (spec §9).
+    // Worker id: the requested name, or the token name.
     let worker_id = body
         .name
         .clone()
@@ -545,7 +545,7 @@ async fn heartbeat(
         &[("worker", worker_id.as_str())],
         body.jobs_running as f64,
     );
-    // Lifecycle gauge (spec §36): 1=ONLINE, 0=OFFLINE, 2=DRAINING, 3=MAINTENANCE.
+    // Lifecycle gauge: 1=ONLINE, 0=OFFLINE, 2=DRAINING, 3=MAINTENANCE.
     // Busy/idle is a separate dimension: synora_worker_jobs_running.
     state.engine.metrics.set_gauge(
         "synora_worker_status",
@@ -1060,7 +1060,7 @@ async fn unregister(
             return Err(StatusCode::FORBIDDEN);
         }
     }
-    // Only unregister when nothing is running on it (spec §11).
+    // Only unregister when nothing is running on it.
     if let Ok(runs) = state.engine.store.active_runs_of(&worker_id).await {
         if !runs.is_empty() {
             return Err(StatusCode::CONFLICT);
@@ -1512,7 +1512,7 @@ fn run_dto(run: db::store::RunRow) -> RunDTO {
 }
 
 // ---------------------------------------------------------------------------
-// Serving (plain HTTP or TLS / mTLS, tunasync-style, spec §64)
+// Serving (plain HTTP or TLS / mTLS, tunasync-style)
 // ---------------------------------------------------------------------------
 
 pub async fn serve(

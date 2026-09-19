@@ -1,11 +1,8 @@
-//! Sync providers (spec §12): the tools that actually move data.
+//! Sync providers: the tools that actually move data.
 //! Synora only orchestrates — rsync, two-stage-rsync, http, git, docker
 //! and script do the work.
 //!
-//! A concrete enum rather than `Box<dyn Trait>`: native async fn in traits
-//! fights `dyn` compatibility. The open provider SDK (spec §115) is a
-//! Phase 7 concern; when it lands, the enum arm becomes a
-//! `Custom(Box<dyn ...>)` or the trait gets boxed futures.
+//! Provider dispatch uses a concrete enum for the supported implementations.
 
 pub mod docker;
 pub mod git;
@@ -16,7 +13,7 @@ pub mod script;
 use tokio::io::AsyncReadExt;
 
 /// Spawn the child as its own process-group leader so the whole tree
-/// (shell + grandchildren) can be killed on cancel (spec §74).
+/// (shell + grandchildren) can be killed on cancel.
 /// Lightweight handle the engine provides; the provider attaches children.
 pub trait CgroupScopeRef: Send + Sync {
     fn attach(&self, pid: u32);
@@ -213,7 +210,7 @@ pub struct SyncContext {
     pub upstream: Option<String>,
     pub storage: PathBuf,
     pub worker: Option<String>,
-    /// Proxy / egress names (parsed, inert until Phase 3).
+    /// Configured proxy and egress names, with resolved connection settings below.
     pub proxy: Option<String>,
     pub egress: Option<String>,
     /// Parsed job (provider-specific config, hooks, safety...).
@@ -280,7 +277,7 @@ impl ResourceUsage {
 
 pub type UsageSink = std::sync::Arc<std::sync::Mutex<ResourceUsage>>;
 
-/// Result of one provider run (spec §17: size comes from the provider when it
+/// Result of one provider run (size comes from the provider when it
 /// knows it; from the script via SYNORA_SIZE=; else filesystem walk).
 #[derive(Debug, Clone, Default)]
 pub struct SyncResult {
@@ -338,7 +335,7 @@ pub enum ProviderError {
 }
 
 impl ProviderError {
-    /// Classify into the retry-relevant ErrorKind (spec §54).
+    /// Classify into the retry-relevant ErrorKind.
     pub fn kind(&self) -> ErrorKind {
         match self {
             ProviderError::Timeout => ErrorKind::Timeout,

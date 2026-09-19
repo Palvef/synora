@@ -1,4 +1,4 @@
-//! Hand-rolled Prometheus text-format registry (spec §36–§38).
+//! Hand-rolled Prometheus text-format registry.
 //! The spec fixes metric names, not a library; ~150 lines beats a dependency.
 //! Upgrade to the `prometheus` crate if high-cardinality needs arise.
 

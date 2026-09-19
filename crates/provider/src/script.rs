@@ -1,4 +1,4 @@
-//! Script provider (spec §16): run a configured command with the SYNORA_*
+//! Script provider: run a configured command with the SYNORA_*
 //! environment, and parse machine-readable result lines.
 //!
 //! On workers this runs inside `synora-scripts`. Standalone/tests without
@@ -15,7 +15,7 @@ pub struct ScriptProvider {
     pub env: Vec<String>,
 }
 
-/// Machine-readable lines parsed from provider output (spec §16).
+/// Machine-readable lines parsed from provider output.
 #[derive(Debug, Default)]
 struct ParsedOutput {
     size_hint: Option<u64>,
@@ -24,7 +24,7 @@ struct ParsedOutput {
 }
 
 /// Parse provider output lines: `SYNORA_SIZE=123`, `SYNORA_STATUS=success`,
-/// `SYNORA_MESSAGE=...` (spec §16).
+/// `SYNORA_MESSAGE=...`.
 fn parse_output(stdout: &[u8]) -> ParsedOutput {
     let mut out = ParsedOutput::default();
     let text = String::from_utf8_lossy(stdout);
@@ -170,7 +170,7 @@ impl ScriptProvider {
             ..Default::default()
         };
 
-        // Exit 0 = SUCCESS, non-zero/no-code = FAILED (spec §16).
+        // Exit 0 = SUCCESS, non-zero/no-code = FAILED.
         // SYNORA_STATUS can turn exit 0 into failure, but success must never
         // hide a real process failure.
         // Failures carry the script's output so it lands in the run log.

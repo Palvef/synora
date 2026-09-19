@@ -238,12 +238,12 @@ def main():
     check_args("os_version", os_list)
     component_list = args.component.split(",")
     check_args("component", component_list)
-    arch_list = args.arch.split(",")
+    selection = Selection('YUM', args.base_url)
+    arch_list = (selection.architectures or args.arch).split(",")
     check_args("arch", arch_list)
 
     logger.info(f"Configuration: {os_list=}, {component_list=}, {arch_list=}")
 
-    selection = Selection()
     failed = []
     missing_repositories = set()
     if not args.dry_run: args.working_dir.mkdir(parents=True, exist_ok=True)

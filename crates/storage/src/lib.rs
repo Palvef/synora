@@ -1,9 +1,9 @@
-//! Repository backends (spec §30–§31, §34, §104).
+//! Repository backends.
 //!
 //! [`StorageManager`] ensures a configured repository backend exists — a
 //! plain directory, a ZFS dataset or a Btrfs subvolume — optionally
 //! auto-creating it, returns its mountpoint path, and provides free-space
-//! checks for the job-run gate (spec §51).
+//! checks for the job-run gate.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -26,7 +26,7 @@ pub enum StorageError {
     Unsupported(String),
 }
 
-/// Manage repository backends (spec §30–§31, §34, §104).
+/// Manage repository backends.
 pub struct StorageManager {
     storages: HashMap<String, StorageConfig>,
 }
@@ -50,7 +50,7 @@ impl StorageManager {
     ///   `btrfs subvolume create <path>` (the subvol string is the path).
     ///
     /// `require_empty` errors when the target directory is non-empty.
-    /// Existing datasets/subvolumes are never destroyed (spec §104).
+    /// Existing datasets/subvolumes are never destroyed.
     pub async fn ensure(&self, name: &str) -> Result<PathBuf, StorageError> {
         let cfg = self.storages.get(name).ok_or(StorageError::NotFound)?;
         match &cfg.kind {
@@ -136,7 +136,7 @@ impl StorageManager {
         Ok(vfs.f_frsize * vfs.f_bavail)
     }
 
-    /// Check the configured min-free threshold (job-run gate, spec §51).
+    /// Check the configured min-free threshold (job-run gate).
     pub async fn check_min_free(
         &self,
         path: &Path,

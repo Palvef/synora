@@ -1,4 +1,4 @@
-//! Snapshot providers for ZFS / Btrfs and retention pruning (spec §32–§33).
+//! Snapshot providers for ZFS / Btrfs and retention pruning.
 //!
 //! CLI invocations are thin wrappers over pure parsers, so the whole
 //! retention logic is testable without the zfs/btrfs binaries (which are
@@ -23,7 +23,7 @@ pub trait SnapshotProvider: Send + Sync {
     fn create(&self, name: &str) -> Result<SnapshotInfo, SnapshotError>;
     fn delete(&self, name: &str) -> Result<(), SnapshotError>;
     fn list(&self) -> Result<Vec<SnapshotInfo>, SnapshotError>;
-    /// Restore the dataset/subvolume to this snapshot (spec §35).
+    /// Restore the dataset/subvolume to this snapshot.
     fn rollback(&self, name: &str) -> Result<(), SnapshotError>;
 }
 
@@ -108,7 +108,7 @@ impl SnapshotProvider for BtrfsSnapshotProvider {
             &["subvolume", "snapshot", "-r", sv.as_str(), target.as_str()],
         )?;
         // Btrfs snapshots carry no creation timestamp: 0 = unknown, and
-        // pruning falls back to the timestamp in the name (spec §33).
+        // pruning falls back to the timestamp in the name.
         Ok(SnapshotInfo {
             name: name.to_string(),
             created_at: 0,
@@ -230,7 +230,7 @@ fn exchange_paths(live: &Path, prepared: &Path) -> Result<(), SnapshotError> {
     Ok(())
 }
 
-/// Snapshot name convention (spec §32): synora-YYYYMMDD-HHMMSS.
+/// Snapshot name convention: synora-YYYYMMDD-HHMMSS-UUID.
 pub fn snapshot_name(now: OffsetDateTime) -> String {
     let timestamp = now
         .format(&time::macros::format_description!(
@@ -240,7 +240,7 @@ pub fn snapshot_name(now: OffsetDateTime) -> String {
     format!("{timestamp}-{}", synora_core::RunId::new())
 }
 
-/// Retention pruning (spec §33): keep the newest N snapshots in each bucket.
+/// Retention pruning: keep the newest N snapshots in each bucket.
 /// Buckets: last (everything), daily (first snapshot per calendar day),
 /// weekly (per ISO week), monthly (per calendar month). The kept set is the
 /// union; returns the names to DELETE. Snapshots that don't match the
@@ -386,7 +386,7 @@ fn snapshot_name_from_path(path: &str) -> Option<String> {
     matches_synora(cand).then(|| cand.to_string())
 }
 
-/// Snapshot path for Btrfs: a read-only sibling `<subvol>-<name>` (spec §32).
+/// Snapshot path for Btrfs: a read-only sibling `<subvol>-<name>`.
 fn snapshot_path(subvol: &Path, name: &str) -> PathBuf {
     PathBuf::from(format!("{}-{}", subvol.display(), name))
 }

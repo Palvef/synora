@@ -1,4 +1,4 @@
-//! Config loading pipeline (spec §42–§44):
+//! Config loading pipeline:
 //! defaults → main TOML → included TOMLs (in listed order, later wins)
 //! → env `SYNORA_*` → CLI overrides → validate → `ResolvedConfig`.
 //!
@@ -29,7 +29,7 @@ pub struct ResolvedConfig {
     pub daemon: DaemonConfig,
     pub api: ApiConfig,
     pub jobs: Vec<JobSpec>,
-    /// Typed P2+ sections.
+    /// Validated network, storage, and worker configuration.
     pub proxies: HashMap<String, ProxyConfig>,
     pub proxy_groups: HashMap<String, ProxyGroupConfig>,
     pub egresses: Vec<EgressConfig>,
@@ -44,7 +44,7 @@ pub struct ResolvedConfig {
     pub extras: HashMap<String, toml::Value>,
 }
 
-/// One proxy definition (spec §20/§22): HTTP forward proxy, or a command
+/// One proxy definition: HTTP forward proxy, or a command
 /// that reports liveness, or plain direct.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProxyConfig {
@@ -85,7 +85,7 @@ pub struct ProxyGroupConfig {
 pub struct EgressConfig {
     pub name: String,
     pub address: std::net::IpAddr,
-    /// Optional TCP probe target (spec §63), e.g. "1.1.1.1:443".
+    /// Optional TCP probe target, e.g. "1.1.1.1:443".
     pub probe: Option<String>,
 }
 
@@ -126,7 +126,7 @@ pub struct CgroupConfig {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct NotificationConfig {
     pub webhook_url: Option<String>,
-    /// Consecutive failures before the first alert (spec §91).
+    /// Consecutive failures before the first alert.
     pub alert_after_failures: u32,
 }
 
@@ -358,7 +358,7 @@ fn load_file(
 
 /// Expand `${VAR}` before parsing; `$${` escapes to a literal `${`, `$$` to `$`.
 /// Comments are skipped (no expansion inside `# ...`). Missing variables fail
-/// with the file:line of the occurrence (spec §65).
+/// with the file:line of the occurrence.
 ///
 /// The scanner tracks basic/literal strings so `#` inside a quoted value is
 /// not mistaken for a comment. TOML multiline strings ("""/''') are treated as
@@ -566,7 +566,7 @@ fn extract_jobs(
             });
         }
     }
-    // Bare job table: the root itself is a job (spec §78 single-job file).
+    // Bare job table: the root itself is a single job.
     // Any unexpected extra section in the same file surfaces via
     // `deny_unknown_fields` when deserializing the JobDoc.
     if doc.as_table().contains_key("provider") {
@@ -794,7 +794,7 @@ fn resolve(root: &RootDoc, jobs: Vec<JobEntry>) -> Result<ResolvedConfig, Config
         status_format: root.api.status_format.clone(),
     };
 
-    // jobs: resolve each, reject duplicate names (spec §44)
+    // jobs: resolve each, reject duplicate names
     let mut seen: HashMap<String, (String, usize)> = HashMap::new();
     let mut resolved = Vec::new();
     for entry in jobs {
@@ -1658,7 +1658,7 @@ fn resolve_provider(
     }
 }
 
-/// Fixed whitelist of env overrides (spec §43).
+/// Fixed whitelist of env overrides.
 fn apply_env_overrides(cfg: &mut ResolvedConfig) -> Result<(), ConfigError> {
     if let Ok(v) = std::env::var("SYNORA_MAX_CONCURRENCY") {
         cfg.daemon.max_concurrency = v.parse::<u32>().map_err(|_| {

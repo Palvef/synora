@@ -54,8 +54,7 @@ TIMEOUT = 60
 
 working_dir = Path(WORKING_DIR)
 
-# `nix copy` uses a cache database
-# TODO Should we expose this directory?
+# Keep the `nix copy` cache database under the repository's private cache directory.
 os.environ['XDG_CACHE_HOME'] = str((working_dir / '.cache').resolve())
 
 nix_store_dest = f'file://{(working_dir / STORE_DIR).resolve()}'

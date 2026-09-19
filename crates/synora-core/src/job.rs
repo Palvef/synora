@@ -17,7 +17,7 @@ pub const RUN_LEASE_SECS: i64 = 300;
 /// expiry purposes, even if a lease row was not refreshed.
 pub const WORKER_HEARTBEAT_GRACE_SECS: i64 = 90;
 
-/// Lifecycle of a job / run, per spec §5.
+/// Lifecycle of a job / run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum JobStatus {
@@ -34,9 +34,9 @@ pub enum JobStatus {
     Retrying,
     Cancelling,
     Cancelled,
-    /// Lease expired while a worker was supposed to hold it (spec §29).
+    /// Lease expired while a worker was supposed to hold it.
     Lost,
-    /// Dependency failed or didn't run — this run never started (spec §93).
+    /// Dependency failed or didn't run — this run never started.
     Skipped,
 }
 
@@ -98,7 +98,7 @@ impl JobStatus {
     }
 }
 
-/// Classified failure cause — decides whether a retry makes sense (spec §54).
+/// Classified failure cause — decides whether a retry makes sense.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorKind {
@@ -111,7 +111,7 @@ pub enum ErrorKind {
     ConfigError,
 }
 
-/// Unique id of one execution of a job (spec §48).
+/// Unique id of one execution of a job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct RunId(pub Uuid);
 
@@ -133,12 +133,12 @@ impl Default for RunId {
     }
 }
 
-/// Which sync tool actually moves the data (spec §12). Synora only orchestrates.
+/// Which sync tool actually moves the data. Synora only orchestrates.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum ProviderConfig {
     Rsync {
-        /// Extra rsync arguments appended after the defaults (spec §13).
+        /// Extra rsync arguments appended after the defaults.
         #[serde(default)]
         options: Vec<String>,
         /// `--exclude=PATTERN` entries (tunasync `exclude` config).
@@ -146,14 +146,14 @@ pub enum ProviderConfig {
         exclude: Vec<String>,
     },
     Script {
-        /// Path of the script/command to run (spec §16).
+        /// Path of the script/command to run.
         command: String,
         /// Extra KEY=VALUE environment lines (same as docker `env`).
         #[serde(default)]
         env: Vec<String>,
     },
     Docker {
-        /// Image to run (spec §18).
+        /// Image to run.
         image: String,
         /// Additional `docker run` arguments before mounts/environment.
         #[serde(default)]
@@ -164,7 +164,7 @@ pub enum ProviderConfig {
         /// "host:container" volume mappings.
         #[serde(default)]
         volumes: Vec<String>,
-        /// Keep the container after exit for debugging (spec §18).
+        /// Keep the container after exit for debugging.
         #[serde(default)]
         keep_container: bool,
         /// docker run --network. None/empty = daemon default (bridge).
@@ -194,7 +194,7 @@ pub enum ProviderConfig {
         stage1_profile: String,
     },
     Http {
-        /// Directory-listing parser name (spec §14): nginx|apache|caddy|s3|
+        /// Directory-listing parser name: nginx|apache|caddy|s3|
         /// directory-listing|fallback.
         parser: String,
         /// Delete local files absent from the index (like rsync --delete).
@@ -213,7 +213,7 @@ pub enum ProviderConfig {
     },
 }
 
-/// What to do when a scheduled time was missed because the machine was offline (spec §7).
+/// What to do when a scheduled time was missed because the machine was offline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum MisfirePolicy {
@@ -222,7 +222,7 @@ pub enum MisfirePolicy {
     RunNext,
 }
 
-/// What to do when a worker holding a run goes away (spec §29).
+/// What to do when a worker holding a run goes away.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OnWorkerLost {
@@ -230,7 +230,7 @@ pub enum OnWorkerLost {
     Fail,
 }
 
-/// Where repository size numbers come from (spec §58).
+/// Where repository size numbers come from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StatisticsMode {
@@ -238,7 +238,7 @@ pub enum StatisticsMode {
     Filesystem,
 }
 
-/// Shell hooks around a run (spec §50). Commands run via the same executor as scripts.
+/// Shell hooks around a run. Commands run via the same executor as scripts.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hooks {
     #[serde(default)]
@@ -251,7 +251,7 @@ pub struct Hooks {
     pub on_failure: Vec<String>,
 }
 
-/// Dangerous-sync thresholds (spec §53). Evaluated after sync runs report
+/// Dangerous-sync thresholds. Evaluated after sync runs report
 /// deletion counts; the executor blocks runs whose deletions would breach
 /// them (needs provider support — rsync --stats reports deletions).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -261,7 +261,7 @@ pub struct Safety {
     pub max_size_drop_ratio: Option<f64>,
 }
 
-/// When snapshots are taken around a run (spec §32).
+/// When snapshots are taken around a run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SnapshotPolicy {
@@ -282,7 +282,7 @@ pub enum SnapshotFailure {
     Ignore,
 }
 
-/// Post-sync verification (spec §56): only a verified success can produce an
+/// Post-sync verification: only a verified success can produce an
 /// after-success snapshot.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct VerifyConfig {
@@ -293,7 +293,7 @@ pub struct VerifyConfig {
     pub command: Option<String>,
 }
 
-/// Snapshot retention buckets (spec §33).
+/// Snapshot retention buckets.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RetentionPolicy {
     pub keep_last: Option<u32>,
@@ -302,8 +302,7 @@ pub struct RetentionPolicy {
     pub keep_monthly: Option<u32>,
 }
 
-/// Fully resolved job definition. `proxy`/`egress` are parsed but inert in P0/P1
-/// (network egress selection arrives in Phase 3).
+/// Fully resolved job definition used by scheduling and execution.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JobSpec {
     pub name: String,
@@ -326,9 +325,9 @@ pub struct JobSpec {
     /// the actual path is then `<storage mountpoint>/<job storage>`.
     #[serde(default)]
     pub storage_name: Option<String>,
-    /// Proxy / proxy-group name (parsed, inert until Phase 3).
+    /// Proxy or proxy-group name resolved when the run is dispatched.
     pub proxy: Option<String>,
-    /// Egress / egress-group name — the source address to bind (Phase 3).
+    /// Egress or egress-group name used to select the source address.
     pub egress: Option<String>,
     /// Address family for the sync connection: ipv4 | ipv6 | any.
     /// Mirror sync uses the machine's direct network by default; proxies are
@@ -352,9 +351,9 @@ pub struct JobSpec {
     /// IANA timezone name, e.g. "Asia/Shanghai". Internal times stay UTC.
     pub timezone: String,
     pub statistics: StatisticsMode,
-    /// Resource tags the worker must have in its labels (spec §8).
+    /// Resource tags the worker must have in its labels.
     pub resources: Vec<String>,
-    /// Higher runs first (spec §92).
+    /// Higher runs first.
     pub priority: i32,
     pub schedule: Schedule,
     pub hooks: Hooks,
@@ -364,14 +363,14 @@ pub struct JobSpec {
     pub memory_limit: Option<u64>,
     /// cgroup CPU limit in cores (docker --cpus).
     pub cpu_limit: Option<f64>,
-    /// Jobs that must have succeeded recently for this job to run (spec §93).
+    /// Jobs that must have succeeded recently for this job to run.
     /// A failed/missing dependency marks the run SKIPPED.
     pub depends_on: Vec<String>,
-    /// Snapshot timing (spec §32).
+    /// Snapshot timing.
     pub snapshot_policy: SnapshotPolicy,
     #[serde(default)]
     pub snapshot_failure: SnapshotFailure,
-    /// Post-sync verification (spec §56).
+    /// Post-sync verification.
     pub verify: VerifyConfig,
 }
 

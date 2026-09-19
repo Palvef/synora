@@ -12,8 +12,8 @@ export REPO_SIZE_FILE=/tmp/reposize.$RANDOM
 APT_PATH="${BASE_PATH}"
 
 # =================== APT repos ===============================
-# Match TUNA distro families; resolve the maintained releases dynamically.
-"$apt_sync" --delete "${BASE_URL%/}" @ubuntu-lts,@debian-current main,non-free amd64,i386 "${APT_PATH}"
+# The upstream directory index is disabled; discover supported suites from xanmod.org.
+"$apt_sync" --delete "${BASE_URL%/}" @xanmod @auto @auto "${APT_PATH}"
 echo "APT finished"
 
 "${_here}/helpers/size-sum.sh" $REPO_SIZE_FILE --rm

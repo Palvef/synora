@@ -1,4 +1,4 @@
-//! `synora-worker` — the agent that executes runs (spec §9): registers with
+//! `synora-worker` — the agent that executes runs: registers with
 //! the manager, heartbeats every 15s, claims assigned runs, executes them
 //! with the same provider machinery as the standalone engine, reports back.
 //! Pull model: no inbound listener (NAT-friendly).
@@ -60,7 +60,7 @@ struct Running {
     usage: provider::UsageSink,
 }
 
-/// toml::Value → serde_json::Value (our inert sections are TOML).
+/// Convert TOML worker configuration into its JSON representation.
 fn toml_to_json(v: toml::Value) -> serde_json::Value {
     match v {
         toml::Value::String(s) => serde_json::Value::String(s),
@@ -193,7 +193,7 @@ async fn main() -> Result<(), String> {
         }
     }
 
-    // SIGTERM/SIGINT: drain — finish current runs, unregister, exit (spec §11).
+    // SIGTERM/SIGINT: drain — finish current runs, unregister, exit.
     {
         let shutdown2 = shutdown.clone();
         let client2 = client.clone();

@@ -1,4 +1,4 @@
-//! `synora-manager` — distributed control plane (spec §9/§46): scheduler +
+//! `synora-manager` — distributed control plane: scheduler +
 //! REST API + worker registry + lease reaper. DB: SQLite by default,
 //! PostgreSQL via `[daemon.db] kind = "postgres"`.
 
@@ -83,7 +83,7 @@ async fn main() -> Result<(), String> {
     engine.set_config_source(path.clone(), overrides);
     engine.sync_config().await?;
 
-    // Worker picker: explicit worker / worker group / labels+capacity (spec §8/§10).
+    // Worker picker: explicit worker / worker group / labels+capacity.
     let picker = router::WorkerPicker::new(engine.clone());
     let picker_clone = picker.clone();
     engine.set_planner(move |job| picker_clone.pick(job));
@@ -115,7 +115,7 @@ async fn main() -> Result<(), String> {
     }
 
     // Periodic refresh: worker snapshot + reaper (lease expiry → LOST,
-    // heartbeat timeout → OFFLINE, spec §28–§29).
+    // heartbeat timeout → OFFLINE).
     let reaper_engine = engine.clone();
     let reaper_picker = picker.clone();
     let reaper_task = tokio::spawn(async move {
@@ -171,7 +171,7 @@ async fn main() -> Result<(), String> {
                 )
                 .await;
             // QUEUED runs assigned to workers that are no longer ONLINE wait
-            // forever otherwise — unassign them for re-dispatch (spec §28).
+            // forever otherwise — unassign them for re-dispatch.
             let _ = reaper_engine
                 .store
                 .db()
@@ -182,7 +182,7 @@ async fn main() -> Result<(), String> {
                     &[],
                 )
                 .await;
-            // Worker lifecycle gauges (spec §36).
+            // Worker lifecycle gauges.
             if let Ok(rows) = reaper_engine.store.list_workers().await {
                 for row in &rows {
                     let cell = |n: &str| row.iter().find(|(k, _)| k == n).map(|(_, v)| v.clone());
@@ -349,8 +349,8 @@ async fn main() -> Result<(), String> {
                 }
             }
             reaper_picker.refresh().await;
-            // Re-dispatch unassigned QUEUED runs now that workers are online
-            // (spec §28): runs queued while no worker was up, or unassigned
+            // Re-dispatch unassigned QUEUED runs now that workers are online:
+            // runs queued while no worker was up, or unassigned
             // above, must not wait forever.
             if let Ok(queued) = reaper_engine.store.unassigned_runs().await {
                 for run in queued {

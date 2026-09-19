@@ -1,4 +1,4 @@
-//! PostgreSQL backend (spec §26): tokio-postgres, optional — the Manager
+//! PostgreSQL backend: tokio-postgres, optional — the Manager
 //! defaults to SQLite; PG is for high-concurrency fleets. SQL written for
 //! SQLite (`?` placeholders) is rewritten to `$n` on the fly.
 

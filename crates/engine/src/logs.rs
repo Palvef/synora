@@ -75,7 +75,7 @@ fn prune_daily_logs(dir: &Path) {
     }
 }
 
-/// Recursive file-size walk (statistics = "filesystem", spec §58).
+/// Recursive file-size walk (statistics = "filesystem").
 /// Does not follow symlinks.
 pub fn walk_size(root: &Path) -> u64 {
     walk(root).1

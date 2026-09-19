@@ -1,4 +1,4 @@
-//! Bearer-token auth + RBAC permission keys (spec §64).
+//! Bearer-token auth + RBAC permission keys.
 //! Roles: admin / operator / viewer, each with default permission keys;
 //! explicit `permissions` on a token extend the role's set.
 
@@ -50,8 +50,7 @@ fn find_token<'a>(cfg: &'a ApiConfig, token: &str) -> Option<&'a ApiToken> {
         .find(|t| constant_time_eq(t.token.as_bytes(), token.as_bytes()))
 }
 
-/// Constant-time byte comparison (spec §64 — token compares must not leak
-/// via early exit).
+/// Compare equal-length tokens without exiting at the first differing byte.
 pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;

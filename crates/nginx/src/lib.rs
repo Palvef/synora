@@ -1,4 +1,4 @@
-//! Nginx directory-index parser (spec §15): autoindex and fancyindex HTML →
+//! Nginx directory-index parser: autoindex and fancyindex HTML →
 //! `RemoteEntry` list. Parser is decoupled from any sync logic (tsumugu's
 //! parser-crate pattern, alignment decision).
 
@@ -15,7 +15,7 @@ pub enum EntryKind {
     Symlink,
 }
 
-/// One entry of a directory listing (spec §14).
+/// One entry of a directory listing.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RemoteEntry {
     pub path: String,

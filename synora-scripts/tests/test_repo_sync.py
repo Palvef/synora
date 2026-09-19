@@ -15,30 +15,6 @@ def module(name):
 
 class DiscoveryTests(unittest.TestCase):
     def tearDown(self): discovery.directories.cache_clear();discovery.release_fields.cache_clear()
-    def test_explicit_release_aliases_do_not_fetch(self):
-        discovery.distro_versions.cache_clear(); discovery.rpm_versions.cache_clear()
-        try:
-            with patch.dict('os.environ', {'SYNC_RELEASES_UBUNTU_LTS': 'jammy,noble,resolute', 'SYNC_RELEASES_RHEL_CURRENT': '9,10', 'SYNC_RELEASES_FEDORA_CURRENT': '41,42'}, clear=True), patch.object(discovery.requests, 'get') as fetch:
-                self.assertEqual(discovery.distro_versions('ubuntu-lts'), ['jammy','noble','resolute'])
-                self.assertEqual(discovery.rpm_versions('@rhel-current'), ['9','10'])
-                self.assertEqual(discovery.rpm_versions('@fedora-current'), ['41','42'])
-                fetch.assert_not_called()
-        finally:
-            discovery.distro_versions.cache_clear(); discovery.rpm_versions.cache_clear()
-
-    def test_unconfigured_release_aliases_keep_discovery(self):
-        discovery.rpm_versions.cache_clear()
-        try:
-            with patch.dict('os.environ', {}, clear=True), patch.object(discovery, 'directories', return_value=['8','9','10','11']):
-                self.assertEqual(discovery.rpm_versions('@rhel-current'), ['8','9','10','11'])
-        finally:
-            discovery.rpm_versions.cache_clear()
-
-    def test_release_override_rejects_empty_or_unsafe_scope(self):
-        for raw in ('', '9,,10', '../9', '9/*'):
-            with patch.dict('os.environ', {'SYNC_RELEASES_RHEL_CURRENT': raw}, clear=True), self.assertRaises(ValueError):
-                discovery.configured_releases('@rhel-current')
-
     def test_selection_defaults_and_exclusion_precedence(self):
         from repo_selection import Selection
         with patch.dict('os.environ', {}, clear=True):

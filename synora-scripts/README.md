@@ -13,7 +13,7 @@ explicit docker job:
 ```toml
 provider = "docker"
 image = "synora-scripts:latest"
-docker_command = ["/usr/lib/synora/scripts/rubygems.sh"]
+docker_command = ["/usr/lib/synora/scripts/mysql.sh"]
 ```
 
 Tunasync `command` + `docker_image` jobs keep this docker form
@@ -53,10 +53,10 @@ generate an ftpsync config from `SYNORA_UPSTREAM` and `SYNORA_STORAGE`.
 
 ## Image
 
-`synora-scripts/Dockerfile` is the image. rustup-mirror is built from
-[jiegec/rustup-mirror](https://github.com/jiegec/rustup-mirror); the binary
-is not committed. TUNA-only helpers such as `rustup-tuna-proxy.py` are not
-shipped.
+`synora-scripts/Dockerfile` builds the general script runtime. Dedicated
+RubyGems, Rustup, Nix, Yukina, Shadowmire, and ftpsync runtimes are described in
+[deploy/docker](../deploy/docker/README.md). TUNA-only helpers such as
+`rustup-tuna-proxy.py` are not shipped.
 
 ```sh
 docker build -t synora-scripts:latest synora-scripts
@@ -70,8 +70,9 @@ Apt stays direct. Optional HTTPS fetch proxy for git/cargo/gem/pip/curl:
 scripts/build-synora-scripts-image.sh --proxy "$HTTPS_PROXY"
 ```
 
-The image includes git, ftpsync (archvsync), python3, dnf, createrepo_c,
-awscli, `repo`, rubygems-mirror, and rustup-mirror.
+The general image includes git, Python, dnf, createrepo_c, `repo`, and
+the shared synchronization scripts. Specialized tools live in their dedicated
+images.
 
 ## Acknowledgements
 
@@ -127,50 +128,25 @@ fallback. `MONGO_RPM_THREADS` controls recovery downloads (default 4, maximum 16
 MongoDB also attempts both APT families even when YUM fails, and keeps existing
 x86_64 repository names while giving other architectures separate directories.
 
-## TUNA APT/YUM scope
+## Architecture overrides in job configuration
 
-The following production wrappers follow the architecture and version selections
-in [tunasync-scripts at b7e131d](https://github.com/tuna/tunasync-scripts/tree/b7e131dc4a1c4711f84cbbe6c6168f0f95ac3fbc).
-Architecture names are specific to each APT/RPM invocation, not a global union.
-
-| Wrapper | APT architectures | RPM architectures | Version scope |
-|---|---|---|---|
-| MongoDB | Ubuntu: amd64,i386,arm64; Debian: amd64,i386 | x86_64 | MongoDB 4.2,4.4,5.0,6.0,7.0,8.0; Ubuntu LTS, current Debian/RHEL |
-| MySQL | amd64,i386 | x86_64,aarch64 | 8.0,8.4 LTS and tools/connectors; Ubuntu LTS, current Debian/RHEL |
-| InfluxData | amd64,i386,armhf,arm64 | x86_64 | stable payloads and current Debian/Ubuntu LTS aliases |
-| Elastic | amd64,i386 | x86_64 | 6.x,7.x,8.x,9.x |
-| LLVM | amd64,arm64 | — | jammy,noble,resolute,bullseye,bookworm,trixie; toolchain suites fetched from each distribution |
-| XanMod | amd64,i386 | — | Ubuntu LTS and current Debian; main,non-free |
-| Mozilla | all,amd64,arm64 | — | mozilla |
-| Grafana | amd64,armhf,arm64 | x86_64 | stable,beta |
-| Termux | aarch64,arm,i686,x86_64 | — | main,x11,root repositories |
-| Proxmox | amd64 | — | current Debian |
-| VirtualBox | amd64,i386 | x86_64 | current Debian/RHEL and Ubuntu LTS |
-| Adoptium | amd64,armhf,arm64 | x86_64,aarch64 | current Debian/RHEL/Fedora and Ubuntu LTS |
-
-Distro aliases still resolve dynamically. Helpers retain `@auto` discovery for
-repositories without an explicit version selection. Explicit product scopes can
-be overridden with comma-separated `MONGO_VERSIONS`, `MYSQL_APT_REPOS`,
-`MYSQL_YUM_REPOS`, `ELASTIC_MAJORS`, or space-separated `LLVM_DISTROS`.
-Existing `SYNC_*` include/exclude filters further restrict these scopes.
-
-InfluxData uses its repaired `/stable/<arch>/main/` RPM endpoint instead of the
-obsolete per-RHEL URLs. MongoDB retains HTTPS and missing RPM metadata recovery.
-Debug/test package filtering remains enabled. Narrowing scope does not forcibly
-remove still-published historical suites: shared-package cleanup keeps its
-existing integrity checks.
-
-To match the pinned TUNA aliases exactly, production jobs set:
+Wrappers keep their upstream version discovery. Select production architectures
+through the job's `env` instead of editing or pinning versions in scripts:
 
 ```toml
+image = "synora-scripts:latest"
 env = [
-  "SYNC_RELEASES_UBUNTU_LTS=jammy,noble,resolute",
-  "SYNC_RELEASES_DEBIAN_CURRENT=bullseye,bookworm,trixie",
-  "SYNC_RELEASES_RHEL_CURRENT=9,10",
-  "SYNC_RELEASES_FEDORA_CURRENT=41,42",
+  "SYNC_APT_ARCHES=amd64,i386,arm64",
+  "SYNC_YUM_ARCHES=x86_64",
+  'SYNC_APT_ARCHES_BY_PATH={"/apt/ubuntu":"amd64,i386,arm64","/apt/debian":"amd64,i386"}',
 ]
 ```
 
-These settings replace alias expansion only; they do not widen wrapper scopes.
-If a setting is absent, that alias continues fetching its release list from
-upstream. An empty or malformed setting fails before synchronization.
+`SYNC_APT_ARCHES` and `SYNC_YUM_ARCHES` replace the architecture argument passed
+by their wrapper. An exact upstream URL-path match in the corresponding
+`*_BY_PATH` JSON object takes priority; trailing slashes are ignored. Without
+an override, the wrapper's default (including `@auto` discovery) remains in use.
+Existing `SYNC_ARCHES` / `SYNC_EXCLUDE_ARCHES` filters further restrict the list.
+Versions remain automatic unless explicitly restricted with `SYNC_VERSIONS` or
+`SYNC_EXCLUDE_VERSIONS`. Architecture overrides preserve unselected local content
+during cleanup, avoiding deletion of packages shared with retained suites.

@@ -1,4 +1,4 @@
-//! Run executor, split in two (spec §74):
+//! Run executor, split in two:
 //! - `run_once`: the worker-side part — provider + hooks + local logs. Used
 //!   by the standalone engine AND by remote workers (which then report the
 //!   result to the manager over the API).
@@ -309,13 +309,13 @@ async fn run_once_inner(
         ));
     }
 
-    // Storage backend (dir / zfs / btrfs) — spec §30–§31/§51.
+    // Initialize the configured storage backend (directory, ZFS, or Btrfs).
     let storage_name = storage_ctx.and_then(|c| c.storage_for(job).map(|(n, _)| n.clone()));
     if let (Some(ctx), Some(name)) = (storage_ctx, storage_name.as_deref()) {
         if let Some(manager) = &ctx.manager {
             match manager.ensure(name).await {
                 Ok(path) => {
-                    // min free space gate (spec §51) — block before syncing.
+                    // min free space gate — block before syncing.
                     if let Err(e) = manager.check_min_free(&path, ctx.min_free_bytes).await {
                         if let Some(l) = logger.as_mut() {
                             let _ = l.line(&format!("run {run_id} BLOCKED_STORAGE: {e}"));
@@ -359,7 +359,7 @@ async fn run_once_inner(
         };
     }
 
-    // Snapshots (spec §32–§33): before-sync / before-and-after.
+    // Snapshots: before-sync / before-and-after.
     let snapshot_provider = storage_ctx.and_then(|ctx| {
         let (_, sc) = ctx.storage_for(job)?;
         snapshot::provider_for(&sc.kind, &job.storage).ok()
@@ -583,7 +583,7 @@ async fn run_once_inner(
 
     run_hooks(&job.hooks.before_sync, &ctx, logger.as_mut(), None).await;
 
-    // Delete/size protection baseline (spec §52-53): measured around the
+    // Delete/size protection baseline: measured around the
     // provider run, enforced after — a mirror that shrinks too much is
     // failed instead of kept. Skip the tree walk unless limits are set;
     // walking AOSP/debian is multi-hour and blocks the actual sync.
@@ -629,7 +629,7 @@ async fn run_once_inner(
 
     run_hooks(&job.hooks.after_sync, &ctx, logger.as_mut(), None).await;
 
-    // Enforce delete/size protection (spec §52-53). Runs only on a provider
+    // Enforce delete/size protection. Runs only on a provider
     // success: a failed sync already fails the run.
     let safety_violation = outcome.as_ref().ok().and_then(|_| {
         if !safety_on {
@@ -695,7 +695,7 @@ async fn run_once_inner(
         }
     };
 
-    // Post-sync verification (spec §56): only a verified success produces
+    // Post-sync verification: only a verified success produces
     // after-success snapshots.
     let mut result = match &result {
         Ok(r) => match run_verify(job, r) {
@@ -723,7 +723,7 @@ async fn run_once_inner(
                     if let Some(l) = logger.as_mut() {
                         let _ = l.line(&format!("run {run_id}: snapshot {name} created"));
                     }
-                    // Retention prune (spec §33).
+                    // Retention prune.
                     if let (Some(ctx), Ok(list)) = (storage_ctx, p.list()) {
                         for to_delete in snapshot::prune_plan(
                             &list,
@@ -972,7 +972,7 @@ pub fn provider_name(job: &JobSpec) -> &'static str {
     }
 }
 
-/// Numeric mapping for `synora_job_status` gauge (spec §37). Distinct values
+/// Numeric mapping for `synora_job_status` gauge. Distinct values
 /// let dashboards color-code states.
 pub fn status_value(s: JobStatus) -> f64 {
     match s {
@@ -1007,7 +1007,7 @@ async fn finish_run(engine: &Arc<Engine>, run_id: &str, job: &JobSpec, outcome: 
         .map(|r| r.retry_count)
         .unwrap_or(0);
 
-    // Cancelled: terminal, no retry (spec §5).
+    // Cancelled: terminal, no retry.
     if matches!(outcome.result, Err(ProviderError::Cancelled)) {
         let _ = engine
             .store
@@ -1269,7 +1269,7 @@ fn metrics_tail(
 }
 
 /// Run a hook list via the same process machinery as the script provider.
-/// Hook failures are warnings — they never change the run verdict (spec §50).
+/// Hook failures are warnings — they never change the run verdict.
 async fn run_hooks(
     hooks: &[String],
     ctx: &SyncContext,
@@ -1359,7 +1359,7 @@ fn hook_ctx(
     }
 }
 
-/// Size detection priority (spec §17): provider hint → script output
+/// Size detection priority: provider hint → script output
 /// (both via SyncResult.size_hint) → filesystem walk when configured.
 fn size_after(job: &JobSpec, result: Option<&SyncResult>) -> Option<i64> {
     if let Some(hint) = result.and_then(|r| r.size_hint) {
@@ -1374,7 +1374,7 @@ fn size_after(job: &JobSpec, result: Option<&SyncResult>) -> Option<i64> {
     }
 }
 
-/// Post-sync verification checks (spec §56): "path" (storage exists),
+/// Post-sync verification checks: "path" (storage exists),
 /// "size" (non-zero size), "command" (run the configured command; exit 0).
 fn run_verify(job: &JobSpec, result: &SyncResult) -> Result<(), String> {
     if !job.verify.enabled {

@@ -1,4 +1,4 @@
-//! Run state machine + retry policy (spec §5, §54). Pure functions.
+//! Run state machine + retry policy. Pure functions.
 
 use crate::job::{ErrorKind, JobStatus};
 
@@ -24,8 +24,8 @@ pub struct StateError {
     pub event: RunEvent,
 }
 
-/// Legal transitions (spec §5). `LOST` is terminal for the run row; a fresh
-/// row is created when the job is re-dispatched (spec §29).
+/// Legal transitions. `LOST` is terminal for the run row; a fresh
+/// row is created when the job is re-dispatched.
 pub fn transition(cur: JobStatus, ev: RunEvent) -> Result<JobStatus, StateError> {
     let next = match (cur, ev) {
         (JobStatus::Queued, RunEvent::Starting) => JobStatus::Syncing,
@@ -55,7 +55,7 @@ pub fn transition(cur: JobStatus, ev: RunEvent) -> Result<JobStatus, StateError>
     Ok(next)
 }
 
-/// Retry decision after a failure (spec §54): ConfigError never retries,
+/// Retry decision after a failure: ConfigError never retries,
 /// retries exhausted → no retry, otherwise backoff `delay * backoff^attempt`
 /// capped at 24h.
 pub fn retry_decision(

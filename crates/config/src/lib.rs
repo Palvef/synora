@@ -1,5 +1,5 @@
 //! TOML configuration with `include`, `${VAR}` expansion, layering and
-//! `file:line` validation (spec §42–§44).
+//! `file:line` validation.
 
 pub mod error;
 mod jobfile;

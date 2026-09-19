@@ -1,7 +1,5 @@
-//! Docker provider (spec §18/§75–§77): `docker run` subprocess for now —
-//! exit code + stdout/stderr + volumes cover P0/P1. bollard (Docker API) is
-//! the later upgrade when lifecycle events/resource limits are needed
-//! (spec §75 prefers the API; flagged tradeoff).
+//! Docker provider: invoke the Docker CLI, mount repository storage, enforce
+//! container options, stream output, and stop the container on cancellation.
 
 use crate::{
     cancelled_after_wait, kill_group, spawn_group, ProviderError, SyncContext, SyncResult,
@@ -412,7 +410,7 @@ pub async fn run_named_container(
     if let Some(cpu) = ctx.job.cpu_limit {
         cmd.arg("--cpus").arg(format!("{cpu}"));
     }
-    // Container convention (spec §77): host storage → /data. A user
+    // Container convention: host storage → /data. A user
     // volume that already mounts /data wins (no duplicate mount point).
     let host_storage = ctx
         .storage

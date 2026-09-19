@@ -1,5 +1,5 @@
 //! Persistence layer: SQLite (default) and PostgreSQL (optional) behind one
-//! `Db` facade (spec §26). The Store writes portable SQL (`?` placeholders,
+//! `Db` facade. The Store writes portable SQL (`?` placeholders,
 //! TEXT keys, INTEGER timestamps); the PG backend rewrites on the fly.
 
 pub mod migrator;

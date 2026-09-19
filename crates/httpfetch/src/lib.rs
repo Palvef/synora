@@ -1,4 +1,4 @@
-//! HTTP mirror sync (spec §60): diff an upstream directory listing against
+//! HTTP mirror sync: diff an upstream directory listing against
 //! local storage by size (mtime as a tiebreaker when the listing carries
 //! timestamps), download what changed, optionally delete what vanished
 //! upstream. Planning is parser-driven ([`parser`] crate) and yields a
@@ -515,10 +515,10 @@ impl Fetcher {
 
     /// Execute a plan concurrently (up to `self.threads` in-flight) with a
     /// cancel token. Each file downloads to
-    /// `dest.partial` then renames into place; a failed file is warned about
-    /// and skipped, never fatal — only cancellation aborts the run. Planned
-    /// symlinks are (re)created after downloads and deletes. Summed stats
-    /// are returned.
+    /// `dest.partial` then renames into place. Missing optional files produce
+    /// warnings; transfer, integrity, and listing failures are recorded separately
+    /// for the provider verdict. Incomplete transfers suppress cleanup. Symlinks
+    /// are applied after downloads; cancellation aborts execution.
     pub async fn execute(
         &self,
         plan: &Plan,
@@ -953,7 +953,7 @@ fn listing_error_transient(err: &FetchError) -> bool {
 /// Compare a remote file against local state: same size → unchanged (the
 /// documented lazy default); otherwise, when the parser provided `modified`
 /// and the local mtime matches it, treat as unchanged too. A local symlink
-/// counts as "in place" (spec §103 / tsumugu: symlinks are ignored during
+/// counts as "in place" (tsumugu: symlinks are ignored during
 /// syncing) — never downloaded into, never replaced.
 async fn local_matches(dest: &Path, entry: &parser::Entry) -> bool {
     let Ok(meta) = tokio::fs::symlink_metadata(dest).await else {

@@ -1,4 +1,4 @@
-//! Directory-listing parsers (spec §14/§15/§60): turn an upstream index
+//! Directory-listing parsers: turn an upstream index
 //! page — nginx/apache autoindex HTML, Caddy browse JSON, S3 ListObjectsV2
 //! XML — into a flat [`Entry`] list. Parsers are decoupled from any sync
 //! logic (the nginx crate's parser-crate pattern) and are *total*: they
@@ -6,7 +6,7 @@
 
 use time::PrimitiveDateTime;
 
-/// One entry of a directory listing (spec §14).
+/// One entry of a directory listing.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Entry {
     pub path: String,
@@ -27,7 +27,7 @@ pub enum EntryKind {
     Symlink,
 }
 
-/// A directory-listing parser (spec §14/§15).
+/// A directory-listing parser.
 pub trait IndexParser: Send + Sync {
     fn name(&self) -> &'static str;
     fn parse(&self, body: &[u8]) -> Vec<Entry>;

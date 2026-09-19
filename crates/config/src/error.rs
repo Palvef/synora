@@ -1,4 +1,4 @@
-//! Config errors always carry `file:line` so `synora check` pinpoints problems (spec §44).
+//! Config errors always carry `file:line` so `synora check` pinpoints problems.
 
 /// `jobs/ubuntu.toml:17: invalid cron expression`
 #[derive(Debug, Clone, PartialEq, Eq)]

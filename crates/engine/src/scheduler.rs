@@ -1,4 +1,4 @@
-//! Scheduler loop ticks (spec §6–§7): boot pass (misfire), retry tick, due
+//! Scheduler loop ticks: boot pass (misfire), retry tick, due
 //! dispatch, and QUEUED-run execution. The engine runs all of them every 2s.
 
 use crate::engine::{unix_now, Engine};
@@ -8,7 +8,7 @@ use synora_core::job::JobStatus;
 
 /// First tick after boot: rows whose `next_run` is in the past were missed
 /// while offline. `next_run >= boot` means they were synced at this boot —
-/// those fire normally. Missed ones follow the job's misfire policy (spec §7).
+/// those fire normally. Missed ones follow the job's misfire policy.
 pub async fn boot_pass(engine: &Arc<Engine>, boot: i64) {
     let _config = engine.config_gate.read().await;
     let now = unix_now();
@@ -105,7 +105,7 @@ pub async fn dispatch_due(engine: &Arc<Engine>, now: i64) {
     }
 }
 
-/// Recompute `next_run` from the wall clock — never from run end (spec §6.5).
+/// Recompute `next_run` from the wall clock — never from run end.
 async fn recompute_next(engine: &Arc<Engine>, job_name: &str) {
     let Ok(Some(row)) = engine.store.get_schedule(job_name).await else {
         return;
@@ -140,7 +140,7 @@ pub async fn execute_queued(engine: &Arc<Engine>) {
         return;
     };
     // Manager mode: NULL-worker runs wait for a remote worker — only execute
-    // runs explicitly assigned to the local worker (spec §8).
+    // runs explicitly assigned to the local worker.
     let queued: Vec<_> = if engine.has_planner() {
         queued
             .into_iter()

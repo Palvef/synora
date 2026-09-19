@@ -291,7 +291,7 @@ impl Store {
 
     // --- workers -------------------------------------------------------------
 
-    /// Register/upsert a worker (spec §9). The standalone engine registers
+    /// Register/upsert a worker. The standalone engine registers
     /// itself as worker "local" — job_runs.worker_id has a FK to workers.
     pub async fn upsert_worker(
         &self,

@@ -15,7 +15,9 @@ The general, rustup and ftpsync images extract existing vetted artifacts from
 `SOURCE_RUNTIME` (default `synora-scripts:0.2.0`). This source must be built/pulled
 before the split. `PYPI_RUNTIME` is required for Yukina/Shadowmire: use the
 source-pinned, production-patched PyPI build, preferably by digest. Deployments
-should record the source and resulting image IDs and use immutable release tags.
+should record the source and resulting image IDs. Build and validate an immutable
+rollout tag, then assign `latest` for production jobs; keep the rollout tag for
+rollback. Refresh images on every worker before reloading job configuration.
 The split copies only each specialized tool, not the source image filesystem.
 
 Yukina's runner expects `PYPI_INDEX_MODE=proxy`; a full index sync belongs to the

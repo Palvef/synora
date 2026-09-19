@@ -108,7 +108,7 @@ storage = "{}"
     let run_id = engine.dispatch("smoke", true).await.unwrap();
     let status = wait_terminal(&engine, &run_id, 15).await;
     assert_eq!(status, synora_core::JobStatus::Success);
-    // SYNORA_SIZE= recorded into repositories + metrics (spec §17/§38).
+    // SYNORA_SIZE= recorded into repositories + metrics.
     let size = engine
         .store
         .repository_size(&repo.display().to_string())
@@ -125,7 +125,7 @@ storage = "{}"
         metrics.contains("synora_repository_size_bytes{job=\"smoke\"} 999"),
         "{metrics}"
     );
-    // Log file exists with the run header (spec §49).
+    // Log file exists with the run header.
     let log = dir.join("logs/smoke/current.log");
     assert!(log.exists());
     let content = std::fs::read_to_string(&log).unwrap();
@@ -279,7 +279,7 @@ retry_delay = "1s"
     let run_id = engine.dispatch("flaky", true).await.unwrap();
     let status = wait_terminal(&engine, &run_id, 30).await;
     assert_eq!(status, synora_core::JobStatus::Failed);
-    // retry = 2 → two scheduled retries, then terminal failure (spec §54).
+    // retry = 2 → two scheduled retries, then terminal failure.
     let metrics = engine.metrics().render();
     assert!(
         metrics.contains("synora_job_retries_total{job=\"flaky\"} 2"),

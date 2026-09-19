@@ -1,4 +1,4 @@
-//! `synora-tui` — terminal console (spec §39–§41): jobs table with status /
+//! `synora-tui` — terminal console: jobs table with status /
 //! size / next run, per-job detail (run history), worker panel, proxy panel
 //! with in-TUI proxy registration (CF One / WARP auto-detect, manual http/
 //! socks5h add), and a log viewer that follows the selected job.
