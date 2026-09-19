@@ -1,28 +1,44 @@
-# Synora 0.2.1
+# Synora 0.2.2
 
-## HTTP sync outcomes
+## Repository synchronization
 
-- Missing ordinary files (HTTP 404/410) now complete with warnings, retaining
-  missing-file counts and diagnostic paths without retrying the entire job.
-- Missing critical repository metadata, incomplete directory traversal, other
-  HTTP errors, network failures and filesystem errors still fail the run.
-- Any missing-file warning or fatal error suppresses local deletion. Partial
-  mirrors no longer claim the complete upstream size.
-- API, CLI, TUI, database history and Grafana distinguish `success_with_warnings`.
-  Completed warning runs satisfy dependencies; tunasync-compatible status maps
-  them to success. The native status metric uses value 12.
+- Discover APT/RPM distribution versions, components, and architectures from
+  upstream metadata. Job configuration can override APT and RPM architectures
+  independently, including different architecture sets for individual URL paths.
+- Filter debug-symbol and test packages by default. Retain shared APT packages
+  when unselected suites still reference them, and regenerate filtered RPM indexes.
+- Repair MongoDB RPM repositories whose primary metadata is missing, using a
+  validated upstream object inventory. Process RPM repositories independently
+  and recover interrupted metadata generation under a repository lock.
+- Use current InfluxData endpoints and discover XanMod's published suites.
+  LLVM and Elastic versions continue to be discovered automatically.
+- Add mirror scripts for PyBOMBS and improve Nix channel retention and cleanup.
+  Protect Nix's latest alias and defer deletion until downloads succeed.
 
-## Proxy expose
+## HTTP and task execution
 
-- Authenticated HTTP upstream proxies support both regular HTTP and CONNECT
-  tunnels through expose listeners, with independent downstream credentials.
-- Proxy authentication works regardless of header order. Listener startup logs
-  omit upstream credentials.
+- Support glob exclusions for HTTP mirrors, including unwanted architecture
+  directories, prereleases, and auxiliary files.
+- Allow ordinary HTTP 403 files to be reported as warnings when explicitly
+  configured. Missing critical metadata, incomplete traversal, and transfer or
+  integrity failures remain failures. Incomplete runs suppress deletion.
+- Deduplicate listing destinations before concurrent downloads.
+- Push-triggered restarts wait for cancellation to be acknowledged before
+  starting a replacement run.
 
-## Upgrading
+## Runtime images and documentation
 
-- Upgrade the Manager before Workers so it accepts the new completion status.
-  Drain running Workers before replacing their processes. No schema migration
-  is needed from 0.2.0; historical failures are not rewritten.
-- Re-import the Grafana dashboard to display completed-with-warning runs.
-- Linux release builds retain Ubuntu 22.04 / glibc 2.35 compatibility checks.
+- Split synchronization runtimes into synora-scripts, synora-rubygems,
+  synora-rustup, synora-nix-channels, synora-yukina, synora-shadowmire, and
+  synora-ftpsync. Build them with scripts/build-sync-images.sh.
+- Keep architecture choices in job configuration instead of hardcoded wrapper
+  scopes; unspecified selections retain automatic discovery.
+- Document the current implementation and remove obsolete roadmap comments.
+  Production-specific PyPI deployment files remain outside the repository.
+
+## Release binaries
+
+- Linux packages contain the CLI, Manager, and Worker as separate archives.
+- Release builds check compatibility with Ubuntu 22.04 / glibc 2.35.
+- Docker runtimes are built separately from these binary archives; rebuilding
+  them is necessary to receive synchronization-script changes.
