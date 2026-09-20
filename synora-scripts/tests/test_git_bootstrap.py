@@ -34,7 +34,12 @@ class BootstrapTests(unittest.TestCase):
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             try:
-                git_bootstrap.bootstrap(f'http://127.0.0.1:{server.server_port}', mirror)
+                with patch.object(git_bootstrap, 'download', wraps=git_bootstrap.download) as downloads:
+                    with patch.object(git_bootstrap.subprocess, 'check_output', side_effect=KeyboardInterrupt):
+                        with self.assertRaises(KeyboardInterrupt):
+                            git_bootstrap.bootstrap(f'http://127.0.0.1:{server.server_port}', mirror)
+                    git_bootstrap.bootstrap(f'http://127.0.0.1:{server.server_port}', mirror)
+                    self.assertEqual(downloads.call_count, len(old_packs) + len(new_packs))
                 self.assertEqual(git('--git-dir', mirror, 'rev-parse', 'refs/synora-bootstrap/seed'), git('-C', source, 'rev-parse', 'HEAD'))
                 git('--git-dir', mirror, 'remote', 'add', '--mirror=fetch', 'origin', source)
                 git('--git-dir', mirror, 'remote', 'update', '--prune')

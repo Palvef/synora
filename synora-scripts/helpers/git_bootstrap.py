@@ -101,8 +101,13 @@ def bootstrap(url, repo):
         if target.exists() and index.exists():
             continue
         partial = staging / name
-        print(f'Seeding Git pack {name}', flush=True)
-        download(opener, base + 'objects/pack/' + name, partial)
+        complete = partial.with_suffix('.downloaded')
+        downloaded = complete.exists() and partial.exists() and complete.read_text().strip() == str(partial.stat().st_size)
+        if not downloaded:
+            print(f'Seeding Git pack {name}', flush=True)
+            download(opener, base + 'objects/pack/' + name, partial)
+            complete.write_text(str(partial.stat().st_size))
+        print(f'Validating downloaded Git pack {name}', flush=True)
         try:
             digest = subprocess.check_output(['git', 'index-pack', str(partial)], text=True).strip()
             if digest != name.removeprefix('pack-').removesuffix('.pack'):
@@ -110,9 +115,12 @@ def bootstrap(url, repo):
         except (subprocess.CalledProcessError, ValueError):
             partial.unlink(missing_ok=True)
             partial.with_suffix('.idx').unlink(missing_ok=True)
+            complete.unlink(missing_ok=True)
             raise
         partial.replace(target)
         partial.with_suffix('.idx').replace(index)
+        complete.unlink(missing_ok=True)
+    print('Verifying seed object graph', flush=True)
     subprocess.run(['git', '-C', str(repo), 'fsck', '--full', '--no-dangling', head_oid], check=True)
     subprocess.run(['git', '-C', str(repo), 'update-ref', 'refs/synora-bootstrap/seed', head_oid], check=True)
     print('Seed connectivity verified; fetching official upstream before reporting success', flush=True)
