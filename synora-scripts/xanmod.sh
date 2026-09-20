@@ -3,6 +3,7 @@ set -e
 set -o pipefail
 
 _here=`dirname $(realpath $0)`
+export SYNORA_REPOSITORY=xanmod
 apt_sync="${_here}/apt-sync.py" 
 
 BASE_PATH="${SYNORA_STORAGE}"

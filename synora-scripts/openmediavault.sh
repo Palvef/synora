@@ -4,13 +4,14 @@ set -e
 set -o pipefail
 
 _here=`dirname $(realpath $0)`
+export SYNORA_REPOSITORY=openmediavault
 apt_sync="${_here}/apt-sync.py"
 
 BASE_PATH="${SYNORA_STORAGE}"
 BASE_URL=${SYNORA_UPSTREAM:-"https://packages.openmediavault.org/public"}
 DISTS=@auto
 EXTRA_DISTS=@auto
-ARCHS=amd64,i386,arm64,armel,armhf
+ARCHS=@auto
 export REPO_SIZE_FILE=/tmp/reposize.$RANDOM
 
 # =================== official repos ===============================

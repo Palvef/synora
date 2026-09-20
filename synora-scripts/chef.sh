@@ -3,6 +3,7 @@ set -e
 set -o pipefail
 
 _here=`dirname $(realpath $0)`
+export SYNORA_REPOSITORY=chef
 apt_sync="${_here}/apt-sync.py" 
 yum_sync="${_here}/yum-sync.py"
 
@@ -13,10 +14,10 @@ YUM_PATH="${BASE_PATH}/yum/stable"
 APT_PATH="${BASE_PATH}/apt/stable"
 export REPO_SIZE_FILE=/tmp/reposize.$RANDOM
 
-"$yum_sync" "${UPSTREAM}/yum/stable/el/@{os_ver}/@{arch}" @rhel-current chef x86_64 "stable-el@{os_ver}-@{arch}" "$YUM_PATH"
+"$yum_sync" "${UPSTREAM}/yum/stable/el/@{os_ver}/@{arch}" @rhel-current chef @auto "stable-el@{os_ver}-@{arch}" "$YUM_PATH"
 echo "YUM finished"
 
-"$apt_sync" --delete "${UPSTREAM}/apt/stable" @ubuntu-lts,@debian-current main amd64,i386,aarch64 "$APT_PATH"
+"$apt_sync" --delete "${UPSTREAM}/apt/stable" @ubuntu-lts,@debian-current main @auto "$APT_PATH"
 echo "APT finished"
 
 "${_here}/helpers/size-sum.sh" $REPO_SIZE_FILE --rm

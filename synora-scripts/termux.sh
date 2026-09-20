@@ -2,12 +2,13 @@
 set -e
 
 _here=`dirname $(realpath $0)`
+export SYNORA_REPOSITORY=termux
 apt_sync="${_here}/apt-sync.py" 
 
 WORKING_DIR="${SYNORA_STORAGE}"
 export REPO_SIZE_FILE=/tmp/reposize.$RANDOM
 
-ARCH_LIST="aarch64,arm,i686,x86_64"
+ARCH_LIST="@auto"
 
 "$apt_sync" --delete "$SYNORA_UPSTREAM/apt/termux-main"     stable main    $ARCH_LIST "${WORKING_DIR}/termux-packages-24"
 "$apt_sync" --delete "$SYNORA_UPSTREAM/apt/termux-x11"      x11 main       $ARCH_LIST "${WORKING_DIR}/x11-packages"

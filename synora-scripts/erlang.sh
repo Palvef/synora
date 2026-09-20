@@ -3,6 +3,7 @@ set -e
 set -o pipefail
 
 _here=`dirname $(realpath $0)`
+export SYNORA_REPOSITORY=erlang
 apt_sync="${_here}/apt-sync.py" 
 yum_sync="${_here}/yum-sync.py"
 

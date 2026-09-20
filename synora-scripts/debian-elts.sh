@@ -3,6 +3,7 @@ set -e
 set -o pipefail
 
 _here=$(dirname $(realpath $0))
+export SYNORA_REPOSITORY=debian-elts
 apt_sync="${_here}/apt-sync.py"
 function join_by { local IFS="$1"; shift; echo "$*"; }
 

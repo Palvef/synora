@@ -4,6 +4,7 @@ set -e
 set -o pipefail
 
 _here=`dirname $(realpath $0)`
+export SYNORA_REPOSITORY=bazel-apt
 apt_sync="${_here}/apt-sync.py"
 
 BASE_PATH="${SYNORA_STORAGE}"
@@ -11,7 +12,7 @@ BASE_URL=${SYNORA_UPSTREAM:-"https://storage.googleapis.com/bazel-apt"}
 
 export REPO_SIZE_FILE=/tmp/reposize.$RANDOM
 
-"$apt_sync" --delete "$BASE_URL" stable jdk1.8 amd64 "$BASE_PATH"
+"$apt_sync" --delete "$BASE_URL" stable jdk1.8 @auto "$BASE_PATH"
 
 echo "APT finished"
 

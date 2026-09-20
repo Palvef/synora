@@ -1,10 +1,10 @@
-"""Shared APT/YUM include/exclude policy; empty configuration selects everything."""
+"""Inherited APT/YUM defaults with explicit job overrides and exclusions."""
 import fnmatch
 import json
 import os
 import re
 from urllib.parse import urlsplit
-from tuna_scope import configured_rule
+from repo_defaults import repository_rule, expand_groups
 
 
 def architecture_override(protocol, base_url):
@@ -40,17 +40,22 @@ def architecture_override(protocol, base_url):
 
 class Selection:
     def __init__(self, protocol=None, base_url=''):
+        defaults = repository_rule(protocol, base_url)
         self.architectures = architecture_override(protocol, base_url) if protocol else None
-        self.scope = configured_rule(protocol, base_url)
+        if self.architectures is None and "arches" in defaults:
+            self.architectures = ",".join(defaults["arches"])
         self.rules = {}
         for kind in ('VERSIONS', 'ARCHES', 'COMPONENTS'):
             for prefix in ('SYNC_', 'SYNC_EXCLUDE_'):
-                raw = os.environ.get(prefix + kind, '')
-                self.rules[prefix + kind] = [v.strip() for v in raw.split(',') if v.strip()]
-        self.active = any(self.rules.values()) or self.architectures is not None or self.scope is not None
+                raw = os.environ.get(prefix + kind)
+                if raw is None and prefix == 'SYNC_' and kind.lower() in defaults and kind != 'ARCHES':
+                    self.rules[prefix + kind] = expand_groups(defaults[kind.lower()])
+                else:
+                    self.rules[prefix + kind] = [v.strip() for v in (raw or '').split(',') if v.strip()]
+        self.active = any(self.rules.values()) or self.architectures is not None
 
     def matches(self, kind, value):
-        if self.scope and value not in self.scope[kind.lower()]:
+        if kind == 'ARCHES' and self.architectures and '@auto' not in self.architectures.split(',') and value not in self.architectures.split(','):
             return False
         include = self.rules['SYNC_' + kind]
         exclude = self.rules['SYNC_EXCLUDE_' + kind]

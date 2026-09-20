@@ -9,6 +9,7 @@ from typing import Set
 import requests
 
 DOWNLOAD_TIMEOUT = int(os.getenv('DOWNLOAD_TIMEOUT', '1800'))
+os.environ['SYNORA_REPOSITORY'] = 'adoptium'
 BASE_PATH = os.getenv('SYNORA_STORAGE')
 BASE_URL = os.getenv('SYNORA_UPSTREAM', "https://packages.adoptium.net/artifactory")
 def feature_versions():
@@ -113,7 +114,7 @@ if __name__ == "__main__":
         f'{BASE_URL}/deb',
         '@ubuntu-lts,@debian-current',
         'main',
-        'amd64,armhf,arm64',
+        '@auto',
         f"{BASE_PATH}/deb"
         ],
         check=True)
@@ -126,7 +127,7 @@ if __name__ == "__main__":
         "--download-repodata",
         '@rhel-current',
         'Adoptium',
-        'x86_64,aarch64',
+        '@auto',
         "rhel@{os_ver}-@{arch}",
         f"{BASE_PATH}/rpm"
         ],
@@ -136,7 +137,7 @@ if __name__ == "__main__":
         "--download-repodata",
         '@fedora-current',
         'Adoptium',
-        'x86_64,aarch64',
+        '@auto',
         "fedora@{os_ver}-@{arch}",
         f"{BASE_PATH}/rpm"
         ],

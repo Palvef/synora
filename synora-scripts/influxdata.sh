@@ -4,6 +4,7 @@ set -e
 set -o pipefail
 
 _here=`dirname $(realpath $0)`
+export SYNORA_REPOSITORY=influxdata
 apt_sync="${_here}/apt-sync.py" 
 yum_sync="${_here}/yum-sync.py"
 

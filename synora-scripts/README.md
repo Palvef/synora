@@ -128,43 +128,63 @@ fallback. `MONGO_RPM_THREADS` controls recovery downloads (default 4, maximum 16
 MongoDB also attempts both APT families even when YUM fails, and keeps existing
 x86_64 repository names while giving other architectures separate directories.
 
-## Architecture overrides in job configuration
+## Shared repository defaults
 
-Wrappers keep their upstream version discovery. Select production architectures
-through the job's `env` instead of editing or pinning versions in scripts:
+`repository-defaults.toml` is the common configuration for every APT/YUM wrapper.
+The wrappers select their own repository profile; job files do not need a profile
+flag or repeated architecture lists. Protocol defaults are inherited, then
+repository and URL-path exceptions are applied. Existing `SYNC_APT_ARCHES`,
+`SYNC_YUM_ARCHES`, `*_BY_PATH`, `SYNC_VERSIONS`, and `SYNC_COMPONENTS` remain
+available for explicit job overrides. `SYNC_EXCLUDE_*` always wins.
+
+The `[discovery]` table controls shared release windows: the latest two released
+RHEL-compatible/Fedora versions, three Ubuntu LTS/Debian releases, and the
+`debian-latest2`/`debian-latest` subsets. Discovery uses official inventories;
+RHEL directory aliases such as `9Server` and minor-version duplicates are ignored.
+Upstream software/component discovery remains enabled. MongoDB's selected product
+versions live once in `[groups].mongodb-releases`, referenced by both APT and YUM.
+No TUNA scripts or policies are fetched at runtime.
+
+To pin a shared distribution group, add it to `[groups]`, for example:
 
 ```toml
-image = "synora-scripts:latest"
-env = [
-  "SYNC_APT_ARCHES=amd64,i386,arm64",
-  "SYNC_YUM_ARCHES=x86_64",
-  'SYNC_APT_ARCHES_BY_PATH={"/apt/ubuntu":"amd64,i386,arm64","/apt/debian":"amd64,i386"}',
-]
+[groups]
+rhel-current = ["9", "10"]
+fedora-current = ["41", "42"]
 ```
 
-`SYNC_APT_ARCHES` and `SYNC_YUM_ARCHES` replace the architecture argument passed
-by their wrapper. An exact upstream URL-path match in the corresponding
-`*_BY_PATH` JSON object takes priority; trailing slashes are ignored. Without
-an override, the wrapper's default (including `@auto` discovery) remains in use.
-Existing `SYNC_ARCHES` / `SYNC_EXCLUDE_ARCHES` filters further restrict the list.
-Versions remain automatic unless explicitly restricted with `SYNC_VERSIONS` or
-`SYNC_EXCLUDE_VERSIONS`. Architecture overrides preserve unselected local content
-during cleanup, avoiding deletion of packages shared with retained suites.
+These arrays replace discovery for that group. Otherwise the corresponding
+`[discovery]` rule remains automatic. `SYNC_DEFAULTS_FILE` can point to a complete
+replacement TOML file mounted read-only into a container; by default the file
+shipped in the image is used. Invalid configuration stops the sync.
 
+Production jobs normally need only actual exceptions:
 
-MongoDB and Proxmox also accept `SYNC_SCOPE_POLICY=tuna`. At the start of each
-run, the wrapper reads the current `tuna/tunasync-scripts` commit and parses its
-repository script and APT/YUM templates as data. All files come from that same
-commit; downloaded code is never executed. Fetch or validation failures stop the
-run instead of falling back to unrestricted discovery. `TUNA_SCOPE_PROXY` optionally
-sets a proxy for these GitHub requests independently of package downloads. The commit and selected
-versions, components and architectures are recorded in the run log.
+```toml
+# InfluxData
+env = ["SYNC_EXCLUDE_VERSIONS=stable"]
 
-This policy intersects TUNA's scope with the job's architecture and include/exclude
-settings. For Proxmox formal repositories, set `SYNC_EXCLUDE_COMPONENTS=pvetest`.
-MongoDB excludes development/testing branches and duplicate OS aliases by matching
-TUNA's numeric product versions and OS list. MongoDB stable aliases use TUNA's
-stable version only when local metadata exists. Proxmox ISO and appliance mirrors
-continue to follow the official upstream inventory. Selection changes preserve
-previously downloaded excluded content; review and back up old branches before
-removing them separately.
+# Proxmox
+env = ["SYNC_EXCLUDE_COMPONENTS=pvetest"]
+```
+
+Overrides replace inherited include lists; exclusions then further restrict them.
+An explicit empty include clears an inherited restriction. Architecture overrides
+must be nonempty (use `@auto` for upstream discovery). Active selection preserves
+excluded local content during cleanup so shared packages are not deleted merely
+because a different scope was selected. Review obsolete branches separately.
+
+The `[packages]` section defines common debug/test package-name segments and file
+suffixes. APT/YUM use it directly. Generate the equivalent rsync filter file with:
+
+```sh
+python3 synora-scripts/helpers/package_policy.py --rsync-filters > /tmp/package-filters.rules
+install -m 644 /tmp/package-filters.rules /etc/synora/excludes/package-filters.rules
+```
+
+Install the generated file on every worker using it. Existing rsync jobs continue
+to reference this one file. Receiver-side `R` rules are intentional: excluded
+packages already on disk remain eligible for deletion. Repository-specific
+exclusions, such as unrelated archive directories, remain in each job. Normal
+`-dev` and `-devel` packages are retained. CI checks the committed generated file
+against the common package configuration.

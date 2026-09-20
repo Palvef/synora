@@ -3,6 +3,7 @@ set -e
 set -o pipefail
 
 _here=`dirname $(realpath $0)`
+export SYNORA_REPOSITORY=elastic
 apt_sync="${_here}/apt-sync.py" 
 yum_sync="${_here}/yum-sync.py"
 
@@ -21,7 +22,7 @@ export REPO_SIZE_FILE=/tmp/reposize.$RANDOM
 # =================== APT repos ===============================
 
 for elsver in "${ELASTIC_VERSION[@]}"; do
-	"$apt_sync" --delete "${BASE_URL}/packages/${elsver}/apt" stable main amd64,i386 "${APT_PATH}/${elsver}"
+	"$apt_sync" --delete "${BASE_URL}/packages/${elsver}/apt" stable main @auto "${APT_PATH}/${elsver}"
 	mkdir -p "${BASE_PATH}/${elsver}"
 	ln -sfnr "${APT_PATH}/${elsver}" "${BASE_PATH}/${elsver}/apt"
 done
@@ -29,7 +30,7 @@ done
 # # ================ YUM/DNF repos ===============================
 components="${ELASTIC_VERSION[@]}"
 components=${components// /,}
-"$yum_sync" "${BASE_URL}/packages/@{comp}/yum" unused "$components" x86_64 "elastic-@{comp}" "$YUM_PATH"
+"$yum_sync" "${BASE_URL}/packages/@{comp}/yum" unused "$components" @auto "elastic-@{comp}" "$YUM_PATH"
 
 for elsver in ${ELASTIC_VERSION[@]}; do
 	mkdir -p "${BASE_PATH}/${elsver}"

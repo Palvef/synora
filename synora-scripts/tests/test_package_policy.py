@@ -28,3 +28,16 @@ class PackagePolicyTests(unittest.TestCase):
             rules=Path(__file__).resolve().parents[1]/'helpers/package-filters.rules'
             subprocess.run(['rsync','-a','--delete','--filter','merge '+str(rules),str(src)+'/',str(dst)+'/'],check=True)
             self.assertEqual(sorted(p.name for p in dst.iterdir()),['contest_1_amd64.deb','libc6_1_amd64.deb'])
+
+    def test_rsync_rules_are_generated_from_shared_package_policy(self):
+        from package_policy import rsync_rules
+        path=Path(__file__).resolve().parents[1]/'helpers/package-filters.rules'
+        self.assertEqual(path.read_text(), rsync_rules())
+
+    def test_generated_rules_keep_normal_development_libraries(self):
+        from package_policy import file_patterns
+        import fnmatch
+        for name in ['libfoo-devel-1-2.x86_64.rpm','libfoo-dev_1_amd64.deb','contest_1_amd64.deb']:
+            self.assertFalse(any(fnmatch.fnmatchcase(name,p) for p in file_patterns()),name)
+        for name in ['kernel-debuginfo-common-1-2.x86_64.rpm','libfoo-dbgsym_1_amd64.deb','libfoo_1_amd64.ddeb']:
+            self.assertTrue(any(fnmatch.fnmatchcase(name,p) for p in file_patterns()),name)

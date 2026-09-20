@@ -3,6 +3,7 @@ set -e
 set -o pipefail
 
 _here=`dirname $(realpath $0)`
+export SYNORA_REPOSITORY=llvm-apt
 apt_sync="${_here}/apt-sync.py"
 
 BASE_PATH="${SYNORA_STORAGE}"
@@ -25,7 +26,7 @@ function get_codenames() {
 oses=$(python3 "${_here}/helpers/repo_discovery.py" distros ubuntu-lts && python3 "${_here}/helpers/repo_discovery.py" distros debian-current)
 for os in $oses; do
     codenames=$(get_codenames $os)
-    "$apt_sync" --delete "$BASE_URL/$os" "$codenames" main amd64,arm64 "$BASE_PATH/$os"
+    "$apt_sync" --delete "$BASE_URL/$os" "$codenames" main @auto "$BASE_PATH/$os"
 done
 
 echo "APT finished"

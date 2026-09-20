@@ -4,6 +4,7 @@ set -e
 set -o pipefail
 
 _here=$(dirname "$(realpath "$0")")
+export SYNORA_REPOSITORY=virtualbox
 apt_sync="${_here}/apt-sync.py" 
 yum_sync="${_here}/yum-sync.py"
 
@@ -32,12 +33,12 @@ export REPO_SIZE_FILE=/tmp/reposize.$RANDOM
 
 # === download rhel packages ====
 
-"$yum_sync" "${BASE_URL}/rpm/el/@{os_ver}/@{arch}" @rhel-current VirtualBox x86_64 "el@{os_ver}" "$YUM_PATH"
+"$yum_sync" "${BASE_URL}/rpm/el/@{os_ver}/@{arch}" @rhel-current VirtualBox @auto "el@{os_ver}" "$YUM_PATH"
 echo "YUM finished"
 
 # === download deb packages ====
 
-"$apt_sync" --delete "${BASE_URL}/debian" @debian-current,@ubuntu-lts contrib,non-free amd64,i386 "$APT_PATH"
+"$apt_sync" --delete "${BASE_URL}/debian" @debian-current,@ubuntu-lts contrib,non-free @auto "$APT_PATH"
 echo "Debian and ubuntu finished"
 
 # === download standalone packages ====

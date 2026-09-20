@@ -10,6 +10,7 @@ import sys
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit, unquote
 import requests
+from repo_defaults import fixed_group, discovery_window
 
 class Links(HTMLParser):
     def __init__(self):
@@ -81,21 +82,26 @@ def expand_path(base, pattern):
 
 @functools.lru_cache(maxsize=8)
 def distro_versions(template):
+    configured = fixed_group(template)
+    if configured is not None: return configured
+    count = discovery_window(template)
     distro='ubuntu' if template=='ubuntu-lts' else 'debian'
     url=f'https://salsa.debian.org/debian/distro-info-data/-/raw/main/{distro}.csv'
     r=requests.get(url,timeout=(30,60));r.raise_for_status()
     today=datetime.date.today().isoformat()
     rows=[row for row in csv.DictReader(io.StringIO(r.text)) if row.get('release') and row['release']<=today]
-    if distro=='ubuntu':rows=[row for row in rows if 'LTS' in row['version']][-3:]
-    else:
-        count={'debian-current':3,'debian-latest2':2,'debian-latest':1}[template]
-        rows=rows[-count:]
+    if distro=='ubuntu':rows=[row for row in rows if 'LTS' in row['version']]
+    rows=rows[-count:]
     values=[row['series'] for row in rows]
     if not values:raise RuntimeError(f'No maintained releases from {url}')
     return values
 
 @functools.lru_cache(maxsize=4)
 def rpm_versions(template):
+    name = template.removeprefix('@')
+    configured = fixed_group(name)
+    if configured is not None: return configured
+    count = discovery_window(name)
     if template == '@fedora-current':
         r=requests.get('https://bodhi.fedoraproject.org/releases/',params={'state':'current'},timeout=(30,60));r.raise_for_status()
         values=sorted({str(v['version']) for v in r.json()['releases'] if str(v.get('version','')).isdigit() and str(v.get('name','')).startswith('F')},key=int)
@@ -104,7 +110,7 @@ def rpm_versions(template):
         values=sorted(set(values),key=int)
     else:raise ValueError(f'Unknown release template: {template}')
     if not values:raise RuntimeError(f'No current RPM releases for {template}')
-    return values
+    return values[-count:]
 
 class PageText(HTMLParser):
     def __init__(self):

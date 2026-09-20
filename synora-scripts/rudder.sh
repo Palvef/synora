@@ -3,6 +3,7 @@ set -e
 set -o pipefail
 
 _here=`dirname $(realpath $0)`
+export SYNORA_REPOSITORY=rudder
 apt_sync="${_here}/apt-sync.py" 
 yum_sync="${_here}/yum-sync.py"
 
@@ -16,7 +17,7 @@ export REPO_SIZE_FILE=/tmp/reposize.$RANDOM
 
 components=$(printf ",%s" "${RUDDER_VERS[@]}")
 components=${components:1}
-"$yum_sync" "${UPSTREAM}/rpm/@{comp}/RHEL_@{os_ver}/" @rhel-current $components x86_64 "rudder@{comp}-RHEL_@{os_ver}" "$YUM_PATH"
+"$yum_sync" "${UPSTREAM}/rpm/@{comp}/RHEL_@{os_ver}/" @rhel-current $components @auto "rudder@{comp}-RHEL_@{os_ver}" "$YUM_PATH"
 echo "YUM finished"
 
 for ver in ${RUDDER_VERS[@]}; do
