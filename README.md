@@ -66,6 +66,9 @@ to TUNA and to the authors and maintainers of these projects.
   (tunasync-scripts compatibility) — its command string comes from trusted
   local config only, never from API input.
 - **Observability**: Prometheus metrics, per-run log files, events table, TUI.
+  Run logs use `<job>_YYYY-MM-DD_HH_MM.log` in UTC; repeated starts in the same
+  minute add `_2`, `_3`, etc. `current.log` points to the latest run. The TUI
+  displays logs chronologically and follows the tail; PgUp/PgDn browse history.
 - **Config**: TOML with `include` (glob/nested/cycle-detected), `${VAR}`
   expansion, `file:line` validation via `synora check`.
 - **Migration**: `scripts/tunasync2synora.py` and `scripts/yuki2synora.py`

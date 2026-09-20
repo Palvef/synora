@@ -9,6 +9,13 @@ pub struct RunLogger {
 }
 impl RunLogger {
     pub fn open(log_dir: &Path, job_name: &str) -> std::io::Result<RunLogger> {
+        Self::open_at(log_dir, job_name, time::OffsetDateTime::now_utc())
+    }
+    fn open_at(
+        log_dir: &Path,
+        job_name: &str,
+        now: time::OffsetDateTime,
+    ) -> std::io::Result<RunLogger> {
         if job_name.is_empty()
             || job_name == "."
             || job_name.contains("..")
@@ -23,17 +30,30 @@ impl RunLogger {
         }
         let dir = log_dir.join(job_name);
         std::fs::create_dir_all(&dir)?;
-        let now = time::OffsetDateTime::now_utc();
-        let filename = format!(
-            "{job_name}_{}-{}.log",
-            now.unix_timestamp(),
-            synora_core::RunId::new()
-        );
-        let run = OpenOptions::new()
-            .create_new(true)
-            .read(true)
-            .append(true)
-            .open(dir.join(&filename))?;
+        let stamp = now
+            .format(&time::macros::format_description!(
+                "[year]-[month]-[day]_[hour]_[minute]"
+            ))
+            .map_err(std::io::Error::other)?;
+        let mut sequence = 1u64;
+        let (filename, run) = loop {
+            let suffix = if sequence == 1 {
+                String::new()
+            } else {
+                format!("_{sequence}")
+            };
+            let filename = format!("{job_name}_{stamp}{suffix}.log");
+            match OpenOptions::new()
+                .create_new(true)
+                .read(true)
+                .append(true)
+                .open(dir.join(&filename))
+            {
+                Ok(file) => break (filename, file),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => sequence += 1,
+                Err(e) => return Err(e),
+            }
+        };
         let link = dir.join(format!(".current-{}", synora_core::RunId::new()));
         std::os::unix::fs::symlink(&filename, &link)?;
         std::fs::rename(&link, dir.join("current.log"))?;
@@ -232,6 +252,31 @@ mod tests {
 #[cfg(test)]
 mod path_safety_tests {
     use super::*;
+
+    #[test]
+    fn calendar_names_and_collisions_preserve_each_run() {
+        let root =
+            std::env::temp_dir().join(format!("synora-log-names-{}", synora_core::RunId::new()));
+        let now = time::macros::datetime!(2026-08-20 13:18 UTC);
+        let mut first = RunLogger::open_at(&root, "ubuntu", now).unwrap();
+        first.raw(b"first\n").unwrap();
+        let mut second = RunLogger::open_at(&root, "ubuntu", now).unwrap();
+        second.raw(b"second\n").unwrap();
+        let dir = root.join("ubuntu");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("ubuntu_2026-08-20_13_18.log")).unwrap(),
+            "first\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("ubuntu_2026-08-20_13_18_2.log")).unwrap(),
+            "second\n"
+        );
+        assert_eq!(
+            std::fs::read_link(dir.join("current.log")).unwrap(),
+            Path::new("ubuntu_2026-08-20_13_18_2.log")
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn reject_log_paths_before_creating_files() {

@@ -530,7 +530,7 @@ fn render_logs(f: &mut Frame, app: &App, snap: &Snapshot, area: Rect) {
     let title = job
         .map(|j| {
             format!(
-                " Logs: {} (F5) — newest first | PgUp/PgDn scroll, End live ",
+                " Logs: {} (F5) — chronological | PgUp/PgDn scroll, End live ",
                 j.name
             )
         })
@@ -540,10 +540,12 @@ fn render_logs(f: &mut Frame, app: &App, snap: &Snapshot, area: Rect) {
     } else {
         &[]
     };
-    let items: Vec<ListItem> = lines
+    let height = usize::from(area.height.saturating_sub(2));
+    let offset = app.log_offset.min(lines.len().saturating_sub(height));
+    let end = lines.len().saturating_sub(offset);
+    let start = end.saturating_sub(height);
+    let items: Vec<ListItem> = lines[start..end]
         .iter()
-        .rev()
-        .skip(app.log_offset)
         .map(|l| ListItem::new(Line::from(Span::raw(l.clone()))))
         .collect();
     let list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
@@ -2736,6 +2738,33 @@ mod interaction_tests {
         assert_eq!(char_byte("镜像站", 1), 3);
         assert_eq!(char_byte("镜像站", 99), 9);
     }
+    #[test]
+    fn logs_are_chronological_and_follow_tail() {
+        let backend = ratatui::backend::TestBackend::new(90, 5);
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+        let mut app = App::new(None);
+        let mut snap = jobs(&["alpha"]);
+        app.reconcile_selection(&snap);
+        snap.log_job = Some("alpha".into());
+        snap.log_lines = (1..=6).map(|n| format!("event-{n}")).collect();
+        for (offset, expected) in [
+            (0, ["event-4", "event-5", "event-6"]),
+            (2, ["event-2", "event-3", "event-4"]),
+        ] {
+            app.log_offset = offset;
+            terminal
+                .draw(|f| render_logs(f, &app, &snap, f.area()))
+                .unwrap();
+            let buffer = terminal.backend().buffer();
+            for (row, value) in expected.iter().enumerate() {
+                let rendered: String = (1..89)
+                    .map(|x| buffer[(x, row as u16 + 1)].symbol())
+                    .collect();
+                assert!(rendered.starts_with(value), "{rendered}");
+            }
+        }
+    }
+
     #[test]
     fn rendering_small_terminals_does_not_overlap_chrome_or_panic() {
         for (w, h) in [(1, 1), (20, 5), (80, 24)] {

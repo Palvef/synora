@@ -96,7 +96,7 @@ async fn startup_script_job_runs_success_and_records_size() {
 name = "smoke"
 schedule = "startup"
 provider = "script"
-command = "mkdir -p sub && echo data > sub/f.txt && echo SYNORA_SIZE=999"
+command = "mkdir -p sub && echo data > sub/f.txt && echo SYNORA_SIZE=999 && echo stderr-marker >&2"
 storage = "{}"
 "#,
             repo.display()
@@ -131,6 +131,8 @@ storage = "{}"
     let content = std::fs::read_to_string(&log).unwrap();
     assert!(content.contains("started (script provider)"), "{content}");
     assert!(content.contains("succeeded"), "{content}");
+    assert_eq!(content.matches("SYNORA_SIZE=999").count(), 1, "{content}");
+    assert_eq!(content.matches("stderr-marker").count(), 1, "{content}");
 }
 
 #[tokio::test]

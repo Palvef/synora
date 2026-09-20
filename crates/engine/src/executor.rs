@@ -669,10 +669,8 @@ async fn run_once_inner(
         Err(e) => Err(e),
         Ok(_result) if safety_violation.is_some() => Err(safety_violation.unwrap()),
         Ok(result) => {
-            if let Some(l) = logger.as_mut() {
-                let _ = l.raw(&result.stdout);
-                let _ = l.raw(&result.stderr);
-            }
+            // Providers already stream both pipes into the run log. Retained
+            // output is for result parsing only; appending it would replay it.
             // fail_on_match: output regex forces failure even with exit 0
             // (tunasync convention, alignment decision).
             if let Some(re) = &job.fail_on_match {
