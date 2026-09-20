@@ -79,6 +79,12 @@ class BootstrapTests(unittest.TestCase):
             result = subprocess.run(['git', '-C', str(repo), 'show-ref'], capture_output=True)
             self.assertEqual(result.returncode, 1)
 
+    def test_large_ref_advertisement_is_scanned_without_whole_file_limit(self):
+        refs = (b'b' * 40 + b' refs/heads/feature\n') * 300000
+        refs += b'a' * 40 + b' refs/heads/master\n'
+        self.assertGreater(len(refs), 16 * 1024 * 1024)
+        self.assertEqual(git_bootstrap.lookup_head(io.BytesIO(refs), 'refs/heads/master'), 'a' * 40)
+
     def test_invalid_pack_names_are_rejected(self):
         for text in ['P ../../config', 'P pack-123.pack', '<html>error</html>', '']:
             with self.assertRaises(ValueError):

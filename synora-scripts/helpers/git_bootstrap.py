@@ -55,6 +55,20 @@ def download(opener, url, path):
             time.sleep(5 * attempt)
 
 
+def lookup_head(response, branch):
+    consumed = 0
+    while line := response.readline(4097):
+        consumed += len(line)
+        if len(line) > 4096 or consumed > 128 * 1024 * 1024:
+            raise ValueError('Excessive Git seed refs')
+        fields = line.decode('ascii').split()
+        if len(fields) == 2 and fields[1] == branch:
+            if not re.fullmatch(r'[0-9a-f]{40}(?:[0-9a-f]{24})?', fields[0]):
+                raise ValueError('Invalid seed commit')
+            return fields[0]
+    raise ValueError('Seed default branch is missing')
+
+
 def bootstrap(url, repo):
     if not url.startswith(('https://', 'http://')):
         raise ValueError('Bootstrap URL must use HTTP(S)')
@@ -74,10 +88,8 @@ def bootstrap(url, repo):
         raise ValueError('Seed HEAD is not a branch')
     branch = head.removeprefix('ref: ')
     subprocess.run(['git', 'check-ref-format', branch], check=True)
-    refs = [line.split() for line in metadata('info/refs').splitlines()]
-    heads = [fields[0] for fields in refs if len(fields) == 2 and fields[1] == branch]
-    if len(heads) != 1 or not re.fullmatch(r'[0-9a-f]{40}(?:[0-9a-f]{24})?', heads[0]):
-        raise ValueError('Seed default branch is missing or invalid')
+    with opener.open(base + 'info/refs', timeout=60) as response:
+        head_oid = lookup_head(response, branch)
     names = pack_names(metadata('objects/info/packs'))
     staging = repo / '.synora-bootstrap'
     staging.mkdir(exist_ok=True)
@@ -101,8 +113,8 @@ def bootstrap(url, repo):
             raise
         partial.replace(target)
         partial.with_suffix('.idx').replace(index)
-    subprocess.run(['git', '-C', str(repo), 'fsck', '--full', '--no-dangling', heads[0]], check=True)
-    subprocess.run(['git', '-C', str(repo), 'update-ref', 'refs/synora-bootstrap/seed', heads[0]], check=True)
+    subprocess.run(['git', '-C', str(repo), 'fsck', '--full', '--no-dangling', head_oid], check=True)
+    subprocess.run(['git', '-C', str(repo), 'update-ref', 'refs/synora-bootstrap/seed', head_oid], check=True)
     print('Seed connectivity verified; fetching official upstream before reporting success', flush=True)
 
 
