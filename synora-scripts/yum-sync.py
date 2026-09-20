@@ -47,7 +47,7 @@ REPO_STAT = {}
 
 from repo_discovery import directories, rpm_versions
 
-def repository_matrix(template, os_values, components, arches):
+def repository_matrix(template, os_values, components, arches, selection=None):
     values = {'os_ver': os_values, 'comp': components, 'arch': arches}
     def walk(url, remaining, bindings):
         if not remaining:
@@ -67,6 +67,8 @@ def repository_matrix(template, os_values, components, arches):
             rx=re.compile(re.escape(part).replace(re.escape('@{'+key+'}'), '(.+)')+'$')
             candidates=[m.group(1) for name in directories(url) if (m:=rx.fullmatch(name))]
         for value in candidates:
+            if selection and not selection.matches({"os_ver": "VERSIONS", "comp": "COMPONENTS", "arch": "ARCHES"}[key], value):
+                continue
             yield from walk(url+'/'+part.replace('@{'+key+'}',value),tail,{**bindings,key:value})
     origin, path = template.split('://',1)
     host, _, path = path.partition('/')
@@ -255,7 +257,7 @@ def main():
     cache_dir = tempfile.mkdtemp()
 
     def combination_os_comp(arch):
-        matrix = list(repository_matrix(args.base_url, os_list, component_list, [arch]))
+        matrix = list(repository_matrix(args.base_url, os_list, component_list, [arch], selection))
         found = set()
         for bindings, url in matrix:
             vardict = {'os_ver': os_list[0], 'comp': component_list[0], 'arch': arch, **bindings}

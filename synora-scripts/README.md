@@ -150,3 +150,21 @@ Existing `SYNC_ARCHES` / `SYNC_EXCLUDE_ARCHES` filters further restrict the list
 Versions remain automatic unless explicitly restricted with `SYNC_VERSIONS` or
 `SYNC_EXCLUDE_VERSIONS`. Architecture overrides preserve unselected local content
 during cleanup, avoiding deletion of packages shared with retained suites.
+
+
+MongoDB and Proxmox also accept `SYNC_SCOPE_POLICY=tuna`. At the start of each
+run, the wrapper reads the current `tuna/tunasync-scripts` commit and parses its
+repository script and APT/YUM templates as data. All files come from that same
+commit; downloaded code is never executed. Fetch or validation failures stop the
+run instead of falling back to unrestricted discovery. `TUNA_SCOPE_PROXY` optionally
+sets a proxy for these GitHub requests independently of package downloads. The commit and selected
+versions, components and architectures are recorded in the run log.
+
+This policy intersects TUNA's scope with the job's architecture and include/exclude
+settings. For Proxmox formal repositories, set `SYNC_EXCLUDE_COMPONENTS=pvetest`.
+MongoDB excludes development/testing branches and duplicate OS aliases by matching
+TUNA's numeric product versions and OS list. MongoDB stable aliases use TUNA's
+stable version only when local metadata exists. Proxmox ISO and appliance mirrors
+continue to follow the official upstream inventory. Selection changes preserve
+previously downloaded excluded content; review and back up old branches before
+removing them separately.

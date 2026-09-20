@@ -20,6 +20,12 @@ if [ "${SYNORA_HTTP_CONNECT_WRAPPED:-}" != "1" ] && [ -f "$connect_wrapper" ]; t
 	esac
 fi
 
+source "${_here}/helpers/tuna-scope.sh"
+prepare_tuna_scope proxmox
+# With a TUNA policy, discover upstream suites and intersect the pinned scope.
+suites=@debian-current
+if [ "${SYNC_SCOPE_POLICY:-}" = tuna ]; then suites=@auto; fi
+
 BASE_URL="${SYNORA_UPSTREAM:-"http://download.proxmox.com"}"
 BASE_PATH="${SYNORA_STORAGE}"
 
@@ -31,12 +37,12 @@ PMG_PATH="${APT_PATH}/pmg"
 
 # === download deb packages ====
 
-"$apt_sync" --delete "${BASE_URL}/debian/pve" @debian-current pve-no-subscription,pvetest amd64 "$PVE_PATH"
-"$apt_sync" --delete "${BASE_URL}/debian/pbs" @debian-current pbs-no-subscription amd64 "$PBS_PATH"
-"$apt_sync" --delete "${BASE_URL}/debian/pbs-client" @debian-current main amd64 "$PBS_CLIENT_PATH"
-"$apt_sync" --delete "${BASE_URL}/debian/pmg" @debian-current pmg-no-subscription amd64 "$PMG_PATH"
+"$apt_sync" --delete "${BASE_URL}/debian/pve" "$suites" pve-no-subscription,pvetest amd64 "$PVE_PATH"
+"$apt_sync" --delete "${BASE_URL}/debian/pbs" "$suites" pbs-no-subscription amd64 "$PBS_PATH"
+"$apt_sync" --delete "${BASE_URL}/debian/pbs-client" "$suites" main amd64 "$PBS_CLIENT_PATH"
+"$apt_sync" --delete "${BASE_URL}/debian/pmg" "$suites" pmg-no-subscription amd64 "$PMG_PATH"
 # upstream directory structure
-ln -sf pve/dists $APT_PATH/dists
+ln -sfnT pve/dists "$APT_PATH/dists"
 echo "Debian finished"
 
 # === download standalone files ====

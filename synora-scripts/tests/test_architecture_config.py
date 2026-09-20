@@ -53,7 +53,7 @@ class ArchitectureConfigurationTests(unittest.TestCase):
     def test_yum_override_changes_requested_matrix_before_fetch(self):
         yum = module('yum-sync')
         response = Mock(status_code=200, content=b'<repomd/>')
-        def matrix(base, versions, components, arches):
+        def matrix(base, versions, components, arches, selection=None):
             self.assertEqual(versions, ['@auto'])
             self.assertEqual(arches, ['aarch64'])
             return [({'os_ver': 'future', 'comp': 'main', 'arch': arches[0]}, 'https://repo.test/future/aarch64')]
