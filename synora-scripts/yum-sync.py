@@ -305,7 +305,8 @@ def main():
                     with tempfile.NamedTemporaryFile('w', suffix='.conf') as conf:
                         conf.write(f"[main]\nreposdir=/dev/null\nkeepcache=0\nskip_if_unavailable=0\n[{name}]\nname={name}\nbaseurl={repo_url}\nrepo_gpgcheck=0\ngpgcheck=0\nenabled=1\nskip_if_unavailable=0\nexclude={' '.join(NAME_PATTERNS)}\n")
                         conf.flush()
-                        command = ['dnf', '--disableplugin=local,system_upgrade', 'reposync', '-c', conf.name, '--delete', '-p', str(args.working_dir.absolute())]
+                        # URLs are already expanded; avoid host-release detection in Debian containers.
+                        command = ['dnf', '--releasever=0', '--disableplugin=local,system_upgrade', 'reposync', '-c', conf.name, '--delete', '-p', str(args.working_dir.absolute())]
                         if args.pass_arch_to_reposync:
                             command += ['--arch', arch]
                         logger.info('Syncing repository %s from %s', name, repo_url)

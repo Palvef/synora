@@ -66,6 +66,7 @@ class DiscoveryTests(unittest.TestCase):
         calls=[]
         def execute(args, **kwargs):
             calls.append(args[0])
+            if args[0]=='dnf': self.assertIn('--releasever=0',args)
             if len(calls)==1: raise subprocess.CalledProcessError(1,args)
             return subprocess.CompletedProcess(args,0)
         with tempfile.TemporaryDirectory() as d, patch.object(sys,'argv',['yum-sync','https://repo.test/@{comp}','1','broken,healthy','x86_64','@{comp}',d]), patch.object(yum,'repository_matrix',return_value=matrix), patch.object(yum.requests,'get',return_value=response), patch.object(mongodb_rpm,'needs_repair',return_value=False), patch.object(yum.sp,'run',side_effect=execute), patch.object(yum,'calc_repo_size') as calc:
