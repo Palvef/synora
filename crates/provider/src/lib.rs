@@ -446,7 +446,7 @@ pub fn parse_script_status(text: &str) -> Option<String> {
 
 /// Phrases tunasync scripts print when the run actually failed, even if the
 /// process later exited 0 (yum-sync.py used to do this).
-pub fn script_reported_failure(text: &str) -> Option<&'static str> {
+pub fn script_reported_failure(text: &str) -> Option<&str> {
     const NEEDLES: &[&str] = &[
         "Failed YUM repos:",
         "Failed APT repos of",
@@ -458,7 +458,13 @@ pub fn script_reported_failure(text: &str) -> Option<&'static str> {
         "SYNORA_STATUS=failed",
         "local official proxy failed",
     ];
-    NEEDLES.iter().copied().find(|n| text.contains(n))
+    text.lines()
+        .find(|line| NEEDLES.iter().any(|needle| line.contains(needle)))
+        .map(|line| {
+            let line = line.trim();
+            let end = line.char_indices().nth(512).map_or(line.len(), |(i, _)| i);
+            &line[..end]
+        })
 }
 
 /// Build the provider for a job.
@@ -523,6 +529,15 @@ pub fn build_provider(job: &JobSpec) -> Result<Provider, ProviderError> {
 
 #[cfg(test)]
 mod result_tests {
+    #[test]
+    fn script_failure_preserves_exit_code_and_detail() {
+        assert_eq!(
+            super::script_reported_failure(
+                "progress\ngit update failed with rc=124\n==== SYNC /data FAILED ===="
+            ),
+            Some("git update failed with rc=124")
+        );
+    }
     use super::process_result_is_success;
 
     #[test]

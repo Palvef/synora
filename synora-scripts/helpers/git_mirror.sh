@@ -59,6 +59,11 @@ git_mirror_update() {
 	local repo_dir="$2"
 	cd "$repo_dir" || return 1
 	git_mirror_clean_pack_tmp "$repo_dir"
+	local seed
+	seed=$(git config --get synora.bootstrapUrl || true)
+	if [[ -n "$seed" ]] && ! git show-ref --quiet; then
+		python3 "$(dirname -- "${BASH_SOURCE[0]}")/git_bootstrap.py" "$seed" "$repo_dir" || return $?
+	fi
 	echo "==== SYNC $repo_dir START ===="
 	git remote set-url origin "$upstream"
 	local ret=0 duration

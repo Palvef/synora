@@ -31,13 +31,20 @@ to TUNA and to the authors and maintainers of these projects.
   `[24]`; exit 23 fails unless explicitly enabled), two-stage-rsync (tunasync two-pass: a fast stage-1 subset by
   profile, then the full sync), script (`SYNORA_*` env, `SYNORA_SIZE=` size reporting; workers always run these in `synora-scripts`), docker (`docker run`, storage mounted at /data,
   optional in-container command), git (`clone --mirror` + `remote update --prune`, same `synora-scripts` image on workers),
-  with a 6-hour bootstrap fetch deadline and a 1-hour incremental deadline (override
-  per mirror using `git -C <mirror> config synora.syncTimeout 12h`),
   and HTTP directory mirroring (tsumugu-style: downloaded-file 404/410 responses complete with warnings; other transfer/listing errors fail the run,
   local symlinks left alone, listing-marked symlinks mirrored as local links,
   configurable download concurrency, 30 s connect / 120 s idle-read timeout,
   unlimited run
   time unless a timeout is set with 1m/1h/1d units).
+
+  Git mirrors allow 6 hours for bootstrap and 1 hour for incremental fetches;
+  override with `git -C <mirror> config synora.syncTimeout 12h`.
+  Empty mirrors can opt into a direct static-pack seed using
+  `git -C <mirror> config synora.bootstrapUrl https://trusted-mirror/repo.git/`.
+  Seed packs are checksum-checked and verified with `git fsck`; the official remote
+  must still finish successfully. Completed packs survive retries; partial transfers
+  resume only when the HTTP server honors Range requests.
+
 - **Single machine or distributed**: `synora start` runs standalone (SQLite);
   `synora-manager` + N × `synora-worker` form a pull-model cluster (workers
   register, heartbeat every 15 s, claim assigned runs). PostgreSQL optional.
