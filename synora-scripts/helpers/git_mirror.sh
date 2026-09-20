@@ -20,10 +20,38 @@ git_mirror_clean_pack_tmp() {
 	\) -delete 2>/dev/null || true
 }
 
+# Empty mirrors need a full history transfer; incremental fetches stay bounded
+# to one hour. Native git jobs can override this in their repository config.
+git_mirror_timeout() {
+	local repo_dir="$1" duration
+	duration=$(git -C "$repo_dir" config --get synora.syncTimeout 2>/dev/null || true)
+	if [[ -z "$duration" ]]; then
+		if git -C "$repo_dir" show-ref --quiet 2>/dev/null; then
+			duration=1h
+		else
+			duration=6h
+		fi
+	fi
+	if [[ ! "$duration" =~ ^[1-9][0-9]*[smhd]?$ ]]; then
+		echo "Invalid synora.syncTimeout: use a positive duration such as 6h" >&2
+		return 2
+	fi
+	printf '%s\n' "$duration"
+}
+
+git_mirror_transfer() {
+	local duration="$1"
+	shift
+	/usr/bin/timeout -s INT -k 30s "$duration" git "$@"
+}
+
 git_mirror_init() {
 	local upstream="$1"
 	local repo_dir="$2"
-	git clone --mirror "$upstream" "$repo_dir"
+	local duration
+	duration=$(git_mirror_timeout "$repo_dir") || return $?
+	echo "Git initial clone timeout: $duration"
+	git_mirror_transfer "$duration" clone --mirror "$upstream" "$repo_dir"
 }
 
 git_mirror_update() {
@@ -33,11 +61,10 @@ git_mirror_update() {
 	git_mirror_clean_pack_tmp "$repo_dir"
 	echo "==== SYNC $repo_dir START ===="
 	git remote set-url origin "$upstream"
-	local ret=0
-	set +e
-	/usr/bin/timeout -s INT 3600 git remote update --prune
-	ret=$?
-	set -e
+	local ret=0 duration
+	duration=$(git_mirror_timeout "$repo_dir") || return $?
+	echo "Git fetch timeout: $duration (INT, then KILL after 30s)"
+	git_mirror_transfer "$duration" remote update --prune || ret=$?
 	if [[ "$ret" -ne 0 ]]; then
 		echo "git update failed with rc=$ret"
 		echo "==== SYNC $repo_dir FAILED ===="
