@@ -56,6 +56,7 @@ fn default_scripts_image() -> String {
 struct Running {
     lease_token: String,
     cancel: CancellationToken,
+    lease_timed_out: Arc<AtomicBool>,
     job: String,
     usage: provider::UsageSink,
 }
@@ -213,8 +214,12 @@ async fn main() -> Result<(), String> {
         });
     }
 
+    // The manager grants a 300s run lease. Keep a safety margin for stopping
+    // the provider, but tolerate a slow heartbeat during a burst of claims.
+    const HEARTBEAT_SAFETY_SECS: u64 = 240;
+    const MAX_CLAIMS_PER_HEARTBEAT: usize = 4;
     let lease_deadline = Arc::new(std::sync::Mutex::new(
-        std::time::Instant::now() + std::time::Duration::from_secs(40),
+        std::time::Instant::now() + std::time::Duration::from_secs(HEARTBEAT_SAFETY_SECS),
     ));
     {
         let deadline = lease_deadline.clone();
@@ -225,6 +230,15 @@ async fn main() -> Result<(), String> {
                 if std::time::Instant::now() >= *deadline.lock().unwrap_or_else(|e| e.into_inner())
                 {
                     for run in running.lock().await.values() {
+                        if run.cancel.is_cancelled() {
+                            continue;
+                        }
+                        if !run.lease_timed_out.swap(true, Ordering::SeqCst) {
+                            tracing::warn!(
+                                "worker heartbeat safety deadline expired; stopping `{}`",
+                                run.job
+                            );
+                        }
                         run.cancel.cancel();
                     }
                 }
@@ -316,7 +330,7 @@ async fn main() -> Result<(), String> {
         };
 
         *lease_deadline.lock().unwrap_or_else(|e| e.into_inner()) =
-            heartbeat_sent + std::time::Duration::from_secs(40);
+            heartbeat_sent + std::time::Duration::from_secs(HEARTBEAT_SAFETY_SECS);
 
         // Cancel requests from the operator (stop).
         let mut cancel_ids = heartbeat.cancel_runs.clone();
@@ -352,8 +366,10 @@ async fn main() -> Result<(), String> {
 
         // Claim every offered run up to the concurrency cap in this beat.
         let offers = heartbeat.offered_assignments();
-        for assignment in offers {
-            if shutdown.load(Ordering::SeqCst) || heartbeat_sent.elapsed().as_secs() >= 40 {
+        for assignment in offers.into_iter().take(MAX_CLAIMS_PER_HEARTBEAT) {
+            if shutdown.load(Ordering::SeqCst)
+                || heartbeat_sent.elapsed().as_secs() >= HEARTBEAT_SAFETY_SECS
+            {
                 break;
             }
             let jobs_now = running.lock().await.len() as u32;
@@ -375,6 +391,7 @@ async fn main() -> Result<(), String> {
                     };
                     let worker_id = worker_id.clone();
                     let cancel = CancellationToken::new();
+                    let lease_timed_out = Arc::new(AtomicBool::new(false));
                     let run_storage = run_storage.clone();
                     let netroute = netroute.clone();
                     let usage = std::sync::Arc::new(std::sync::Mutex::new(
@@ -385,6 +402,7 @@ async fn main() -> Result<(), String> {
                         Running {
                             lease_token: a.lease_token.clone(),
                             cancel: cancel.clone(),
+                            lease_timed_out: lease_timed_out.clone(),
                             job: a.job.name.clone(),
                             usage: usage.clone(),
                         },
@@ -415,6 +433,13 @@ async fn main() -> Result<(), String> {
                             &log_dir,
                             run_storage.as_ref(),
                         );
+                        // A local safety-stop is not an operator cancellation.
+                        // The manager may requeue only after run_once has
+                        // stopped the provider and fenced this completion.
+                        if lease_timed_out.load(Ordering::SeqCst) && req.status == "cancelled" {
+                            req.status = "lost".into();
+                            req.message = Some("worker heartbeat safety deadline expired".into());
+                        }
                         req.lease_token = a.lease_token;
                         let mut reported = false;
                         for attempt in 1..=8u32 {

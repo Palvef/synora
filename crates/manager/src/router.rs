@@ -790,7 +790,7 @@ async fn complete(
     // Metric labels use the run's worker (named workers register as their
     // own id; auth.name is only the token name).
     let worker_label = run.worker_id.clone().unwrap_or_else(|| auth.name.clone());
-    let new_status;
+    let mut new_status;
     // Treat the process exit status as authoritative at the manager boundary too.
     // This protects the database from old, buggy, or custom workers that report
     // `status=success` together with a failed process exit code.
@@ -822,6 +822,54 @@ async fn complete(
         return Ok(StatusCode::OK);
     }
     let applied = match effective_status {
+        "lost" => {
+            // The worker has stopped its provider after its local heartbeat
+            // safety deadline. Only this fenced owner may release the run;
+            // unlike an unacknowledged worker loss, it is safe to retry now.
+            new_status = JobStatus::Lost;
+            let applied = state
+                .engine
+                .store
+                .finish_active_run_fenced(
+                    &run_id,
+                    expected_attempt,
+                    JobStatus::Lost,
+                    None,
+                    None,
+                    None,
+                    None,
+                    completion_message,
+                    duration,
+                    Some((&body.worker_id, &body.lease_token)),
+                )
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            if applied {
+                state.engine.metrics.inc_counter(
+                    "synora_job_lost_total",
+                    &[("job", job.name.as_str())],
+                    1.0,
+                );
+                let worker = state.picker.pick(&job);
+                match state
+                    .engine
+                    .store
+                    .create_lost_requeue(&run_id, &job.name, worker.as_deref())
+                    .await
+                {
+                    Ok(Some(new_id)) => {
+                        tracing::info!(
+                            "job `{}`: re-queued as {new_id} after safe worker stop",
+                            job.name
+                        );
+                        new_status = JobStatus::Queued;
+                    }
+                    Ok(None) => tracing::warn!("job `{}`: safe-stop requeue was skipped", job.name),
+                    Err(e) => tracing::error!("job `{}`: safe-stop requeue failed: {e}", job.name),
+                }
+            }
+            applied
+        }
         "cancelled" => {
             new_status = JobStatus::Cancelled;
             state
@@ -1900,6 +1948,72 @@ retry = 0
                 assert!(!finished.status.is_success());
             }
         }
+        engine
+            .store
+            .create_run("operator-stop", "test", None, JobStatus::Queued, 0)
+            .await
+            .unwrap();
+        assert!(engine
+            .store
+            .claim_run("operator-stop", "worker")
+            .await
+            .unwrap());
+        let stopped = engine
+            .store
+            .get_run("operator-stop")
+            .await
+            .unwrap()
+            .unwrap();
+        let response = request(
+            &router,
+            "POST",
+            "/api/v1/runs/operator-stop/complete",
+            Some(&token),
+            serde_json::json!({"worker_id":"worker", "attempt":0, "status":"cancelled",
+                "lease_token":stopped.lease_token}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(engine
+            .store
+            .inflight_runs_of_job("test")
+            .await
+            .unwrap()
+            .is_empty());
+        engine
+            .store
+            .create_run("safe-stop", "test", None, JobStatus::Queued, 0)
+            .await
+            .unwrap();
+        assert!(engine.store.claim_run("safe-stop", "worker").await.unwrap());
+        let safe_stop = engine.store.get_run("safe-stop").await.unwrap().unwrap();
+        let response = request(
+            &router,
+            "POST",
+            "/api/v1/runs/safe-stop/complete",
+            Some(&token),
+            serde_json::json!({"worker_id":"worker", "attempt":0, "status":"lost",
+                "lease_token":safe_stop.lease_token, "message":"worker heartbeat safety deadline expired"}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            engine
+                .store
+                .get_run("safe-stop")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            JobStatus::Lost
+        );
+        assert!(engine
+            .store
+            .inflight_runs_of_job("test")
+            .await
+            .unwrap()
+            .iter()
+            .any(|r| r.status == JobStatus::Queued));
         let response = request(&router, "POST", "/api/v1/workers/worker/heartbeat", Some(&token), serde_json::json!({"status":"running","jobs_running":1,"active_runs":[{"run_id":"run","lease_token":assignment.lease_token}]})).await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
