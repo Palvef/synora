@@ -8,7 +8,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import xml.etree.ElementTree as ET
 
 import requests
@@ -65,31 +64,28 @@ def main():
         return
     storage = Path(os.environ['SYNORA_STORAGE'])
     storage.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix='synora-terra-') as temp:
-        os.environ['REPO_SIZE_FILE'] = str(Path(temp) / 'size')
-        failed = []
-        for name, version, component in selected:
-            logging.info('Syncing %s (Fedora %s, %s)', name, version, component)
-            result = subprocess.run([sys.executable, str(ROOT / 'yum-sync.py'),
-                                     f'{base}/{name}', version, component, '@auto', name, str(storage)])
-            if result.returncode:
-                failed.append(name)
-                continue
-            key = requests.get(f'{base}/{name}/key.asc', timeout=(30, 60))
-            key.raise_for_status()
-            if len(key.content) > 65536 or not key.content.startswith(b'-----BEGIN PGP PUBLIC KEY BLOCK-----'):
-                raise ValueError(f'Invalid signing key for {name}')
-            target = storage / name / 'key.asc'
-            temporary = target.with_suffix('.asc.tmp')
-            temporary.write_bytes(key.content)
-            temporary.replace(target)
-        if failed:
-            raise RuntimeError('Failed Terra repositories: ' + ', '.join(failed))
-        advertised = {name for name, _ in repositories}
-        for path in storage.iterdir():
-            if path.is_dir() and not path.is_symlink() and REPOSITORY.fullmatch(path.name + '/') and path.name not in advertised:
-                shutil.rmtree(path)
-        subprocess.run(['bash', str(ROOT / 'helpers/size-sum.sh'), os.environ['REPO_SIZE_FILE']], check=True)
+    environment = os.environ.copy()
+    environment['RSYNC_SSL_TYPE'] = 'openssl'
+    environment['RSYNC_SSL_OPENSSL'] = str(ROOT / 'helpers/rsync_ssl_proxy.py')
+    subprocess.run(['rsync-ssl', '--timeout=30', '--list-only',
+                    'rsync://repos.fyralabs.com/repo/'], env=environment, check=True)
+    failed = []
+    for name, version, component in selected:
+        logging.info('Syncing %s unchanged through the configured proxy', name)
+        result = subprocess.run([
+            'rsync-ssl', '-a', '--no-owner', '--no-group', '--timeout=300',
+            '--delay-updates', '--delete-delay',
+            '--partial', '--stats', '--human-readable',
+            f'rsync://repos.fyralabs.com/repo/{name}/', str(storage / name) + '/',
+        ], env=environment)
+        if result.returncode:
+            failed.append(f'{name} (exit {result.returncode})')
+    if failed:
+        raise RuntimeError('Failed Terra repositories: ' + ', '.join(failed))
+    advertised = {name for name, _ in repositories}
+    for path in storage.iterdir():
+        if path.is_dir() and not path.is_symlink() and REPOSITORY.fullmatch(path.name + '/') and path.name not in advertised:
+            shutil.rmtree(path)
 
 
 if __name__ == '__main__':

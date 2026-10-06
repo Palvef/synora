@@ -197,8 +197,10 @@ Enterprise Linux, Ultramarine and unrelated repositories are excluded. Mixed RPM
 architectures are synced together. `SYNC_VERSIONS` and `SYNC_COMPONENTS` can narrow
 the discovered scope. Use `terra.py --dry-run` to inspect it.
 
-The mirror retains RPM signatures and each repository's `key.asc`. Common debug/test
-filtering regenerates RPM metadata, so upstream metadata signatures do not apply.
-For a mirror override, replace `metalink` with a `baseurl` such as
-`https://mirror.nyist.edu.cn/terra/terra$releasever`, retain `gpgcheck=1`, and set
-`repo_gpgcheck=0`. Other branches use their corresponding suffix in `baseurl`.
+Terra uses the distribution-provided `rsync-ssl` over TLS through Synora's injected
+HTTP CONNECT proxy. It fails closed if the proxy is missing or unsupported.
+No package filters or metadata regeneration are applied: RPMs, repository metadata,
+keys and signatures are copied unchanged, and upstream deletions are propagated.
+The existing Fedora-only discovery and version/component selection remain in effect.
+Schedule the job every five minutes through Synora. After the initial synchronization,
+verify metadata checksums against upstream before registering with Tetsudou.

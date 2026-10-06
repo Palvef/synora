@@ -36,3 +36,22 @@ class TerraTests(unittest.TestCase):
         with patch.object(terra.requests, 'get', return_value=listing(['terra44/'], True, 'same')):
             with self.assertRaises(ValueError):
                 terra.discover('https://repo.test')
+
+    def test_sync_preserves_upstream_files_and_uses_tls_proxy_adapter(self):
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as storage, \
+                patch.dict(os.environ, {'SYNORA_STORAGE': storage, 'HTTPS_PROXY': 'http://proxy.test:14000'}), \
+                patch.object(terra.sys, 'argv', ['terra.py']), \
+                patch.object(terra, 'discover', return_value=[('terra44', ('44', 'main'))]), \
+                patch.object(terra, 'Selection') as selection, \
+                patch.object(terra.subprocess, 'run', return_value=Mock(returncode=0)) as run:
+            selection.return_value.matches.return_value = True
+            terra.main()
+            args = run.call_args.args[0]
+            self.assertEqual(args[0], 'rsync-ssl')
+            self.assertIn('rsync://repos.fyralabs.com/repo/terra44/', args)
+            self.assertIn('--delete-delay', args)
+            self.assertFalse(any('exclude' in arg or 'filter' in arg for arg in args))
+            self.assertEqual(run.call_args.kwargs['env']['RSYNC_SSL_TYPE'], 'openssl')
+            self.assertTrue(run.call_args.kwargs['env']['RSYNC_SSL_OPENSSL'].endswith('rsync_ssl_proxy.py'))
