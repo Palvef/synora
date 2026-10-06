@@ -197,10 +197,12 @@ Enterprise Linux, Ultramarine and unrelated repositories are excluded. Mixed RPM
 architectures are synced together. `SYNC_VERSIONS` and `SYNC_COMPONENTS` can narrow
 the discovered scope. Use `terra.py --dry-run` to inspect it.
 
-Terra uses the distribution-provided `rsync-ssl` over TLS through Synora's injected
-HTTP CONNECT proxy. It fails closed if the proxy is missing or unsupported.
-No package filters or metadata regeneration are applied: RPMs, repository metadata,
-keys and signatures are copied unchanged, and upstream deletions are propagated.
-The existing Fedora-only discovery and version/component selection remain in effect.
-Schedule the job every five minutes through Synora. After the initial synchronization,
+Terra mirrors the upstream unsigned S3 listing and HTTPS objects through Synora's
+explicitly injected proxy, without package filters or metadata regeneration.
+It checks object lengths and MD5 ETags, uses conditional requests against the listed
+ETag, publishes metadata after packages, and removes obsolete files only after all
+downloads succeed. RPMs, metadata, keys and signatures remain unchanged. Object
+ETags are recorded under `.synora/terra` for incremental synchronization.
+The Fedora-only discovery and version/component selection remain in effect.
+Schedule the job every five minutes through Synora. After initial synchronization,
 verify metadata checksums against upstream before registering with Tetsudou.

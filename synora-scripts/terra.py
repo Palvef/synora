@@ -6,15 +6,13 @@ import os
 from pathlib import Path
 import re
 import shutil
-import subprocess
 import sys
 import xml.etree.ElementTree as ET
-
-import requests
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / 'helpers'))
 from repo_selection import Selection
+from terra_s3 import sync, session
 
 NAMESPACE = {'s': 'http://s3.amazonaws.com/doc/2006-03-01/'}
 REPOSITORY = re.compile(r'terra([0-9]+|rawhide)(?:-(extras|mesa|multimedia|nvidia))?/$')
@@ -24,25 +22,26 @@ def discover(base_url):
     repositories = {}
     marker = ''
     seen = set()
-    for _ in range(100):
-        response = requests.get(base_url, params={'delimiter': '/', 'marker': marker}, timeout=(30, 60))
-        response.raise_for_status()
-        root = ET.fromstring(response.content)
-        if root.tag != '{http://s3.amazonaws.com/doc/2006-03-01/}ListBucketResult':
-            raise ValueError('Invalid Terra S3 repository listing')
-        for prefix in root.findall('s:CommonPrefixes/s:Prefix', NAMESPACE):
-            match = REPOSITORY.fullmatch(prefix.text or '')
-            if match:
-                repositories[prefix.text.rstrip('/')] = (match[1], match[2] or 'main')
-        if root.findtext('s:IsTruncated', namespaces=NAMESPACE) == 'false':
-            if not repositories:
-                raise ValueError('No Fedora Terra repositories discovered')
-            return sorted(repositories.items())
-        marker = root.findtext('s:NextMarker', namespaces=NAMESPACE)
-        if not marker or marker in seen:
-            raise ValueError('Invalid Terra listing pagination')
-        seen.add(marker)
-    raise ValueError('Terra listing exceeded pagination limit')
+    with session() as client:
+        for _ in range(100):
+            response = client.get(base_url, params={'delimiter': '/', 'marker': marker}, timeout=(30, 60))
+            response.raise_for_status()
+            root = ET.fromstring(response.content)
+            if root.tag != '{http://s3.amazonaws.com/doc/2006-03-01/}ListBucketResult':
+                raise ValueError('Invalid Terra S3 repository listing')
+            for prefix in root.findall('s:CommonPrefixes/s:Prefix', NAMESPACE):
+                match = REPOSITORY.fullmatch(prefix.text or '')
+                if match:
+                    repositories[prefix.text.rstrip('/')] = (match[1], match[2] or 'main')
+            if root.findtext('s:IsTruncated', namespaces=NAMESPACE) == 'false':
+                if not repositories:
+                    raise ValueError('No Fedora Terra repositories discovered')
+                return sorted(repositories.items())
+            marker = root.findtext('s:NextMarker', namespaces=NAMESPACE)
+            if not marker or marker in seen:
+                raise ValueError('Invalid Terra listing pagination')
+            seen.add(marker)
+        raise ValueError('Terra listing exceeded pagination limit')
 
 
 def main():
@@ -64,24 +63,9 @@ def main():
         return
     storage = Path(os.environ['SYNORA_STORAGE'])
     storage.mkdir(parents=True, exist_ok=True)
-    environment = os.environ.copy()
-    environment['RSYNC_SSL_TYPE'] = 'openssl'
-    environment['RSYNC_SSL_OPENSSL'] = str(ROOT / 'helpers/rsync_ssl_proxy.py')
-    subprocess.run(['rsync-ssl', '--timeout=30', '--list-only',
-                    'rsync://repos.fyralabs.com/repo/'], env=environment, check=True)
-    failed = []
     for name, version, component in selected:
-        logging.info('Syncing %s unchanged through the configured proxy', name)
-        result = subprocess.run([
-            'rsync-ssl', '-a', '--no-owner', '--no-group', '--timeout=300',
-            '--delay-updates', '--delete-delay',
-            '--partial', '--stats', '--human-readable',
-            f'rsync://repos.fyralabs.com/repo/{name}/', str(storage / name) + '/',
-        ], env=environment)
-        if result.returncode:
-            failed.append(f'{name} (exit {result.returncode})')
-    if failed:
-        raise RuntimeError('Failed Terra repositories: ' + ', '.join(failed))
+        logging.info('Syncing %s unchanged through S3 and the configured proxy', name)
+        sync(base, name, storage)
     advertised = {name for name, _ in repositories}
     for path in storage.iterdir():
         if path.is_dir() and not path.is_symlink() and REPOSITORY.fullmatch(path.name + '/') and path.name not in advertised:
