@@ -1,0 +1,55 @@
+name: Bootstrap synchronization images
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Release containing the temporary docker-save archive
+        required: true
+        default: v0.2.2
+      sha256:
+        description: Expected SHA256 of synora-ghcr-bootstrap.tar.gz
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  bootstrap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Download and verify vetted production artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE: ${{ inputs.release }}
+          EXPECTED_SHA256: ${{ inputs.sha256 }}
+        run: |
+          [[ "$EXPECTED_SHA256" =~ ^[a-fA-F0-9]{64}$ ]] || exit 1
+          gh release download "$RELEASE" --pattern synora-ghcr-bootstrap.tar.gz --dir "$RUNNER_TEMP"
+          printf '%s  %s\n' "$EXPECTED_SHA256" "$RUNNER_TEMP/synora-ghcr-bootstrap.tar.gz" | sha256sum --check
+          docker load --input "$RUNNER_TEMP/synora-ghcr-bootstrap.tar.gz"
+      - name: Publish source runtime and seven synchronization images
+        env:
+          OWNER: ${{ github.repository_owner }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          owner=${OWNER,,}
+          mkdir -p "$RUNNER_TEMP/image-labels"
+          publish() {
+            local source=$1 target=$2
+            printf 'FROM %s\nLABEL org.opencontainers.image.source="https://github.com/%s"\n' "$source" "$REPOSITORY" > "$RUNNER_TEMP/image-labels/Dockerfile"
+            docker build --network none --pull=false -t "$target" "$RUNNER_TEMP/image-labels"
+            docker push "$target"
+          }
+          publish synora-scripts:0.2.0 "ghcr.io/$owner/synora-build-source:0.2.0"
+          for role in scripts rubygems rustup nix-channels yukina shadowmire ftpsync; do
+            publish "synora-$role:latest" "ghcr.io/$owner/synora-$role:latest"
+          done
