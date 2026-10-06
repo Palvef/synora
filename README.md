@@ -179,7 +179,7 @@ token = "worker-token"
 labels = ["g1", "zfs"]
 ca_cert = "/etc/synora/ca.pem"   # optional, verifies the manager's TLS
 max_concurrency = 8
-scripts_image = "synora-scripts:latest"  # git/script runtime (always Docker on workers)
+scripts_image = "ghcr.io/palvef/synora-scripts:latest"  # git/script runtime (always Docker on workers)
 ```
 
 ## REST API

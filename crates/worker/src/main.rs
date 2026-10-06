@@ -50,7 +50,7 @@ fn default_log_dir() -> String {
     "/var/log/synora".into()
 }
 fn default_scripts_image() -> String {
-    "synora-scripts:latest".into()
+    "ghcr.io/palvef/synora-scripts:latest".into()
 }
 
 struct Running {

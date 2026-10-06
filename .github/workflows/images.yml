@@ -1,0 +1,91 @@
+name: Synchronization images
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+    tags: ['v*']
+    paths:
+      - 'synora-scripts/**'
+      - 'deploy/docker/**'
+      - 'scripts/build-sync-images.sh'
+      - '.github/workflows/images.yml'
+
+concurrency:
+  group: sync-images-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        role: [scripts, rubygems, rustup, nix-channels, yukina, shadowmire, ftpsync]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Image parameters
+        id: image
+        env:
+          ROLE: ${{ matrix.role }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          owner=${OWNER,,}
+          echo "image=ghcr.io/$owner/synora-$ROLE" >> "$GITHUB_OUTPUT"
+          file="deploy/docker/synora-$ROLE/Dockerfile"
+          if [ "$ROLE" = scripts ]; then file=synora-scripts/Dockerfile; fi
+          echo "file=$file" >> "$GITHUB_OUTPUT"
+      - uses: docker/metadata-action@v5
+        id: metadata
+        with:
+          images: ${{ steps.image.outputs.image }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=long
+            type=semver,pattern={{version}}
+      - uses: docker/build-push-action@v6
+        with:
+          context: synora-scripts
+          file: ${{ steps.image.outputs.file }}
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          cache-from: type=gha,scope=synora-${{ matrix.role }}
+          cache-to: type=gha,mode=max,scope=synora-${{ matrix.role }}
+      - name: Check built runtime
+        env:
+          ROLE: ${{ matrix.role }}
+          IMAGE: ${{ steps.image.outputs.image }}
+          TAGS: ${{ steps.metadata.outputs.tags }}
+        run: |
+          tag=$(printf '%s\n' "$TAGS" | head -n 1)
+          case "$ROLE" in
+            scripts) check='command -v git python3 aws rsync rsync-ssl dnf repo; python3 -m py_compile /usr/lib/synora/scripts/terra.py' ;;
+            rubygems) check='gem list --local --exact rubygems-mirror --installed' ;;
+            rustup) check='rustup-mirror --version' ;;
+            nix-channels) check='nix-store --version; python3 -c "from minio.credentials import Static; import pyquery"' ;;
+            yukina) check='yukina --help >/dev/null; python -m py_compile /opt/pypi-cache/sync.py /opt/pypi-cache/logs.py' ;;
+            shadowmire) check='shadowmire --help >/dev/null' ;;
+            ftpsync) check='test -x /ftpsync/bin/ftpsync; bash -n /ftpsync/bin/ftpsync' ;;
+          esac
+          docker run --rm --entrypoint /bin/bash "$tag" -ec "$check"
+      - name: Push tested images
+        env:
+          TAGS: ${{ steps.metadata.outputs.tags }}
+        run: |
+          while IFS= read -r tag; do
+            docker push "$tag"
+          done <<< "$TAGS"

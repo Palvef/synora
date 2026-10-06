@@ -1,10 +1,10 @@
 #!/bin/bash
-# Build synora-scripts:latest from synora-scripts/Dockerfile.
+# Build ghcr.io/palvef/synora-scripts:latest from synora-scripts/Dockerfile.
 # Dedicated runtimes: scripts/build-sync-images.sh.
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
-IMAGE=${IMAGE:-synora-scripts:latest}
+IMAGE=${IMAGE:-ghcr.io/palvef/synora-scripts:latest}
 # HTTPS-only fetch proxy (git/cargo/gem/pip/curl). Apt stays direct:
 # CONNECT exposes 405 HTTP GET.
 PROXY=${FETCH_HTTPS_PROXY:-${HTTPS_PROXY:-${https_proxy:-}}}
@@ -41,7 +41,7 @@ while [ $# -gt 0 ]; do
 done
 
 echo "building $IMAGE from synora-scripts/Dockerfile"
-BUILD_ARGS=(--network host -t "$IMAGE" -f "$ROOT/synora-scripts/Dockerfile" "$ROOT/synora-scripts")
+BUILD_ARGS=(--network host --label org.opencontainers.image.source=https://github.com/Palvef/synora -t "$IMAGE" -f "$ROOT/synora-scripts/Dockerfile" "$ROOT/synora-scripts")
 if [ -n "$PROXY" ]; then
   echo "using configured HTTPS fetch proxy (apt stays direct)"
   BUILD_ARGS+=(--build-arg "FETCH_HTTPS_PROXY=$PROXY")

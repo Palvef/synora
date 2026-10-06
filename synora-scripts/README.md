@@ -2,7 +2,7 @@
 
 Mirror sync scripts for Synora `provider = "script"` and `provider = "docker"` jobs.
 
-They run inside the `synora-scripts` image (`docker run synora-scripts:latest`).
+They run inside the `synora-scripts` image (`docker run ghcr.io/palvef/synora-scripts:latest`).
 
 The AOSP script uses four parallel `repo sync` jobs by default. Set
 `AOSP_SYNC_JOBS` on the job to override the concurrency.
@@ -12,7 +12,7 @@ explicit docker job:
 
 ```toml
 provider = "docker"
-image = "synora-scripts:latest"
+image = "ghcr.io/palvef/synora-scripts:latest"
 docker_command = ["/usr/lib/synora/scripts/mysql.sh"]
 ```
 
@@ -59,7 +59,7 @@ RubyGems, Rustup, Nix, Yukina, Shadowmire, and ftpsync runtimes are described in
 `rustup-tuna-proxy.py` are not shipped.
 
 ```sh
-docker build -t synora-scripts:latest synora-scripts
+docker build -t ghcr.io/palvef/synora-scripts:latest synora-scripts
 # or
 scripts/build-synora-scripts-image.sh
 ```

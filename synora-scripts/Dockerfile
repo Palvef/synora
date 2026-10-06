@@ -1,6 +1,4 @@
 # General APT/YUM, git and Python synchronization jobs. Specialized tools have separate images.
-ARG SOURCE_RUNTIME=synora-scripts:0.2.0
-FROM ${SOURCE_RUNTIME} AS source
 FROM debian:trixie-slim
 ARG FETCH_HTTPS_PROXY
 
@@ -58,8 +56,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 
-COPY --from=source /usr/local/bin/repo /usr/local/bin/repo
-RUN ln -s /usr/local/bin/repo /usr/local/bin/aosp-repo
+ARG REPO_REV=4c37f588069d3a62b416ffcc25184119cd21e59e
+RUN HTTPS_PROXY="$FETCH_HTTPS_PROXY" https_proxy="$FETCH_HTTPS_PROXY" \
+    curl --fail --location --retry 5 --output /usr/local/bin/repo \
+      "https://raw.githubusercontent.com/GerritCodeReview/git-repo/${REPO_REV}/repo" \
+    && chmod 0755 /usr/local/bin/repo \
+    && ln -s /usr/local/bin/repo /usr/local/bin/aosp-repo
 
 # Source pinned to the helper used by tuna/tunasync-scripts/pybombs.sh.
 ARG PYBOMBS_MIRROR_REV=d7a8a9925c0b91dc9695a31a07b62eff8546909e

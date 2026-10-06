@@ -1,5 +1,10 @@
-ARG SOURCE_RUNTIME=synora-scripts:0.2.0
-FROM ${SOURCE_RUNTIME} AS source
+FROM debian:trixie-slim AS source
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
+ARG ARCHVSYNC_REV=653357779c338863917aa069afbae1b24472d32d
+WORKDIR /ftpsync
+RUN git init && git remote add origin https://salsa.debian.org/mirror-team/archvsync.git \
+    && git fetch --depth=1 origin "$ARCHVSYNC_REV" && git checkout --detach FETCH_HEAD \
+    && rm -rf .git
 FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends bash rsync ca-certificates openssh-client coreutils findutils gawk grep sed hostname procps curl && rm -rf /var/lib/apt/lists/*
 COPY --from=source /ftpsync /ftpsync
