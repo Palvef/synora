@@ -197,12 +197,13 @@ Enterprise Linux, Ultramarine and unrelated repositories are excluded. Mixed RPM
 architectures are synced together. `SYNC_VERSIONS` and `SYNC_COMPONENTS` can narrow
 the discovered scope. Use `terra.py --dry-run` to inspect it.
 
-Terra mirrors the upstream unsigned S3 listing and HTTPS objects through Synora's
-explicitly injected proxy, without package filters or metadata regeneration.
-It checks object lengths and MD5 ETags, uses conditional requests against the listed
-ETag, publishes metadata after packages, and removes obsolete files only after all
-downloads succeed. RPMs, metadata, keys and signatures remain unchanged. Object
-ETags are recorded under `.synora/terra` for incremental synchronization.
+Terra uses `s3.sh` and the unsigned AWS CLI S3 sync operation for each selected
+repository. The virtual-host addressing configuration maps endpoint
+`https://fyralabs.com` and bucket `repos` to `repos.fyralabs.com`.
+No package filters or metadata regeneration are applied; upstream deletions are
+propagated with `--delete`. Set `SYNORA_S3_DIRECT=1` to explicitly use direct
+connections for discovery and downloads, ignoring inherited proxy variables.
+Otherwise Synora must inject an explicit proxy.
 The Fedora-only discovery and version/component selection remain in effect.
 Schedule the job every five minutes through Synora. After initial synchronization,
 verify metadata checksums against upstream before registering with Tetsudou.
