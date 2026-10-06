@@ -22,6 +22,10 @@ arches = ["amd64", "i386"]
 [defaults.YUM]
 arches = ["x86_64"]
 
+# Terra publishes mixed-architecture RPM repositories without arch subdirectories.
+[repositories.terra.YUM]
+arches = ["@auto"]
+
 # Empty repository tables inherit both protocol defaults.
 [repositories.elastic]
 [repositories.xanmod]

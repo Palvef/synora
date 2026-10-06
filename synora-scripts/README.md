@@ -188,3 +188,17 @@ packages already on disk remain eligible for deletion. Repository-specific
 exclusions, such as unrelated archive directories, remain in each job. Normal
 `-dev` and `-devel` packages are retained. CI checks the committed generated file
 against the common package configuration.
+
+### Terra
+
+`terra.py` discovers Fedora repositories through the upstream S3 listing, including
+numeric releases, rawhide, and the extras/mesa/multimedia/nvidia branches. Source,
+Enterprise Linux, Ultramarine and unrelated repositories are excluded. Mixed RPM
+architectures are synced together. `SYNC_VERSIONS` and `SYNC_COMPONENTS` can narrow
+the discovered scope. Use `terra.py --dry-run` to inspect it.
+
+The mirror retains RPM signatures and each repository's `key.asc`. Common debug/test
+filtering regenerates RPM metadata, so upstream metadata signatures do not apply.
+For a mirror override, replace `metalink` with a `baseurl` such as
+`https://mirror.nyist.edu.cn/terra/terra$releasever`, retain `gpgcheck=1`, and set
+`repo_gpgcheck=0`. Other branches use their corresponding suffix in `baseurl`.
