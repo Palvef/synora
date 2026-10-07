@@ -4,7 +4,9 @@ import json
 import logging
 import os
 import re
-import tempfile
+import fcntl
+import hashlib
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -65,39 +67,125 @@ def github_get(*args, **kwargs) -> requests.Response:
     return requests.get(*args, **kwargs)
 
 
+DOWNLOAD_ATTEMPTS = 5
+RETRY_DELAY = 2
+PROGRESS_INTERVAL = 30
+
+
+class DownloadIntegrityError(ValueError):
+    pass
+
+
 def do_download(
-    remote_url: str, dst_file: Path, remote_ts: float, remote_size: int
+    remote_url: str, dst_file: Path, remote_ts: float, remote_size: int,
+    remote_digest: str | None = None,
 ) -> None:
-    # NOTE the stream=True parameter below
-    with github_get(remote_url, stream=True) as r:
-        r.raise_for_status()
-        tmp_dst_file = None
+    part = dst_file.with_name('.' + dst_file.name + '.synora-part')
+    metadata = part.with_name(part.name + '.json')
+    source = dict(url=remote_url, timestamp=remote_ts, size=remote_size, digest=remote_digest)
+    lock_path = part.with_name(part.name + '.lock')
+    with lock_path.open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
         try:
-            with tempfile.NamedTemporaryFile(
-                prefix="." + dst_file.name + ".",
-                suffix=".tmp",
-                dir=dst_file.parent,
-                delete=False,
-            ) as f:
-                tmp_dst_file = Path(f.name)
-                # download in 1MB chunks
-                for chunk in r.iter_content(chunk_size=1 << 20):
-                    if chunk:  # filter out keep-alive new chunks
-                        f.write(chunk)
-                        # f.flush()
-            # check for downloaded size
-            downloaded_size = tmp_dst_file.stat().st_size
-            if remote_size != -1 and downloaded_size != remote_size:
-                raise Exception(
-                    f"File {dst_file.as_posix()} size mismatch: downloaded {downloaded_size} bytes, expected {remote_size} bytes"
-                )
-            os.utime(tmp_dst_file, (remote_ts, remote_ts))
-            tmp_dst_file.chmod(0o644)
-            tmp_dst_file.replace(dst_file)
-        finally:
-            if not tmp_dst_file is None:
-                if tmp_dst_file.is_file():
-                    tmp_dst_file.unlink()
+            state = json.loads(metadata.read_text())
+        except (FileNotFoundError, ValueError):
+            state = {}
+        if not isinstance(state, dict) or state.get('source') != source:
+            part.unlink(missing_ok=True)
+            state = {'source': source}
+        expected_digest = None
+        if remote_digest:
+            if not re.fullmatch(r'sha256:[0-9a-fA-F]{64}', remote_digest):
+                raise DownloadIntegrityError('Unsupported asset digest: ' + remote_digest)
+            expected_digest = remote_digest.split(':', 1)[1].lower()
+
+        def save_state():
+            temporary = metadata.with_name(metadata.name + '.new')
+            temporary.write_text(json.dumps(state))
+            temporary.replace(metadata)
+
+        def publish():
+            if expected_digest:
+                with part.open('rb') as stream:
+                    actual = hashlib.file_digest(stream, 'sha256').hexdigest()
+                if actual != expected_digest:
+                    part.unlink()
+                    metadata.unlink(missing_ok=True)
+                    raise DownloadIntegrityError(f'SHA-256 mismatch for {dst_file.name}')
+            os.utime(part, (remote_ts, remote_ts))
+            part.chmod(0o644)
+            part.replace(dst_file)
+            metadata.unlink(missing_ok=True)
+            logger.info('downloaded %s (%s)', dst_file.name, sizeof_fmt(dst_file.stat().st_size))
+
+        for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
+            offset = part.stat().st_size if part.is_file() else 0
+            if remote_size >= 0 and offset > remote_size:
+                part.unlink()
+                offset = 0
+            if remote_size >= 0 and part.is_file() and offset == remote_size:
+                publish()
+                return
+            # A validator (or an API digest) prevents mixing different object versions.
+            if remote_size < 0 or not (state.get('validator') or expected_digest):
+                offset = 0
+            headers = {'Accept-Encoding': 'identity'}
+            if offset:
+                headers['Range'] = f'bytes={offset}-'
+                if state.get('validator'):
+                    headers['If-Range'] = state['validator']
+                logger.info('resuming %s at %s/%s bytes (attempt %s/%s)', remote_url, offset, remote_size, attempt, DOWNLOAD_ATTEMPTS)
+            try:
+                with github_get(remote_url, stream=True, headers=headers) as response:
+                    response.raise_for_status()
+                    if response.headers.get('Content-Encoding', 'identity') != 'identity':
+                        raise DownloadIntegrityError('Encoded response cannot be safely resumed')
+                    etag = response.headers.get('ETag', '')
+                    validator = etag if etag and not etag.startswith('W/') else response.headers.get('Last-Modified')
+                    if response.status_code == 206:
+                        content_range = re.fullmatch(r'bytes (\d+)-(\d+)/(\d+)', response.headers.get('Content-Range', ''))
+                        if not content_range or int(content_range[1]) != offset or int(content_range[2]) < offset:
+                            raise DownloadIntegrityError('Invalid Content-Range for resumed asset')
+                        total = int(content_range[3])
+                        if int(content_range[2]) >= total or (remote_size >= 0 and total != remote_size):
+                            raise DownloadIntegrityError('Content-Range disagrees with GitHub asset size')
+                        if offset and validator and state.get('validator') and validator != state['validator']:
+                            raise DownloadIntegrityError('Asset validator changed during a ranged response')
+                    elif response.status_code == 200:
+                        # Range ignored or If-Range invalidated: replace, never append.
+                        offset = 0
+                    else:
+                        raise DownloadIntegrityError(f'Unexpected download status: {response.status_code}')
+                    state['validator'] = validator
+                    started = last_report = time.monotonic()
+                    received = 0
+                    with part.open('ab' if offset else 'wb') as stream:
+                        part.chmod(0o600)
+                        save_state()
+                        for chunk in response.iter_content(chunk_size=1 << 20):
+                            if not chunk:
+                                continue
+                            stream.write(chunk)
+                            received += len(chunk)
+                            if remote_size >= 0 and offset + received > remote_size:
+                                raise DownloadIntegrityError('Downloaded asset exceeds GitHub asset size')
+                            now = time.monotonic()
+                            if now-last_report >= PROGRESS_INTERVAL:
+                                logger.info('download progress %s: %s/%s bytes, %s/s', dst_file.name, offset+received, remote_size if remote_size >= 0 else 'unknown', sizeof_fmt(received/max(now-started, 0.001)))
+                                last_report = now
+                    if remote_size >= 0 and part.stat().st_size != remote_size:
+                        raise requests.ConnectionError(f'Incomplete asset: {part.stat().st_size}/{remote_size} bytes')
+                publish()
+                return
+            except requests.RequestException as error:
+                status = error.response.status_code if error.response is not None else None
+                if status is not None and status not in (408, 429) and status < 500:
+                    raise
+                if attempt == DOWNLOAD_ATTEMPTS:
+                    raise
+                delay = RETRY_DELAY * 2**(attempt-1)
+                logger.warning('Download interrupted; retaining partial data for retry %s/%s in %ss: %s: %s', attempt+1, DOWNLOAD_ATTEMPTS, delay, remote_url, error)
+                time.sleep(delay)
 
 
 def ensure_safe_name(filename: str) -> str:
@@ -205,23 +293,21 @@ def main():
             logger.info(f"queueing download of {url} to {dst_file.relative_to(working_dir)}")
             futures.append(
                 executor.submit(
-                    download_file, url, dst_file, working_dir, updated, remote_size
+                    download_file, url, dst_file, working_dir, updated, remote_size, asset.get("digest")
                 )
             )
 
         return release_size
 
     def download_file(
-        url: str, dst_file: Path, working_dir: Path, updated: float, remote_size: int
+        url: str, dst_file: Path, working_dir: Path, updated: float, remote_size: int, remote_digest: str | None = None
     ) -> bool:
         logger.info(f"downloading {url} to {dst_file.relative_to(working_dir)} ({remote_size} bytes)")
         try:
-            do_download(url, dst_file, updated, remote_size)
+            do_download(url, dst_file, updated, remote_size, remote_digest)
             return True
         except Exception as e:
             logger.error(f"Failed to download {url}: {e}")
-            if dst_file.is_file():
-                dst_file.unlink()
             return False
 
     def link_latest(name: str, repo_dir: Path) -> None:
