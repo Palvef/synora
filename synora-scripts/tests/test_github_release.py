@@ -117,6 +117,18 @@ class Downloads(unittest.TestCase):
             release.do_download(self.url, self.dest, 1001, len(PAYLOAD), remote_digest='sha256:'+'0'*64)
         self.assertEqual(self.dest.read_bytes(), b'valid previous')
 
+    def test_single_stable_release_uses_official_latest(self):
+        response = release.requests.Response()
+        response.status_code = 200
+        response._content = json.dumps({'tag_name': 'v3.15.0'}).encode()
+        response._content_consumed = True
+        function = getattr(release, 'release_generator', None)
+        self.assertIsNotNone(function, 'Release selection must be independently testable')
+        with patch.object(release, 'github_get', return_value=response) as request:
+            selected = list(function('prometheus/prometheus', 'https://api.github.com/repos/', latest_only=True))
+        self.assertEqual(selected, [{'tag_name': 'v3.15.0'}])
+        self.assertEqual(request.call_args[0][0], 'https://api.github.com/repos/prometheus/prometheus/releases/latest')
+
     def test_existing_repositories_keep_only_one_release(self):
         cfg = json.loads(SCRIPT.with_suffix('.json').read_text())
         self.assertEqual(len(cfg), 73)

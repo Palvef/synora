@@ -198,6 +198,33 @@ def ensure_safe_name(filename: str) -> str:
         return filename.replace("/", "\\").replace("\\", "_")
 
 
+def release_generator(repo: str, base_url: str, perpage: int = 0, latest_only: bool = False):
+    endpoint = f"{base_url}{repo}/releases"
+    url = endpoint + ('/latest' if latest_only else (f'?per_page={perpage}' if perpage > 0 else ''))
+    while True:
+        try:
+            with github_get(url) as response:
+                response.raise_for_status()
+                releases = response.json()
+                links_header = response.headers.get('Link', '')
+        except Exception:
+            logger.exception('Failed to download release metadata for %s', repo)
+            raise
+        if latest_only:
+            if not isinstance(releases, dict):
+                raise ValueError('GitHub latest release metadata is not an object')
+            yield releases
+            return
+        if not isinstance(releases, list):
+            raise ValueError('GitHub releases metadata is not a list')
+        yield from releases
+        links = requests.utils.parse_header_links(links_header) if links_header else []
+        next_link = next((link for link in links if link.get('rel') == 'next'), None)
+        if not next_link:
+            return
+        url = next_link['url']
+
+
 def main():
     import argparse
 
@@ -350,42 +377,14 @@ def main():
         repo_dir = working_dir / Path(repo)
         logger.info(f"syncing {repo} to {repo_dir}")
 
-        def release_generator():
-            url = ""
-            if perpage > 0:
-                url = f"{args.base_url}{repo}/releases?per_page={perpage}"
-            else:
-                url = f"{args.base_url}{repo}/releases"
-            while True:
-                try:
-                    r = github_get(url)
-                    r.raise_for_status()
-                    releases = r.json()
-                except Exception as e:
-                    logger.error(
-                        f"Failed to download metadata for {repo}: {e}",
-                    )
-                    raise
-
-                for release in releases:
-                    yield release
-
-                # check if there is a next page
-                if "Link" in r.headers:
-                    links = requests.utils.parse_header_links(r.headers["Link"])
-                    next_link = next((link for link in links if link["rel"] == "next"), None)
-                    if next_link:
-                        url = next_link["url"]
-                    else:
-                        break
-                else:
-                    break
-
         n_downloaded = 0
         n_release = 0
         n_prerelease = 0
         try:
-            for release in release_generator():
+            for release in release_generator(
+                repo, args.base_url, perpage,
+                latest_only=(versions == 1 and not prerelease and not use_separate_limits),
+            ):
                 if release["draft"]:
                     continue
                 is_prerelease = release["prerelease"]
