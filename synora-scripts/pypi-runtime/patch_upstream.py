@@ -30,3 +30,33 @@ replace(main, '        std::fs::rename(&tmp_path, &target_path)?;', '''        i
             anyhow::bail!("download size differs from HEAD: {}", path);
         }
         std::fs::rename(&tmp_path, &target_path)?;''')
+
+# Pipe log records directly to stderr; terminal redraw handling is unnecessary in Docker.
+replace(main, '    let bar_writer = BAR_MANAGER.get().unwrap().create_writer();\n', '')
+replace(main, '    sync::{Mutex, OnceLock},', '    sync::OnceLock,')
+replace(main, '.with_writer(Mutex::new(bar_writer))', '.with_writer(std::io::stderr)')
+replace(main, '    let vote = match stage1(&args).await {', '''    tracing::info!("Cache stage 1: reading recent access logs");
+    let vote = match stage1(&args).await {''')
+replace(main, '    let stats = stage2(&args, local_sizedb.as_ref());', '''    tracing::info!("Cache stage 2: examining locally cached packages");
+    let stats = stage2(&args, local_sizedb.as_ref());''')
+replace(main, '    let normalized_vote = stage3(&args, &vote, &stats, &client, remote_sizedb.as_ref()).await;', '''    tracing::info!("Cache stage 3: checking {} package candidates", vote.len());
+    let normalized_vote = stage3(&args, &vote, &stats, &client, remote_sizedb.as_ref()).await;''')
+replace(main, '    let result = stage4(', '''    tracing::info!("Cache stage 4: applying cache budget and downloading packages");
+    let result = stage4(''')
+replace(stages, '    let mut stop_iterate_flag = false;', '''    let mut processed_lines = 0usize;
+    let mut last_progress = std::time::Instant::now();
+    let mut stop_iterate_flag = false;''')
+replace(stages, '        for (lno, line) in bufreader.lines().enumerate() {', '''        for (lno, line) in bufreader.lines().enumerate() {
+            processed_lines += 1;
+            if last_progress.elapsed().as_secs() >= 15 {
+                tracing::info!("Cache stage 1: {} log lines processed, {} package candidates", processed_lines, vote.len());
+                last_progress = std::time::Instant::now();
+            }''')
+replace(stages, '    for entry in walkdir::WalkDir::new(&args.repo_path) {', '''    let mut visited = 0usize;
+    let mut last_progress = std::time::Instant::now();
+    for entry in walkdir::WalkDir::new(&args.repo_path) {
+        visited += 1;
+        if last_progress.elapsed().as_secs() >= 15 {
+            tracing::info!("Cache stage 2: {} filesystem entries inspected, {} package files", visited, res.len());
+            last_progress = std::time::Instant::now();
+        }''')

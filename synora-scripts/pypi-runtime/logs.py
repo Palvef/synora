@@ -9,6 +9,8 @@ import time
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
+PROGRESS_INTERVAL = 15.0
+
 LEGACY = re.compile(r'^(\S+) \S+ \S+ \[([^]]+)\] "([^"]+)" (\d+) (\d+) "(?:[^"\\]|\\.)*" "(?:[^"\\]|\\.)*" "((?:[^"\\]|\\.)*)"(?: .*)?$')
 
 def normalize(item):
@@ -42,10 +44,12 @@ def legacy(line):
     if len(parts)!=3: raise ValueError('invalid request')
     return normalize(dict(clientip=ip,timestamp=datetime.datetime.strptime(stamp,'%d/%b/%Y:%H:%M:%S %z').timestamp(),url=parts[1],status=status,size=size,user_agent=agent,proxied='1'))
 
-def prepare(source, historical, output, now=None):
+def prepare(source, historical, output, now=None, progress=None):
     now=time.time() if now is None else now
     cutoff=now-7*86400
     count=0
+    scanned=0
+    last_report=time.monotonic()
     tmp=output.with_suffix('.tmp')
     try:
         with tmp.open('w') as dest:
@@ -53,15 +57,21 @@ def prepare(source, historical, output, now=None):
                 if root is None or not root.exists(): continue
                 for path in sorted(root.rglob('pypi*.log*')):
                     if not path.is_file() or path.is_symlink() or path.stat().st_mtime < cutoff: continue
+                    if progress:
+                        progress(f'Access logs: reading {path.name}; {scanned} lines processed, {count} recent requests validated')
                     opener=gzip.open if path.suffix=='.gz' else open
                     with opener(path,'rt',encoding='utf-8',errors='strict') as stream:
                         for number,line in enumerate(stream,1):
+                            scanned+=1
                             if not line.strip(): continue
                             try: item=legacy(line) if old else normalize(json.loads(line))
                             except (ValueError,KeyError,TypeError) as exc:
                                 raise ValueError(f'invalid access log {path.name}:{number}') from exc
                             if cutoff <= item['timestamp'] <= now+300:
                                 dest.write(json.dumps(item,separators=(',',':'))+'\n'); count+=1
+                            if progress and time.monotonic()-last_report >= PROGRESS_INTERVAL:
+                                progress(f'Access logs: {scanned} lines processed, {count} recent requests validated; {path.name}')
+                                last_report=time.monotonic()
             if not count: raise ValueError('no valid access requests in the last seven days; refusing cache GC')
         tmp.replace(output)
     finally:

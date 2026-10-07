@@ -48,6 +48,16 @@ class LogsTest(unittest.TestCase):
             with gzip.open(site/'pypi.log.1.gz','wt') as stream: stream.write(line+'\n')
             count=logs.prepare(source,historic,root/'out.log',NOW)
             self.assertEqual(count,2)
+    def test_log_preparation_reports_counts_before_finishing(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root/'pypi.log').write_text((json.dumps(ITEM)+'\n') * 2)
+            output = []
+            with patch.object(logs, 'PROGRESS_INTERVAL', 0, create=True):
+                count = logs.prepare(root, None, root/'out.log', NOW, progress=output.append)
+            self.assertEqual(count, 2)
+            self.assertTrue(any('2 lines processed' in line and '2 recent requests' in line for line in output), output)
+
     def test_expired_logs_do_not_authorize_gc(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d); (root/'pypi.log').write_text(json.dumps(dict(ITEM,timestamp=NOW-8*86400))+'\n')
@@ -69,6 +79,52 @@ class SyncTest(unittest.TestCase):
     def test_process_propagates_failure(self):
         with self.assertRaises(RuntimeError):
             sync.run([sys.executable,'-c','raise SystemExit(2)'])
+    def assert_live_output(self, message, expected, interval=0.05):
+        with tempfile.TemporaryDirectory() as directory:
+            ack = Path(directory) / 'seen'
+            child = (
+                "import pathlib,time,sys; "
+                f"ack=pathlib.Path({str(ack)!r}); "
+                f"sys.stdout.write({message!r}); sys.stdout.flush(); "
+                "deadline=time.monotonic()+2; "
+                "exec('while not ack.exists() and time.monotonic()<deadline: time.sleep(0.01)'); "
+                "sys.exit(0 if ack.exists() else 2)"
+            )
+            observed = []
+            def output(*args, **kwargs):
+                text = ' '.join(str(arg) for arg in args)
+                if args and args[0] == 'Running:':
+                    return
+                observed.append(text)
+                if expected in text:
+                    ack.touch()
+            failure = None
+            with patch.object(sync, 'PROGRESS_INTERVAL', interval, create=True), patch('builtins.print', side_effect=output):
+                try:
+                    sync.run([sys.executable, '-c', child])
+                except RuntimeError as error:
+                    failure = error
+            self.assertIsNone(failure, f'Output was withheld while child ran: {failure}')
+            self.assertTrue(any(expected in line for line in observed), observed)
+            return observed
+
+    def test_phase_log_is_visible_before_child_finishes(self):
+        output = self.assert_live_output('\x1b[32m[2026-10-07] INFO Processing pypi.log\x1b[0m\n', 'INFO Processing pypi.log', interval=15)
+        self.assertFalse(any('\x1b[' in line for line in output))
+
+    def test_silent_child_has_periodic_progress(self):
+        self.assert_live_output('', 'Progress:')
+
+    def test_carriage_return_progress_is_live(self):
+        self.assert_live_output('Stage 3: 1/4\r', 'Stage 3: 1/4')
+
+    def test_short_run_keeps_final_progress_and_full_url(self):
+        output = []
+        url = 'https://mirrors.tuna.tsinghua.edu.cn/pypi/web/packages/aa/bb/hash/file.whl'
+        with patch('builtins.print', side_effect=lambda *args, **kwargs: output.append(' '.join(str(arg) for arg in args))):
+            sync.run([sys.executable, '-c', f"print('Downloaded: {url}')"])
+        self.assertTrue(any('Downloaded: ' + url in line for line in output if not line.startswith('Running:')), output)
+
     def test_budget_and_cli(self):
         cmd=sync.cache_command(Path('/data'),Path('/logs'),'https://upstream/web/',549755813888)
         self.assertEqual(cmd[cmd.index('--size-limit')+1], '549755813888')

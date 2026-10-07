@@ -1,4 +1,7 @@
 """Serialized index-only Shadowmire followed by the Yukina hot-package cache."""
+import codecs
+import selectors
+import re
 import fcntl
 import json
 import os
@@ -12,39 +15,94 @@ from logs import prepare
 UPSTREAM='https://mirrors.tuna.tsinghua.edu.cn/pypi/web/'
 BUDGET=512*1024**3
 
+PROGRESS_INTERVAL = 15.0
+ANSI = re.compile(r'\x1b\[[0-?]*[ -/]*[@-~]')
+
+
 def run(command):
     print('Running:', ' '.join(command), flush=True)
-    process=subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    missing=set()
-    last_progress=time.monotonic()
-    suppressed=0
+    env = dict(os.environ, PYTHONUNBUFFERED='1', NO_COLOR='1')
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, bufsize=0)
+    missing = set()
+    started = last_report = time.monotonic()
+    suppressed = 0
+    last_activity = None
+    pending = ''
+    decoder = codecs.getincrementaldecoder('utf-8')('replace')
+
+    def report():
+        nonlocal suppressed, last_report
+        now = time.monotonic()
+        detail = f'{suppressed} activity updates' if suppressed else 'waiting for new output'
+        if last_activity:
+            detail += '; last activity: ' + last_activity
+        print(f'Progress: {command[0]} running for {now-started:.0f}s; {detail}', flush=True)
+        suppressed = 0
+        last_report = now
+
+    def consume(line):
+        nonlocal suppressed, last_activity
+        line = ANSI.sub('', line).strip()
+        if not line:
+            return
+        important = any(s in line for s in ('ERROR', 'WARN', 'SYNORA_', 'failed', 'All done', 'Success:'))
+        progress = any(s in line for s in ('updating ', '%|', 'Downloading ', 'Downloaded:', 'Removed:')) or line.startswith('Stage ')
+        if progress and not important:
+            if last_activity is None:
+                print(line, flush=True)
+            else:
+                suppressed += 1
+            last_activity = line
+        else:
+            print(line, flush=True)
+        if line.startswith('SYNORA_MISSING='):
+            missing.add(line.split('=', 1)[1])
+
     def terminate(signum, _frame):
         process.send_signal(signum)
         raise SystemExit(128+signum)
-    previous={s:signal.signal(s,terminate) for s in (signal.SIGTERM,signal.SIGINT)}
+
+    previous = {s: signal.signal(s, terminate) for s in (signal.SIGTERM, signal.SIGINT)}
     try:
-        for line in process.stdout:
-            important=any(s in line for s in ('ERROR', 'WARN', 'SYNORA_', 'failed', 'All done', 'Success:'))
-            progress=('updating ' in line or '%|' in line or 'Downloading' in line or 'Downloaded:' in line or '\x1b[' in line or line.lstrip().startswith('['))
-            if progress and not important:
-                suppressed+=1
-                if time.monotonic()-last_progress >= 30:
-                    print(f'Progress: {suppressed} activity lines since last report; {line.strip()}',flush=True)
-                    last_progress=time.monotonic();suppressed=0
-            else:
-                print(line, end='', flush=True)
-            if line.startswith('SYNORA_MISSING='):
-                missing.add(line.strip().split('=',1)[1])
-        code=process.wait()
-        if code: raise RuntimeError(f'{command[0]} exited with status {code}')
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            while True:
+                timeout = max(0, PROGRESS_INTERVAL - (time.monotonic()-last_report))
+                ready = selector.select(timeout)
+                if ready:
+                    chunk = os.read(process.stdout.fileno(), 65536)
+                    if not chunk:
+                        pending += decoder.decode(b'', final=True)
+                        if pending:
+                            consume(pending)
+                        break
+                    pending += decoder.decode(chunk).replace('\r', '\n')
+                    lines = pending.split('\n')
+                    pending = lines.pop()
+                    for line in lines:
+                        consume(line)
+                    # Bound memory for a child emitting a very long unterminated line.
+                    if len(pending) >= 65536:
+                        consume(pending)
+                        pending = ''
+                if time.monotonic()-last_report >= PROGRESS_INTERVAL:
+                    report()
+        if suppressed:
+            report()
+        code = process.wait()
+        if code:
+            raise RuntimeError(f'{command[0]} exited with status {code}')
         return sorted(missing)
     finally:
         if process.poll() is None:
             process.terminate()
-            try: process.wait(timeout=20)
+            try:
+                process.wait(timeout=20)
             except subprocess.TimeoutExpired:
-                process.kill(); process.wait()
-        for s,handler in previous.items(): signal.signal(s,handler)
+                process.kill()
+                process.wait()
+        for s, handler in previous.items():
+            signal.signal(s, handler)
         process.stdout.close()
 
 def cache_command(root,logdir,upstream,budget):
@@ -55,7 +113,8 @@ def cycle(root,source,historical,upstream,budget,index_mode='full'):
     logdir=state/'logs';logdir.mkdir(exist_ok=True)
     with (state/'sync.lock').open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        count=prepare(source,historical,logdir/'pypi.log')
+        print('Preparing seven-day access logs',flush=True)
+        count=prepare(source,historical,logdir/'pypi.log',progress=lambda message: print(message,flush=True))
         print(f'Validated {count} recent requests',flush=True)
         if index_mode == 'full':
             run([sys.executable,__file__,'--shadowmire','--repo',str(root),'sync','--no-sync-packages','--no-filter-metadata','--shadowmire-upstream',upstream])
@@ -65,7 +124,7 @@ def cycle(root,source,historical,upstream,budget,index_mode='full'):
             print('Index mode: on-demand upstream proxy; updating only access-log package candidates',flush=True)
         # Initial index sync can take days; refresh the seven-day vote window afterwards.
         if index_mode == 'full':
-            prepare(source,historical,logdir/'pypi.log')
+            prepare(source,historical,logdir/'pypi.log',progress=lambda message: print(message,flush=True))
         (root/'packages').mkdir(exist_ok=True)
         missing=run(cache_command(root,logdir,upstream,budget)) or []
         if not isinstance(missing, list): missing=[]
