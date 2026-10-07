@@ -17,19 +17,24 @@ git config --global user.name "hernet mirrors"
 repo_sync_rc=0
 
 function repo_init() {
-	mkdir -p $SYNORA_STORAGE
-	cd $SYNORA_STORAGE
-	$REPO init -u $UPSTREAM --mirror
+	mkdir -p "$SYNORA_STORAGE"
+	cd "$SYNORA_STORAGE"
+	"$REPO" init -u "$UPSTREAM" --mirror
 }
 
 function repo_sync() {
-	cd $SYNORA_STORAGE
+	cd "$SYNORA_STORAGE"
+	export SYNORA_AOSP_REAL_GIT="$(command -v git)"
+	local helper_dir
+	helper_dir=$(mktemp -d)
+	ln -s "$(dirname "$(realpath "$0")")/helpers/aosp_git.py" "$helper_dir/git"
 	set +e
-	$REPO sync --prune -f -j"$AOSP_SYNC_JOBS"
+	PATH="$helper_dir:$PATH" "$REPO" sync -v --prune -j"$AOSP_SYNC_JOBS"
 	repo_sync_rc=$?
+	rm -rf "$helper_dir"
 	set -e
 	if [[ "$repo_sync_rc" -ne 0 ]]; then
-		echo "WARNING: repo-sync may fail, but we just ignore it."
+		echo "ERROR: AOSP repository synchronization failed (exit $repo_sync_rc)."
 	fi
 }
 
