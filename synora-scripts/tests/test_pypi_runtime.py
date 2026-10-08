@@ -58,6 +58,31 @@ class LogsTest(unittest.TestCase):
             self.assertEqual(count, 2)
             self.assertTrue(any('2 lines processed' in line and '2 recent requests' in line for line in output), output)
 
+    def test_reuses_validated_rotations_and_invalidates_changed_source(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); source = root/'source'; source.mkdir()
+            path = source/'pypi.log.1.gz'
+            with gzip.open(path, 'wt') as stream:
+                stream.write(json.dumps(ITEM)+'\n')
+            out = root/'out.log'
+            self.assertEqual(logs.prepare(source, None, out, NOW), 1)
+            with patch.object(logs, 'normalize', side_effect=AssertionError('rotation reparsed')):
+                self.assertEqual(logs.prepare(source, None, out, NOW+60), 1)
+            with gzip.open(path, 'wt') as stream:
+                stream.write('not-json\n')
+            previous = out.read_bytes()
+            with self.assertRaises(ValueError): logs.prepare(source, None, out, NOW+60)
+            self.assertEqual(out.read_bytes(), previous)
+
+    def test_cached_records_still_expire_with_seven_day_window(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d); source = root/'source'; source.mkdir()
+            (source/'pypi.log').write_text(json.dumps(ITEM)+'\n')
+            out = root/'out.log'
+            logs.prepare(source, None, out, NOW)
+            with self.assertRaises(ValueError):
+                logs.prepare(source, None, out, NOW+8*86400)
+
     def test_expired_logs_do_not_authorize_gc(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d); (root/'pypi.log').write_text(json.dumps(dict(ITEM,timestamp=NOW-8*86400))+'\n')
