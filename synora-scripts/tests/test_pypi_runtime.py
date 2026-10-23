@@ -39,6 +39,35 @@ class LogsTest(unittest.TestCase):
             (src/'pypi.log').write_text(json.dumps(ITEM)+'\nnot-json\n')
             with self.assertRaises(ValueError): logs.prepare(src,None,out,NOW)
             self.assertEqual(out.read_text(),'previous')
+    def test_unusable_request_paths_do_not_poison_valid_access_logs(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d); source=root/'source'; source.mkdir()
+            bad_paths=['/pypi/json/%5C%22https%3A/github.com/project/ci.yml',
+                       '/pypi/packages/%2e%2e/secret', '/pypi/packages/%252e%252e/secret']
+            records=[ITEM]+[dict(ITEM,url=url) for url in bad_paths]
+            (source/'pypi.log').write_text(''.join(json.dumps(item)+'\n' for item in records))
+            messages=[]
+            self.assertEqual(logs.prepare(source,None,root/'out.log',NOW,progress=messages.append),1)
+            self.assertEqual(len((root/'out.log').read_text().splitlines()),1)
+            self.assertTrue(any('3 unusable request paths' in message for message in messages))
+            with patch.object(logs,'normalize',side_effect=AssertionError('reparsed cache')):
+                self.assertEqual(logs.prepare(source,None,root/'out.log',NOW),1)
+
+    def test_invalid_fields_on_unusable_path_still_fail_closed(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d); source=root/'source'; source.mkdir()
+            bad=dict(ITEM,url='/pypi/%2e%2e/secret',proxied='unknown')
+            (source/'pypi.log').write_text(json.dumps(ITEM)+'\n'+json.dumps(bad)+'\n')
+            with self.assertRaises(ValueError): logs.prepare(source,None,root/'out.log',NOW)
+
+    def test_only_unusable_paths_do_not_authorize_gc(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d); source=root/'source'; source.mkdir()
+            (source/'pypi.log').write_text(json.dumps(dict(ITEM,url='/pypi/%2e%2e/secret'))+'\n')
+            out=root/'out.log';out.write_text('previous')
+            with self.assertRaises(ValueError): logs.prepare(source,None,out,NOW)
+            self.assertEqual(out.read_text(),'previous')
+
     def test_two_sites_and_gzip(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d); source=root/'new'; source.mkdir(); historic=root/'old'; historic.mkdir()

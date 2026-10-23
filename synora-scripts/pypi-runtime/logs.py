@@ -15,6 +15,10 @@ PROGRESS_INTERVAL = 15.0
 
 LEGACY = re.compile(r'^(\S+) \S+ \S+ \[([^]]+)\] "([^"]+)" (\d+) (\d+) "(?:[^"\\]|\\.)*" "(?:[^"\\]|\\.)*" "((?:[^"\\]|\\.)*)"(?: .*)?$')
 
+class UnusableRequestPath(ValueError):
+    """An access request that cannot safely vote for a cached package."""
+
+
 def normalize(item):
     ipaddress.ip_address(item['clientip'])
     stamp=float(item['timestamp'])
@@ -22,20 +26,20 @@ def normalize(item):
     size=int(item['size']); status=int(item['status'])
     if size < 0 or not 100 <= status <= 599: raise ValueError('invalid response')
     if not isinstance(item['user_agent'],str): raise ValueError('invalid user agent')
+    proxied=str(item.get('proxied',''))
+    if proxied not in ('0','1'): raise ValueError('missing/invalid cache origin')
     uri=urlsplit(item['url']).path
     for _ in range(3):
         decoded=unquote(uri)
         if '\\' in decoded or '\x00' in decoded or any(p in ('.','..') for p in decoded.split('/')):
-            raise ValueError('unsafe path')
+            raise UnusableRequestPath('unsafe path')
         if decoded==uri: break
         uri=decoded
-    if '%' in uri: raise ValueError('ambiguous escaped path')
+    if '%' in uri: raise UnusableRequestPath('ambiguous escaped path')
     uri=re.sub('/+', '/', uri)
     if uri in ('/pypi', '/pypi/web'): uri='/pypi/'
     if uri.startswith('/pypi/web/'): uri='/pypi/'+uri[len('/pypi/web/'):]
     if not uri.startswith('/pypi/'): raise ValueError('unexpected repo in dedicated log')
-    proxied=str(item.get('proxied',''))
-    if proxied not in ('0','1'): raise ValueError('missing/invalid cache origin')
     return dict(timestamp=stamp,clientip=item['clientip'],url=uri,size=size,status=status,user_agent=item['user_agent'],proxied=proxied)
 
 def legacy(line):
@@ -53,7 +57,7 @@ def fingerprint(path):
 
 def validated_file(path, old, cache, progress):
     # Include the format revision so normalization changes invalidate old caches.
-    key = hashlib.sha256((str(path.resolve()) + str(old) + ':1').encode()).hexdigest()
+    key = hashlib.sha256((str(path.resolve()) + str(old) + ':2').encode()).hexdigest()
     data = cache / (key + '.log')
     metadata = cache / (key + '.json')
     identity = fingerprint(path)
@@ -66,6 +70,7 @@ def validated_file(path, old, cache, progress):
         pass
     temporary = data.with_suffix('.tmp')
     count = 0
+    rejected = 0
     earliest = float('inf')
     latest = 0
     last_report = time.monotonic()
@@ -75,6 +80,11 @@ def validated_file(path, old, cache, progress):
             for number, line in enumerate(stream, 1):
                 if not line.strip(): continue
                 try: item = legacy(line) if old else normalize(json.loads(line))
+                except UnusableRequestPath:
+                    rejected += 1
+                    if progress and rejected <= 3:
+                        progress(f'Access logs: ignoring unusable request path at {path.name}:{number}')
+                    continue
                 except (ValueError, KeyError, TypeError) as exc:
                     raise ValueError(f'invalid access log {path.name}:{number}') from exc
                 stamp = item['timestamp']
@@ -84,7 +94,9 @@ def validated_file(path, old, cache, progress):
                 if progress and time.monotonic() - last_report >= PROGRESS_INTERVAL:
                     progress(f'Access logs: validating {path.name}; {count} requests processed')
                     last_report = time.monotonic()
-        info = dict(identity=identity, count=count, earliest=earliest if count else 0,
+        if progress and rejected:
+            progress(f'Access logs: ignored {rejected} unusable request paths in {path.name}')
+        info = dict(identity=identity, count=count, rejected=rejected, earliest=earliest if count else 0,
                     latest=latest, bytes=temporary.stat().st_size)
         # Never publish a reusable cache for a source changing during validation.
         metadata.unlink(missing_ok=True)
