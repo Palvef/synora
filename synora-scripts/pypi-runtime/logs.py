@@ -57,7 +57,7 @@ def fingerprint(path):
 
 def validated_file(path, old, cache, progress):
     # Include the format revision so normalization changes invalidate old caches.
-    key = hashlib.sha256((str(path.resolve()) + str(old) + ':2').encode()).hexdigest()
+    key = hashlib.sha256((str(path.resolve()) + str(old) + ':1').encode()).hexdigest()
     data = cache / (key + '.log')
     metadata = cache / (key + '.json')
     identity = fingerprint(path)
