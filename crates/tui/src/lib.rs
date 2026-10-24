@@ -7,7 +7,9 @@
 
 use api::Client;
 use clap::Parser;
-use config::{CliOverrides, ConfigLoader};
+#[cfg(test)]
+use config::CliOverrides;
+use config::ConfigLoader;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -16,9 +18,8 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Row, Ta
 use ratatui::Frame;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::Mutex;
 
 #[derive(Parser)]
 #[command(name = "synora-tui", version, about = "Synora terminal console")]
@@ -34,9 +35,47 @@ struct Cli {
     token: Option<String>,
 }
 
+type UiCompletion = Box<dyn FnOnce(&mut App) + Send>;
+
+fn start_action<F, T, E, C>(
+    rt: &tokio::runtime::Runtime,
+    app: &mut App,
+    sender: &std::sync::mpsc::Sender<UiCompletion>,
+    future: F,
+    complete: C,
+) where
+    F: std::future::Future<Output = Result<T, E>> + Send + 'static,
+    T: Send + 'static,
+    E: Send + 'static,
+    C: FnOnce(&mut App, Result<T, E>) + Send + 'static,
+{
+    if app.action_pending {
+        app.notice = Some("an operation is already running".into());
+        return;
+    }
+    app.action_pending = true;
+    app.notice = Some("operation in progress…".into());
+    let sender = sender.clone();
+    rt.spawn(async move {
+        let callback: UiCompletion =
+            match tokio::time::timeout(Duration::from_secs(30), future).await {
+                Ok(result) => Box::new(move |app| {
+                    app.action_pending = false;
+                    complete(app, result);
+                }),
+                Err(_) => Box::new(|app| {
+                    app.action_pending = false;
+                    app.notice = Some("operation timed out; refresh to check its outcome".into());
+                }),
+            };
+        let _ = sender.send(callback);
+    });
+}
+
 /// Snapshot of the world for one render pass.
 #[derive(Default, Clone)]
 struct Snapshot {
+    revision: u64,
     jobs: Vec<api::JobDTO>,
     workers: Vec<api::WorkerDTO>,
     log_lines: Vec<String>,
@@ -147,6 +186,7 @@ struct App {
     cfg_path: Option<PathBuf>,
     /// One-shot notice line (operation results).
     notice: Option<String>,
+    action_pending: bool,
     /// Search filter for the jobs table (entered with `/`).
     search: String,
     /// Config editor state (F6): file list + editable lines of the current
@@ -176,6 +216,7 @@ impl App {
             input_buf: String::new(),
             cfg_path,
             notice: None,
+            action_pending: false,
             search: String::new(),
             config_files: Vec::new(),
             config_idx: 0,
@@ -233,6 +274,31 @@ impl App {
     }
 }
 
+fn finish_file_save(
+    app: &mut App,
+    path: &std::path::Path,
+    content: &str,
+    result: Result<String, String>,
+) {
+    if result.is_ok()
+        && app
+            .config_files
+            .get(app.config_idx)
+            .is_some_and(|current| current == path)
+        && app.file_lines.join("\n") + "\n" == content
+    {
+        app.dirty = false;
+    }
+    app.notice = Some(result.unwrap_or_else(|e| format!("error: {e}")));
+}
+
+async fn bounded<T, E>(future: impl std::future::Future<Output = Result<T, E>>) -> Option<T> {
+    tokio::time::timeout(Duration::from_secs(3), future)
+        .await
+        .ok()?
+        .ok()
+}
+
 async fn fetch(client: &Client, snap: &mut Snapshot) {
     snap.error = None;
     match tokio::join!(client.list_jobs(), client.list_workers()) {
@@ -241,13 +307,6 @@ async fn fetch(client: &Client, snap: &mut Snapshot) {
             snap.workers = workers;
         }
         (Err(e), _) | (_, Err(e)) => snap.error = Some(e.to_string()),
-    }
-    if let Ok(p) = client.list_proxies().await {
-        snap.proxies = p
-            .get("proxies")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
     }
 }
 
@@ -1691,14 +1750,73 @@ pub fn run(
 
     let rt = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     let snap = Arc::new(Mutex::new(Snapshot::default()));
+    let (action_tx, action_rx) = std::sync::mpsc::channel::<UiCompletion>();
 
+    {
+        let snap = snap.clone();
+        let client = client.clone();
+        rt.spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(2));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                let mut fetched = Snapshot::default();
+                match tokio::time::timeout(Duration::from_secs(3), fetch(&client, &mut fetched))
+                    .await
+                {
+                    Ok(()) => {
+                        let mut current = snap.lock().unwrap_or_else(|e| e.into_inner());
+                        if current.error != fetched.error
+                            || (fetched.error.is_none()
+                                && (current.jobs != fetched.jobs
+                                    || current.workers != fetched.workers))
+                        {
+                            if fetched.error.is_none() {
+                                current.jobs = fetched.jobs;
+                                current.workers = fetched.workers;
+                            }
+                            current.error = fetched.error;
+                            current.revision = current.revision.wrapping_add(1);
+                        }
+                    }
+                    Err(_) => {
+                        let mut current = snap.lock().unwrap_or_else(|e| e.into_inner());
+                        current.error = Some("manager refresh timed out".into());
+                        current.revision = current.revision.wrapping_add(1);
+                    }
+                }
+            }
+        });
+    }
+    {
+        let snap = snap.clone();
+        let client = client.clone();
+        rt.spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(10));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                if let Ok(Ok(proxies)) =
+                    tokio::time::timeout(Duration::from_secs(3), client.list_proxies()).await
+                {
+                    let mut current = snap.lock().unwrap_or_else(|e| e.into_inner());
+                    current.proxies = proxies
+                        .get("proxies")
+                        .and_then(|v| v.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+                    current.revision = current.revision.wrapping_add(1);
+                }
+            }
+        });
+    }
     // Background refresh every 2s: world data + the selected job's
     // logs/history/spec. The render loop never blocks on the network
     // (a slow manager must not freeze the UI).
     let selected_shared = Arc::new(Mutex::new(None::<String>));
     let detail_shared = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let logs_shared = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let edit_job_shared = std::sync::Arc::new(tokio::sync::Mutex::new(None::<String>));
+    let edit_job_shared = std::sync::Arc::new(Mutex::new(None::<String>));
     {
         let snap = snap.clone();
         let client = client.clone();
@@ -1708,33 +1826,40 @@ pub fn run(
         let edit_job_shared = edit_job_shared.clone();
         rt.spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(2));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tick.tick().await;
                 // Fetch into a local snapshot; the mutex is only held for
                 // the brief clone and the final swap. Holding it across
                 // the awaits below froze the render loop (which blocks on
                 // the same mutex) for every HTTP round-trip.
-                let mut s = snap.lock().await.clone();
-                fetch(&client, &mut s).await;
-                let frozen = edit_job_shared.lock().await.clone();
-                let name = frozen.or(selected_shared.lock().await.clone());
-                if let Some(name) = name {
+                let mut s = snap.lock().unwrap_or_else(|e| e.into_inner()).clone();
+
+                let frozen = edit_job_shared
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                let name = frozen.or(selected_shared
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone());
+                if let Some(ref name) = name {
                     // Only pull logs while the Logs panel is open.
                     if logs_shared.load(Ordering::Relaxed) {
-                        if s.log_job.as_deref() != Some(&name) {
+                        if s.log_job.as_deref() != Some(name.as_str()) {
                             s.log_lines.clear();
                         }
                         s.log_job = Some(name.clone());
-                        if let Ok(log) = client.job_logs(&name, 200).await {
+                        if let Some(log) = bounded(client.job_logs(name, 200)).await {
                             s.log_lines = log.lines().map(String::from).collect();
                         }
                     }
                     if detail_shared.load(Ordering::Relaxed) {
-                        if s.history_job.as_deref() != Some(&name) {
+                        if s.history_job.as_deref() != Some(name.as_str()) {
                             s.history.clear();
                         }
                         s.history_job = Some(name.clone());
-                        if let Ok(h) = client.job_history(&name).await {
+                        if let Some(h) = bounded(client.job_history(name)).await {
                             s.history = h;
                         }
                         // Spec: fetch when the selection changed or there is
@@ -1742,7 +1867,7 @@ pub fn run(
                         // clobber edits made in the spec editor with the
                         // stale clone from before the fetch.
                         if s.spec_job.as_deref() != Some(name.as_str()) || s.spec_json.is_none() {
-                            if let Ok(spec) = client.job_spec(&name).await {
+                            if let Some(spec) = bounded(client.job_spec(name)).await {
                                 let json = spec_to_editor(
                                     &serde_json::to_value(&spec).unwrap_or(serde_json::Value::Null),
                                 );
@@ -1753,10 +1878,23 @@ pub fn run(
                         }
                     }
                 }
-                let editing = edit_job_shared.lock().await;
-                let mut current = snap.lock().await;
+                let editing = edit_job_shared.lock().unwrap_or_else(|e| e.into_inner());
+                let mut current = snap.lock().unwrap_or_else(|e| e.into_inner());
                 preserve_editor(&mut s, &current, editing.as_deref());
-                *current = s;
+                let selected = selected_shared
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                if selected == name {
+                    current.revision = current.revision.wrapping_add(1);
+                    current.log_lines = s.log_lines;
+                    current.log_job = s.log_job;
+                    current.history = s.history;
+                    current.history_job = s.history_job;
+                    current.spec_json = s.spec_json;
+                    current.spec_fields = s.spec_fields;
+                    current.spec_job = s.spec_job;
+                }
             }
         });
     }
@@ -1781,14 +1919,23 @@ pub fn run(
         )
     })?;
     let _restore = TerminalRestore;
+    let mut redraw = true;
+    let mut rendered_revision = u64::MAX;
     let result = loop {
+        for complete in action_rx.try_iter() {
+            complete(&mut app);
+            redraw = true;
+        }
         // Sync the shared selection state to the background fetcher.
         if let Ok(mut g) = edit_job_shared.try_lock() {
             *g = app.edit_job.clone();
         }
         let snap_view = match snap.try_lock() {
             Ok(g) => g.clone(),
-            Err(_) => continue,
+            Err(_) => {
+                std::thread::sleep(Duration::from_millis(5));
+                continue;
+            }
         };
         if let Some(name) = app.edit_job.as_deref() {
             if let Some((idx, _)) = snap_view
@@ -1802,7 +1949,7 @@ pub fn run(
             }
         }
         app.reconcile_selection(&snap_view);
-        *selected_shared.blocking_lock() = app.selected_name.clone();
+        *selected_shared.lock().unwrap_or_else(|e| e.into_inner()) = app.selected_name.clone();
         detail_shared.store(
             app.mode == Mode::JobDetail || app.mode == Mode::SpecEdit,
             Ordering::Relaxed,
@@ -1816,10 +1963,14 @@ pub fn run(
                 snap_view.error
             );
         }
-        terminal
-            .draw(|f| render(f, &mut app, &snap_view))
-            .map_err(|e| e.to_string())?;
-        if !event::poll(Duration::from_millis(400)).map_err(|e| e.to_string())? {
+        if redraw || rendered_revision != snap_view.revision {
+            terminal
+                .draw(|f| render(f, &mut app, &snap_view))
+                .map_err(|e| e.to_string())?;
+            rendered_revision = snap_view.revision;
+            redraw = false;
+        }
+        if !event::poll(Duration::from_millis(50)).map_err(|e| e.to_string())? {
             continue;
         }
         let ev = event::read().map_err(|e| e.to_string())?;
@@ -1828,6 +1979,7 @@ pub fn run(
             continue;
         }
 
+        redraw = true;
         // Input overlay first: characters fill the buffer, Enter advances.
         match &mut app.input {
             Input::None => {}
@@ -1839,7 +1991,8 @@ pub fn run(
                 let mut reopen = None;
                 match key.code {
                     KeyCode::Esc => {
-                        let mut s = snap.blocking_lock();
+                        let mut s = snap.lock().unwrap_or_else(|e| e.into_inner());
+                        s.revision = s.revision.wrapping_add(1);
                         if let Some(json) = s.spec_json.as_mut() {
                             set_json_array(json, &field, items);
                             s.spec_fields = flatten_spec(json);
@@ -1906,7 +2059,8 @@ pub fn run(
                                 // Merge into the snapshot spec JSON (saved
                                 // via S in the SpecEdit view).
                                 {
-                                    let mut s = snap.blocking_lock();
+                                    let mut s = snap.lock().unwrap_or_else(|e| e.into_inner());
+                                    s.revision = s.revision.wrapping_add(1);
                                     if let Some(json) = s.spec_json.as_mut() {
                                         if let Some(name) = field.strip_suffix("[]") {
                                             let mut items = json
@@ -1940,16 +2094,27 @@ pub fn run(
                                     let cfg = app.cfg_path.clone();
                                     let client = client.clone();
                                     let job2 = job.clone();
-                                    let result = rt.block_on(async move {
-                                        let path = cfg.ok_or("TUI needs -c <config> to assign workers".to_string())?;
-                                        upsert_job_worker(&path, &job2, &worker)?;
-                                        let applied = client.reload().await.map_err(|e| e.to_string())?;
-                                        Ok::<String, String>(format!("job `{job2}` pinned to worker `{worker}`, reload applied {applied} job(s)"))
-                                    });
-                                    app.notice = Some(match result {
-                                        Ok(m) => m,
-                                        Err(e) => format!("error: {e}"),
-                                    });
+                                    start_action(
+                                        &rt,
+                                        &mut app,
+                                        &action_tx,
+                                        async move {
+                                            let path = cfg.ok_or(
+                                                "TUI needs -c <config> to assign workers"
+                                                    .to_string(),
+                                            )?;
+                                            upsert_job_worker(&path, &job2, &worker)?;
+                                            let applied =
+                                                client.reload().await.map_err(|e| e.to_string())?;
+                                            Ok::<String, String>(format!("job `{job2}` pinned to worker `{worker}`, reload applied {applied} job(s)"))
+                                        },
+                                        move |app, result| {
+                                            app.notice = Some(match result {
+                                                Ok(m) => m,
+                                                Err(e) => format!("error: {e}"),
+                                            });
+                                        },
+                                    );
                                 }
                             }
                             Input::ProxyName => {
@@ -1972,16 +2137,32 @@ pub fn run(
                                 };
                                 let cfg = app.cfg_path.clone();
                                 let client = client.clone();
-                                let result = rt.block_on(async move {
-                                    let path = cfg.ok_or("TUI needs -c <config> to add proxies".to_string())?;
-                                    upsert_proxy_section(&path, &name, kind, &url, expose.as_deref())?;
-                                    let applied = client.reload().await.map_err(|e| e.to_string())?;
-                                    Ok::<String, String>(format!("proxy `{name}` added ({url}), reload applied {applied} job(s)"))
-                                });
-                                app.notice = match result {
-                                    Ok(m) => Some(m),
-                                    Err(e) => Some(format!("error: {e}")),
-                                };
+                                start_action(
+                                    &rt,
+                                    &mut app,
+                                    &action_tx,
+                                    async move {
+                                        let path = cfg.ok_or(
+                                            "TUI needs -c <config> to add proxies".to_string(),
+                                        )?;
+                                        upsert_proxy_section(
+                                            &path,
+                                            &name,
+                                            kind,
+                                            &url,
+                                            expose.as_deref(),
+                                        )?;
+                                        let applied =
+                                            client.reload().await.map_err(|e| e.to_string())?;
+                                        Ok::<String, String>(format!("proxy `{name}` added ({url}), reload applied {applied} job(s)"))
+                                    },
+                                    move |app, result| {
+                                        app.notice = match result {
+                                            Ok(m) => Some(m),
+                                            Err(e) => Some(format!("error: {e}")),
+                                        };
+                                    },
+                                );
                             }
                             Input::JobName => {
                                 app.input = Input::Pick {
@@ -2036,20 +2217,37 @@ pub fn run(
                                         let schedule = value;
                                         let cfg = app.cfg_path.clone();
                                         let client = client.clone();
-                                        let result = rt.block_on(async move {
-                                            let path = cfg.ok_or("TUI needs -c <config> to add jobs".to_string())?;
-                                            upsert_job_section(&path, &name, &provider, &upstream, &storage, &schedule)?;
-                                            let applied = client.reload().await.map_err(|e| e.to_string())?;
-                                            Ok::<String, String>(format!("job `{name}` created ({provider}, schedule {schedule}), reload applied {applied} job(s)"))
-                                        });
-                                        app.notice = match result {
-                                            Ok(m) => Some(m),
-                                            Err(e) => Some(format!("error: {e}")),
-                                        };
+                                        start_action(
+                                            &rt,
+                                            &mut app,
+                                            &action_tx,
+                                            async move {
+                                                let path = cfg.ok_or(
+                                                    "TUI needs -c <config> to add jobs".to_string(),
+                                                )?;
+                                                upsert_job_section(
+                                                    &path, &name, &provider, &upstream, &storage,
+                                                    &schedule,
+                                                )?;
+                                                let applied = client
+                                                    .reload()
+                                                    .await
+                                                    .map_err(|e| e.to_string())?;
+                                                Ok::<String, String>(format!("job `{name}` created ({provider}, schedule {schedule}), reload applied {applied} job(s)"))
+                                            },
+                                            move |app, result| {
+                                                app.notice = match result {
+                                                    Ok(m) => Some(m),
+                                                    Err(e) => Some(format!("error: {e}")),
+                                                };
+                                            },
+                                        );
                                     }
                                     PickKind::SpecField { field } => {
                                         {
-                                            let mut s = snap.blocking_lock();
+                                            let mut s =
+                                                snap.lock().unwrap_or_else(|e| e.into_inner());
+                                            s.revision = s.revision.wrapping_add(1);
                                             if let Some(json) = s.spec_json.as_mut() {
                                                 set_json_field(json, &field, value.trim());
                                                 s.spec_fields = flatten_spec(json);
@@ -2069,7 +2267,9 @@ pub fn run(
                                             };
                                             app.input_buf = value;
                                         } else {
-                                            let mut s = snap.blocking_lock();
+                                            let mut s =
+                                                snap.lock().unwrap_or_else(|e| e.into_inner());
+                                            s.revision = s.revision.wrapping_add(1);
                                             if let Some(json) = s.spec_json.as_mut() {
                                                 let mut items = json
                                                     .get(&field)
@@ -2187,19 +2387,26 @@ pub fn run(
                         let json = snap_view.spec_json.clone();
                         let cfg = app.cfg_path.clone();
                         let client = client.clone();
-                        let result = rt.block_on(async move {
-                            let path = cfg.ok_or("no config path".to_string())?;
-                            let json = json.ok_or("no job spec loaded".to_string())?;
-                            upsert_job_block(&path, &job, &json)?;
-                            let applied = client.reload().await.map_err(|e| e.to_string())?;
-                            Ok::<String, String>(format!(
-                                "job `{job}` saved, reload applied {applied} job(s)"
-                            ))
-                        });
-                        app.notice = Some(match result {
-                            Ok(m) => m,
-                            Err(e) => format!("error: {e}"),
-                        });
+                        start_action(
+                            &rt,
+                            &mut app,
+                            &action_tx,
+                            async move {
+                                let path = cfg.ok_or("no config path".to_string())?;
+                                let json = json.ok_or("no job spec loaded".to_string())?;
+                                upsert_job_block(&path, &job, &json)?;
+                                let applied = client.reload().await.map_err(|e| e.to_string())?;
+                                Ok::<String, String>(format!(
+                                    "job `{job}` saved, reload applied {applied} job(s)"
+                                ))
+                            },
+                            move |app, result| {
+                                app.notice = Some(match result {
+                                    Ok(m) => m,
+                                    Err(e) => format!("error: {e}"),
+                                });
+                            },
+                        );
                         app.mode = Mode::JobDetail;
                     }
                 }
@@ -2234,34 +2441,35 @@ pub fn run(
                 KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     if let Some(path) = app.config_files.get(app.config_idx).cloned() {
                         let content = app.file_lines.join("\n") + "\n";
-                        let write = std::fs::write(&path, &content);
-                        app.notice = Some(match write {
-                            Ok(()) => {
-                                app.dirty = false;
-                                let is_worker = path
-                                    .file_name()
-                                    .map(|n| n == "worker.toml")
-                                    .unwrap_or(false);
-                                if is_worker {
-                                    format!(
+                        let saved_path = path.clone();
+                        let saved_content = content.clone();
+                        let client = client.clone();
+                        start_action(
+                            &rt,
+                            &mut app,
+                            &action_tx,
+                            async move {
+                                std::fs::write(&path, &content).map_err(|e| e.to_string())?;
+                                if path.file_name().is_some_and(|name| name == "worker.toml") {
+                                    return Ok::<_, String>(format!(
                                         "{} saved (restart the worker to apply)",
                                         path.display()
-                                    )
-                                } else {
-                                    let client = client.clone();
-                                    match rt.block_on(client.reload()) {
-                                        Ok(n) => format!(
-                                            "{} saved, reload applied {n} job(s)",
-                                            path.display()
-                                        ),
-                                        Err(e) => {
-                                            format!("{} saved, reload failed: {e}", path.display())
-                                        }
+                                    ));
+                                }
+                                match client.reload().await {
+                                    Ok(n) => Ok(format!(
+                                        "{} saved, reload applied {n} job(s)",
+                                        path.display()
+                                    )),
+                                    Err(e) => {
+                                        Ok(format!("{} saved, reload failed: {e}", path.display()))
                                     }
                                 }
-                            }
-                            Err(e) => format!("error saving {}: {e}", path.display()),
-                        });
+                            },
+                            move |app, result| {
+                                finish_file_save(app, &saved_path, &saved_content, result)
+                            },
+                        );
                     }
                 }
                 KeyCode::Up => app.cur_row = app.cur_row.saturating_sub(1),
@@ -2383,11 +2591,18 @@ pub fn run(
                     let client = client.clone();
                     let id = w.id.clone();
                     let for_async = id.clone();
-                    let result = rt.block_on(async move { client.unregister(&for_async).await });
-                    app.notice = Some(match result {
-                        Ok(()) => format!("worker `{id}` removed"),
-                        Err(e) => format!("error: {e}"),
-                    });
+                    start_action(
+                        &rt,
+                        &mut app,
+                        &action_tx,
+                        async move { client.unregister(&for_async).await },
+                        move |app, result| {
+                            app.notice = Some(match result {
+                                Ok(()) => format!("worker `{id}` removed"),
+                                Err(e) => format!("error: {e}"),
+                            });
+                        },
+                    );
                 }
             }
             KeyCode::Enter if app.mode == Mode::Jobs => app.mode = Mode::JobDetail,
@@ -2416,11 +2631,21 @@ pub fn run(
                     let client = client.clone();
                     let name = job.name.clone();
                     let for_async = name.clone();
-                    let result = rt.block_on(async move { client.trigger_run(&for_async).await });
-                    app.notice = Some(match result {
-                        Ok(id) => format!("run triggered for `{name}`: {}", &id[..id.len().min(8)]),
-                        Err(e) => format!("error: {e}"),
-                    });
+                    start_action(
+                        &rt,
+                        &mut app,
+                        &action_tx,
+                        async move { client.trigger_run(&for_async).await },
+                        move |app, result| {
+                            app.notice = Some(match result {
+                                Ok(id) => format!(
+                                    "run triggered for `{name}`: {}",
+                                    &id[..id.len().min(8)]
+                                ),
+                                Err(e) => format!("error: {e}"),
+                            });
+                        },
+                    );
                 }
             }
             KeyCode::Char('s') if app.mode == Mode::Jobs || app.mode == Mode::JobDetail => {
@@ -2428,11 +2653,18 @@ pub fn run(
                     let client = client.clone();
                     let name = job.name.clone();
                     let for_async = name.clone();
-                    let result = rt.block_on(async move { client.stop_run(&for_async).await });
-                    app.notice = Some(match result {
-                        Ok(()) => format!("stop requested for `{name}`"),
-                        Err(e) => format!("error: {e}"),
-                    });
+                    start_action(
+                        &rt,
+                        &mut app,
+                        &action_tx,
+                        async move { client.stop_run(&for_async).await },
+                        move |app, result| {
+                            app.notice = Some(match result {
+                                Ok(()) => format!("stop requested for `{name}`"),
+                                Err(e) => format!("error: {e}"),
+                            });
+                        },
+                    );
                 }
             }
             KeyCode::Char('/') if app.mode == Mode::Jobs => {
@@ -2443,14 +2675,21 @@ pub fn run(
                 if let Some(job) = app.selected_job(&snap_view).map(|j| j.name.clone()) {
                     let client = client.clone();
                     let name = job.clone();
-                    let result = rt.block_on(async move { client.delete_job(&job).await });
-                    app.notice = Some(match result {
-                        Ok(()) => {
-                            app.mode = Mode::Jobs;
-                            format!("deleted job `{name}` (config + database)")
-                        }
-                        Err(e) => format!("delete `{name}` failed: {e}"),
-                    });
+                    start_action(
+                        &rt,
+                        &mut app,
+                        &action_tx,
+                        async move { client.delete_job(&job).await },
+                        move |app, result| {
+                            app.notice = Some(match result {
+                                Ok(()) => {
+                                    app.mode = Mode::Jobs;
+                                    format!("deleted job `{name}` (config + database)")
+                                }
+                                Err(e) => format!("delete `{name}` failed: {e}"),
+                            });
+                        },
+                    );
                     // Force the next tick to refresh jobs; the deleted name
                     // must not stay selected.
                     if app.selected > 0 {
@@ -2470,11 +2709,18 @@ pub fn run(
             KeyCode::Char('w') if app.mode == Mode::Proxies => {
                 let client = client.clone();
                 let cfg = app.cfg_path.clone();
-                let result = rt.block_on(async move { register_cf_warp(&client, &cfg).await });
-                app.notice = Some(match result {
-                    Ok(m) => m,
-                    Err(e) => format!("error: {e}"),
-                });
+                start_action(
+                    &rt,
+                    &mut app,
+                    &action_tx,
+                    async move { register_cf_warp(&client, &cfg).await },
+                    move |app, result| {
+                        app.notice = Some(match result {
+                            Ok(m) => m,
+                            Err(e) => format!("error: {e}"),
+                        });
+                    },
+                );
             }
             _ => {}
         }
@@ -2493,20 +2739,20 @@ fn resolve_creds(
 ) -> Result<(PathBuf, String, String), String> {
     // The TUI reads through the manager API; config supplies defaults.
     let path = find_config(config)?;
-    let cfg = ConfigLoader::load(&path, &CliOverrides::default()).ok();
+    let cfg = ConfigLoader::load_api(&path).ok();
     let url = match manager {
         Some(u) => u,
         None => format!(
             "http://{}",
             cfg.as_ref()
-                .map(|c| c.api.listen.to_string())
+                .map(|c| c.listen.to_string())
                 .unwrap_or_else(|| "127.0.0.1:8100".to_string())
         ),
     };
     let token = match token {
         Some(t) => t,
         None => cfg
-            .and_then(|c| c.api.tokens.first().map(|t| t.token.clone()))
+            .and_then(|c| c.tokens.first().map(|t| t.token.clone()))
             .ok_or("no api token configured (set [api.tokens] or pass --token)")?,
     };
     Ok((path, url, token))
@@ -2535,6 +2781,77 @@ fn find_config(explicit: Option<PathBuf>) -> Result<PathBuf, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn async_file_save_never_clears_newer_unsaved_edits() {
+        let mut app = App::new(None);
+        app.config_files = vec![PathBuf::from("one.toml"), PathBuf::from("two.toml")];
+        app.file_lines = vec!["new edits".into()];
+        app.dirty = true;
+        finish_file_save(
+            &mut app,
+            std::path::Path::new("one.toml"),
+            "saved\n",
+            Ok("saved".into()),
+        );
+        assert!(app.dirty);
+        app.config_idx = 1;
+        app.file_lines = vec!["saved".into()];
+        finish_file_save(
+            &mut app,
+            std::path::Path::new("one.toml"),
+            "saved\n",
+            Ok("saved".into()),
+        );
+        assert!(app.dirty);
+        app.config_idx = 0;
+        finish_file_save(
+            &mut app,
+            std::path::Path::new("one.toml"),
+            "saved\n",
+            Ok("saved".into()),
+        );
+        assert!(!app.dirty);
+    }
+
+    #[test]
+    fn pending_command_does_not_block_navigation_or_allow_duplicate_actions() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let mut app = App::new(None);
+        let (tx, rx) = std::sync::mpsc::channel::<UiCompletion>();
+        let (release, wait) = tokio::sync::oneshot::channel::<()>();
+        start_action(
+            &rt,
+            &mut app,
+            &tx,
+            async move {
+                wait.await.map_err(|e| e.to_string())?;
+                Ok::<_, String>("done".to_string())
+            },
+            |app, result| app.notice = Some(result.unwrap()),
+        );
+        assert!(app.action_pending);
+        app.mode = Mode::Logs;
+        app.search = "still responsive".into();
+        assert!(rx.try_recv().is_err());
+        start_action(
+            &rt,
+            &mut app,
+            &tx,
+            async {
+                panic!("duplicate must not execute");
+                #[allow(unreachable_code)]
+                Ok::<_, String>(())
+            },
+            |_, _| {},
+        );
+        release.send(()).unwrap();
+        let complete = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        complete(&mut app);
+        assert!(!app.action_pending);
+        assert_eq!(app.search, "still responsive");
+        assert_eq!(app.notice.as_deref(), Some("done"));
+    }
 
     #[test]
     fn warning_completion_has_a_distinct_visible_status() {
