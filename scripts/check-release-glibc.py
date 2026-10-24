@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Reject release executables requiring a newer glibc than Ubuntu 22.04."""
+"""Reject release executables requiring a newer glibc than Ubuntu 24.04."""
 
 import re
 import subprocess
 import sys
 
-LIMIT = (2, 35)
+LIMIT = (2, 39)
 
 
 def main():
@@ -27,7 +27,7 @@ def main():
         required = max(versions)
         compatible = required <= LIMIT
         print(f"{binary}: GLIBC_{'.'.join(map(str, required))} "
-              f"({'OK' if compatible else 'exceeds GLIBC_2.35'})")
+              f"({'OK' if compatible else 'exceeds GLIBC_2.39'})")
         failed |= not compatible
     return int(failed)
 

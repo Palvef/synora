@@ -114,7 +114,7 @@ proxy = "default"          # 显式指定才走代理组（一般不需要）
 | 重启任务 | `synora job restart <job>`（停 + 启） |
 | 触发一组任务 | `synora run-group <group> -c ...` |
 | 停止运行中的任务 | `synora stop <job>` 或 API `POST /api/v1/jobs/<job>/stop` |
-| 热重载 | `synora reload`（走 manager API；pid 在 `/run/synora/`）或 `POST /api/v1/reload`（**变更的 job 自动补跑一次**） |
+| 热重载 | `synora reload`（走 manager API；pid 在 `/run/synora/`）或 `POST /api/v1/reload`（增量应用新增、修改、删除；不自动补跑，新增 interval 从下一个周期开始） |
 | 查看状态 | `synora status -c ...` |
 | 查看日志 | `synora logs <job> --lines 100`（API：`GET /api/v1/jobs/<job>/logs?tail=100`） |
 | 任务历史 | API `GET /api/v1/jobs/<job>/history` |
@@ -230,3 +230,15 @@ storage = "/datas/debian-security"   # = mountpoint + 镜像目录名
   历史 CPU 总量使用 `synora_job_cpu_usage_seconds_total` counter 查询。
 - 注意：Prometheus 会保留 `job`/`instance` 标签，任务名在查询里是
   `exported_job`（面板已处理）。
+
+
+### 监控与终端刷新（0.2.4）
+
+`synora-mirror` 仪表盘每 5 秒刷新；Worker 心跳和 Prometheus 采集仍为 15 秒。
+当前 CPU、内存、带宽只属于有效运行，完成后不再用历史峰值填充。“本轮耗时”
+和“上次耗时”分别展示；已完成后立即出现新一轮同步是正常调度，并不代表完成状态未清除。
+Worker 执行占用包含尚未退出的取消中任务。
+
+TUI 基础数据每 2 秒刷新，日志和详情独立请求。启动、停止、保存、删除和 reload
+在后台执行，期间可继续导航；同一时刻仅允许一个修改操作。操作超时后应刷新核对结果，
+不要假定请求没有生效。新版本发布二进制的最低支持环境是 Ubuntu 24.04 / glibc 2.39。

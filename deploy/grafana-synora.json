@@ -1,18 +1,18 @@
 {
   "overwrite": true,
   "folderId": 0,
-  "message": "Fix duplicate PromQL labelset on bandwidth panels",
+  "message": "Use live run resources and distinguish current execution from previous completion",
   "dashboard": {
     "id": 3810830095704064,
     "uid": "synora-mirror",
     "title": "Synora 镜像同步",
-    "description": "镜像同步总览：任务状态时间轴、每任务带宽、仓库大小、CPU/内存、Worker 占用与上限。启动中与运行中统一显示为同步中。24h 指标使用 increase()。",
+    "description": "任务状态与当前资源按有效运行显示；完成后的历史资源不作为当前占用。15 秒采集、5 秒刷新；本轮耗时与上次完成耗时分别展示。",
     "tags": [
       "synora",
       "mirror"
     ],
     "timezone": "browser",
-    "refresh": "10s",
+    "refresh": "5s",
     "schemaVersion": 39,
     "graphTooltip": 1,
     "editable": true,
@@ -174,7 +174,7 @@
       {
         "id": 12,
         "type": "stat",
-        "title": "同步中",
+        "title": "执行中（含取消中）",
         "gridPos": {
           "x": 3,
           "y": 1,
@@ -192,7 +192,7 @@
               "type": "prometheus",
               "uid": "ae4bld7vas268d"
             },
-            "expr": "count(max by (exported_job) ((synora_job_status{exported_job=~\"$job_name\"} == 3 or synora_job_status{exported_job=~\"$job_name\"} == 4))) or vector(0)",
+            "expr": "count(max by (exported_job) ((synora_job_status{exported_job=~\"$job_name\"} == 3 or synora_job_status{exported_job=~\"$job_name\"} == 4 or synora_job_status{exported_job=~\"$job_name\"} == 8))) or vector(0)",
             "instant": true,
             "range": false,
             "exemplar": false
@@ -485,7 +485,7 @@
       {
         "id": 21,
         "type": "stat",
-        "title": "同步槽",
+        "title": "执行占用槽",
         "gridPos": {
           "x": 18,
           "y": 1,
@@ -503,7 +503,7 @@
               "type": "prometheus",
               "uid": "ae4bld7vas268d"
             },
-            "expr": "sum(synora_worker_jobs_running{worker!=\"local\"} and on(worker) (synora_worker_status{worker!=\"local\"} == 1)) or vector(0)",
+            "expr": "sum(synora_worker_jobs_running{worker!=\"local\"}) or vector(0)",
             "instant": true,
             "range": false,
             "exemplar": false
@@ -1186,7 +1186,7 @@
       {
         "id": 30,
         "type": "table",
-        "title": "正在运行",
+        "title": "正在执行（含取消中）",
         "gridPos": {
           "x": 0,
           "y": 39,
@@ -1204,7 +1204,7 @@
               "type": "prometheus",
               "uid": "ae4bld7vas268d"
             },
-            "expr": "max by (exported_job, worker) ((synora_job_status{exported_job=~\"$job_name\"} == 3 or synora_job_status{exported_job=~\"$job_name\"} == 4))",
+            "expr": "max by (exported_job, worker) ((synora_job_status{exported_job=~\"$job_name\"} == 3 or synora_job_status{exported_job=~\"$job_name\"} == 4 or synora_job_status{exported_job=~\"$job_name\"} == 8))",
             "instant": true,
             "range": false,
             "format": "table",
@@ -1217,7 +1217,7 @@
               "type": "prometheus",
               "uid": "ae4bld7vas268d"
             },
-            "expr": "max by (exported_job, provider) (synora_job_info{exported_job=~\"$job_name\"} and on (exported_job) (synora_job_status{exported_job=~\"$job_name\"} == 3 or synora_job_status{exported_job=~\"$job_name\"} == 4))",
+            "expr": "max by (exported_job, provider) (synora_job_info{exported_job=~\"$job_name\"} and on (exported_job) (synora_job_status{exported_job=~\"$job_name\"} == 3 or synora_job_status{exported_job=~\"$job_name\"} == 4 or synora_job_status{exported_job=~\"$job_name\"} == 8))",
             "instant": true,
             "range": false,
             "format": "table",
@@ -1230,7 +1230,7 @@
               "type": "prometheus",
               "uid": "ae4bld7vas268d"
             },
-            "expr": "max by (exported_job) (synora_job_memory_bytes{exported_job=~\"$job_name\"} and on (exported_job) (synora_job_status{exported_job=~\"$job_name\"} == 3 or synora_job_status{exported_job=~\"$job_name\"} == 4))",
+            "expr": "max by (exported_job) (synora_job_memory_bytes{exported_job=~\"$job_name\"} and on (exported_job) (synora_job_status{exported_job=~\"$job_name\"} == 3 or synora_job_status{exported_job=~\"$job_name\"} == 4 or synora_job_status{exported_job=~\"$job_name\"} == 8))",
             "instant": true,
             "range": false,
             "format": "table",
@@ -1243,7 +1243,7 @@
               "type": "prometheus",
               "uid": "ae4bld7vas268d"
             },
-            "expr": "max by (exported_job) (synora_job_cpu_percent{exported_job=~\"$job_name\"} and on (exported_job) (synora_job_status{exported_job=~\"$job_name\"} == 3 or synora_job_status{exported_job=~\"$job_name\"} == 4))",
+            "expr": "max by (exported_job) (synora_job_cpu_percent{exported_job=~\"$job_name\"} and on (exported_job) (synora_job_status{exported_job=~\"$job_name\"} == 3 or synora_job_status{exported_job=~\"$job_name\"} == 4 or synora_job_status{exported_job=~\"$job_name\"} == 8))",
             "instant": true,
             "range": false,
             "format": "table",
@@ -1256,7 +1256,7 @@
               "type": "prometheus",
               "uid": "ae4bld7vas268d"
             },
-            "expr": "max by (exported_job) (synora_job_cpu_seconds{exported_job=~\"$job_name\"} and on (exported_job) (synora_job_status{exported_job=~\"$job_name\"} == 3 or synora_job_status{exported_job=~\"$job_name\"} == 4))",
+            "expr": "max by (exported_job) (synora_job_cpu_seconds{exported_job=~\"$job_name\"} and on (exported_job) (synora_job_status{exported_job=~\"$job_name\"} == 3 or synora_job_status{exported_job=~\"$job_name\"} == 4 or synora_job_status{exported_job=~\"$job_name\"} == 8))",
             "instant": true,
             "range": false,
             "format": "table",
@@ -1269,7 +1269,7 @@
               "type": "prometheus",
               "uid": "ae4bld7vas268d"
             },
-            "expr": "max by (exported_job) (synora_job_duration_seconds{exported_job=~\"$job_name\"} and on (exported_job) (synora_job_status{exported_job=~\"$job_name\"} == 3 or synora_job_status{exported_job=~\"$job_name\"} == 4))",
+            "expr": "(max by (exported_job) (clamp_min(time() - synora_job_last_start_timestamp{exported_job=~\"$job_name\"}, 0) and on (exported_job) (synora_job_status{exported_job=~\"$job_name\"} == 3 or synora_job_status{exported_job=~\"$job_name\"} == 4 or synora_job_status{exported_job=~\"$job_name\"} == 8)))",
             "instant": true,
             "range": false,
             "format": "table",
@@ -1282,7 +1282,7 @@
               "type": "prometheus",
               "uid": "ae4bld7vas268d"
             },
-            "expr": "max by (exported_job) (synora_job_bandwidth_bytes{exported_job=~\"$job_name\"} and on (exported_job) (synora_job_status{exported_job=~\"$job_name\"} == 3 or synora_job_status{exported_job=~\"$job_name\"} == 4))",
+            "expr": "max by (exported_job) (synora_job_bandwidth_bytes{exported_job=~\"$job_name\"} and on (exported_job) (synora_job_status{exported_job=~\"$job_name\"} == 3 or synora_job_status{exported_job=~\"$job_name\"} == 4 or synora_job_status{exported_job=~\"$job_name\"} == 8))",
             "instant": true,
             "range": false,
             "exemplar": false,
@@ -1341,7 +1341,7 @@
                 "Value #C": "内存",
                 "Value #D": "CPU %",
                 "Value #E": "CPU 秒",
-                "Value #F": "耗时",
+                "Value #F": "本轮耗时",
                 "Value #G": "带宽"
               },
               "indexByName": {
@@ -1353,7 +1353,7 @@
                 "内存": 5,
                 "CPU %": 6,
                 "CPU 秒": 7,
-                "耗时": 8
+                "本轮耗时": 8
               }
             }
           },
@@ -1370,7 +1370,7 @@
                   "内存",
                   "CPU %",
                   "CPU 秒",
-                  "耗时"
+                  "本轮耗时"
                 ]
               }
             }
@@ -1528,7 +1528,7 @@
             {
               "matcher": {
                 "id": "byName",
-                "options": "耗时"
+                "options": "本轮耗时"
               },
               "properties": [
                 {
@@ -1847,7 +1847,7 @@
       {
         "id": 50,
         "type": "table",
-        "title": "全部任务（状态 / Provider / 大小 / 带宽 / 内存 / CPU / 耗时）",
+        "title": "全部任务（当前资源 / 本轮执行 / 上次完成）",
         "gridPos": {
           "x": 0,
           "y": 51,
@@ -1904,7 +1904,7 @@
               "type": "prometheus",
               "uid": "ae4bld7vas268d"
             },
-            "expr": "max by (exported_job) (last_over_time(synora_job_memory_bytes{exported_job=~\"$job_name\"}[7d]))",
+            "expr": "(max by (exported_job) (synora_job_memory_bytes{exported_job=~\"$job_name\"} and on (exported_job, worker) (synora_job_status{exported_job=~\"$job_name\"} == 3 or synora_job_status{exported_job=~\"$job_name\"} == 4 or synora_job_status{exported_job=~\"$job_name\"} == 8))) or on (exported_job) (0 * max by (exported_job) (synora_job_status{exported_job=~\"$job_name\"}))",
             "instant": true,
             "range": false,
             "format": "table",
@@ -1917,7 +1917,7 @@
               "type": "prometheus",
               "uid": "ae4bld7vas268d"
             },
-            "expr": "max by (exported_job) (last_over_time(synora_job_cpu_percent{exported_job=~\"$job_name\"}[7d]))",
+            "expr": "(max by (exported_job) (synora_job_cpu_percent{exported_job=~\"$job_name\"} and on (exported_job, worker) (synora_job_status{exported_job=~\"$job_name\"} == 3 or synora_job_status{exported_job=~\"$job_name\"} == 4 or synora_job_status{exported_job=~\"$job_name\"} == 8))) or on (exported_job) (0 * max by (exported_job) (synora_job_status{exported_job=~\"$job_name\"}))",
             "instant": true,
             "range": false,
             "format": "table",
@@ -1930,7 +1930,7 @@
               "type": "prometheus",
               "uid": "ae4bld7vas268d"
             },
-            "expr": "max by (exported_job) (last_over_time(synora_job_cpu_seconds{exported_job=~\"$job_name\"}[7d]))",
+            "expr": "(max by (exported_job) (synora_job_cpu_seconds{exported_job=~\"$job_name\"} and on (exported_job, worker) (synora_job_status{exported_job=~\"$job_name\"} == 3 or synora_job_status{exported_job=~\"$job_name\"} == 4 or synora_job_status{exported_job=~\"$job_name\"} == 8))) or on (exported_job) (0 * max by (exported_job) (synora_job_status{exported_job=~\"$job_name\"}))",
             "instant": true,
             "range": false,
             "format": "table",
@@ -1943,7 +1943,7 @@
               "type": "prometheus",
               "uid": "ae4bld7vas268d"
             },
-            "expr": "max by (exported_job) (last_over_time(synora_job_duration_seconds{exported_job=~\"$job_name\"}[7d]))",
+            "expr": "max by (exported_job) (synora_job_duration_seconds{exported_job=~\"$job_name\"})",
             "instant": true,
             "range": false,
             "format": "table",
@@ -1982,12 +1982,38 @@
               "type": "prometheus",
               "uid": "ae4bld7vas268d"
             },
-            "expr": "max by (exported_job) (last_over_time(synora_job_bandwidth_bytes{exported_job=~\"$job_name\"}[15m]))",
+            "expr": "(max by (exported_job) (synora_job_bandwidth_bytes{exported_job=~\"$job_name\"} and on (exported_job, worker) (synora_job_status{exported_job=~\"$job_name\"} == 3 or synora_job_status{exported_job=~\"$job_name\"} == 4 or synora_job_status{exported_job=~\"$job_name\"} == 8))) or on (exported_job) (0 * max by (exported_job) (synora_job_status{exported_job=~\"$job_name\"}))",
             "instant": true,
             "range": false,
             "exemplar": false,
             "hide": false,
             "format": "table"
+          },
+          {
+            "refId": "K",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ae4bld7vas268d"
+            },
+            "expr": "(max by (exported_job) (clamp_min(time() - synora_job_last_start_timestamp{exported_job=~\"$job_name\"}, 0) and on (exported_job) (synora_job_status{exported_job=~\"$job_name\"} == 3 or synora_job_status{exported_job=~\"$job_name\"} == 4 or synora_job_status{exported_job=~\"$job_name\"} == 8))) or on (exported_job) (0 * max by (exported_job) (synora_job_status{exported_job=~\"$job_name\"}))",
+            "instant": true,
+            "range": false,
+            "format": "table",
+            "exemplar": false,
+            "hide": false
+          },
+          {
+            "refId": "L",
+            "datasource": {
+              "type": "prometheus",
+              "uid": "ae4bld7vas268d"
+            },
+            "expr": "max by (exported_job) (synora_job_last_start_timestamp{exported_job=~\"$job_name\"} > 0) * 1000",
+            "instant": true,
+            "range": false,
+            "format": "table",
+            "exemplar": false,
+            "hide": false
           }
         ],
         "transformations": [
@@ -2042,10 +2068,12 @@
                 "Value #D": "内存",
                 "Value #E": "CPU %",
                 "Value #F": "CPU 秒",
-                "Value #G": "耗时",
+                "Value #G": "上次耗时",
                 "Value #H": "上次结束",
                 "Value #I": "上次成功",
-                "Value #J": "带宽"
+                "Value #J": "带宽",
+                "Value #K": "本轮耗时",
+                "Value #L": "最近开始"
               },
               "indexByName": {
                 "任务": 0,
@@ -2057,9 +2085,11 @@
                 "内存": 6,
                 "CPU %": 7,
                 "CPU 秒": 8,
-                "耗时": 9,
+                "上次耗时": 9,
                 "上次结束": 10,
-                "上次成功": 11
+                "上次成功": 11,
+                "本轮耗时": 12,
+                "最近开始": 13
               }
             }
           },
@@ -2077,9 +2107,11 @@
                   "内存",
                   "CPU %",
                   "CPU 秒",
-                  "耗时",
+                  "上次耗时",
                   "上次结束",
-                  "上次成功"
+                  "上次成功",
+                  "本轮耗时",
+                  "最近开始"
                 ]
               }
             }
@@ -2253,7 +2285,7 @@
             {
               "matcher": {
                 "id": "byName",
-                "options": "耗时"
+                "options": "上次耗时"
               },
               "properties": [
                 {
@@ -2303,6 +2335,34 @@
                 {
                   "id": "decimals",
                   "value": 1
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "本轮耗时"
+              },
+              "properties": [
+                {
+                  "id": "unit",
+                  "value": "s"
+                },
+                {
+                  "id": "decimals",
+                  "value": 1
+                }
+              ]
+            },
+            {
+              "matcher": {
+                "id": "byName",
+                "options": "最近开始"
+              },
+              "properties": [
+                {
+                  "id": "unit",
+                  "value": "dateTimeAsIso"
                 }
               ]
             }

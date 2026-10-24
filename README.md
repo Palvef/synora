@@ -54,7 +54,8 @@ to TUNA and to the authors and maintainers of these projects.
   fencing; see the [configuration reference](docs/config-reference.md) before enabling automatic recovery.
 - **Hot reload**: manager API / SIGHUP (`/run/synora/*.pid`) / `POST /api/v1/reload` — job and
   schedule changes apply live; invalid or non-reloadable changes are rejected
-  as a whole; changed jobs get a catch-up run queued automatically.
+  as a whole. Reload applies only added, changed, and removed jobs, preserves unchanged
+  schedules, and never queues catch-up runs. New interval schedules start at their next interval.
 - **Delete/size protection**: `max_delete_files` / `max_delete_ratio` /
   `max_size_drop_ratio` measured around every run; a mirror that shrinks too
   much fails instead of being kept (rsync also gets `--max-delete=N`).
