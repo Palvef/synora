@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 from minio.credentials import Credentials, Static
 
 from urllib3.util.retry import Retry
+from urllib.parse import urlsplit
 
 ### Config
 
@@ -273,11 +274,30 @@ def clone_channels():
 def hash_part(path):
     return path.split('/')[-1].split('-', 1)[0]
 
+def removed_official_path(stderr, cache_url):
+    """Only an explicit official 404/410 permits abandoning a channel update."""
+    if urlsplit(cache_url).hostname != 'cache.nixos.org':
+        return None
+    text = (stderr or b'').decode('utf-8', errors='replace')
+    match = re.search(r"path '(/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-[^'\n]+)' is not valid", text)
+    if not match:
+        return None
+    path = match.group(1)
+    try:
+        response = http_get(f'{cache_url}/{hash_part(path)}.narinfo', stream=True)
+        try:
+            return path if response.status_code in (404, 410) else None
+        finally:
+            response.close()
+    except requests.exceptions.RequestException:
+        return None
+
 def update_channels(channels):
     global failure
     logging.info(f'- Updating binary cache')
 
     has_cache_info = False
+    unavailable = []
 
     for channel in channels:
         logging.info(f'  - {channel}')
@@ -308,6 +328,7 @@ def update_channels(channels):
         todo = []
         seen_paths = set()
         channel_failure = False
+        removed_path = None
 
         # Workaround to temporarily fix https://github.com/tuna/issues/issues/1855
         paths = [
@@ -327,11 +348,15 @@ def update_channels(channels):
                     '--store', upstream_binary_cache,
                     '--recursive', '--json'
                 ] + batch,
-                stdout=subprocess.PIPE
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE
             )
             if process.returncode != 0:
-                channel_failure = True
-                logging.info(f'    - Error status: {process.returncode}')
+                removed_path = removed_official_path(process.stderr, upstream_binary_cache)
+                if removed_path:
+                    logging.warning(f'    - Official cache removed {removed_path}; retaining published channel')
+                else:
+                    channel_failure = True
+                    logging.error(f'    - Error status: {process.returncode}; {(process.stderr or b"").decode("utf-8", errors="replace").strip()}')
                 break
             else:
                 infos = json.loads(process.stdout)
@@ -372,13 +397,25 @@ def update_channels(channels):
                 if not all(results):
                     channel_failure = True
 
-        if channel_failure:
+        if removed_path:
+            atomic_write_file(chan_path_update / '.upstream-unavailable.json',
+                              json.dumps(dict(channel=channel, path=removed_path, source=upstream_binary_cache)))
+            # This release cannot be published. Drop its pending alias so it does
+            # not suspend retention/GC forever; leave the published release intact.
+            chan_path_update.unlink()
+            unavailable.append(channel)
+            logging.warning(f'    - Skipped unavailable upstream release of {channel}; no new symlink published')
+        elif channel_failure:
             failure = True
             logging.info(f'    - Finished with errors, not updating symlink')
         else:
             (chan_path_update / '.sync-complete').touch()
             chan_path_update.rename(chan_path)
             logging.info(f'    - Finished with success, symlink updated')
+
+    if unavailable and not failure:
+        print('SYNORA_STATUS=success_with_warnings', flush=True)
+        print('SYNORA_MESSAGE=Official cache removed paths; channel updates skipped, published versions retained: '+', '.join(unavailable), flush=True)
 
 def parse_narinfo(narinfo):
     res = {}

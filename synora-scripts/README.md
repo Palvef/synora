@@ -92,6 +92,10 @@ recent releases, aborts before deletion if closure calculation fails, and keeps
 partial downloads while an interrupted update resumes. Historical releases no
 longer referenced after the retention interval are removed. Current channels can
 therefore reference cache objects older than 14 days.
+If the official binary cache explicitly returns 404/410 for a path required by a
+new release, that channel update is skipped with a warning and its published
+version is retained. Other channels continue updating. No third-party cache is
+used to fill missing official objects; transient errors remain failures.
 
 The general image installs the PyBOMBS mirror helper pinned at
 `scateu/pybombs-mirror@d7a8a9925c0b91dc9695a31a07b62eff8546909e`.

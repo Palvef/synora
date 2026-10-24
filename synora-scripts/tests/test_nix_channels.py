@@ -55,6 +55,72 @@ class NixRetentionTests(unittest.TestCase):
             self.assertFalse((root/'nixos-test').exists())
             self.assertFalse((release/'.sync-complete').exists())
 
+    def test_confirmed_official_missing_path_keeps_old_channel_and_warns(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d); release=root/'releases'/'nixos-test@new';release.mkdir(parents=True)
+            old=root/'releases'/'nixos-test@old';old.mkdir()
+            (root/'nixos-test').symlink_to('releases/nixos-test@old')
+            path='/nix/store/'+'0'*32+'-removed'
+            (release/'.original-binary-cache-url').write_text('https://cache.nixos.org')
+            (release/'store-paths.xz').write_bytes(lzma.compress((path+'\n').encode()))
+            (root/'.nixos-test.update').symlink_to('releases/nixos-test@new')
+            mod=load(root)
+            result=subprocess.CompletedProcess([],1,b'',f"error: path '{path}' is not valid\n".encode())
+            from unittest.mock import Mock
+            response=Mock(status_code=404)
+            with patch.object(mod,'download'),patch.object(mod.subprocess,'run',return_value=result),patch.object(mod,'http_get',return_value=response) as get,patch('builtins.print') as output:
+                mod.update_channels(['nixos-test'])
+            self.assertFalse(mod.failure)
+            self.assertEqual((root/'nixos-test').resolve(),old)
+            self.assertFalse((release/'.sync-complete').exists())
+            self.assertFalse((root/'.nixos-test.update').is_symlink())
+            self.assertTrue((release/'.upstream-unavailable.json').is_file())
+            get.assert_called_once_with('https://cache.nixos.org/'+'0'*32+'.narinfo',stream=True)
+            self.assertTrue(any('SYNORA_STATUS=success_with_warnings' in str(call) for call in output.call_args_list))
+
+    def test_transient_metadata_error_remains_failure(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d); release=root/'releases'/'nixos-test@new';release.mkdir(parents=True)
+            path='/nix/store/'+'0'*32+'-temporary'
+            (release/'.original-binary-cache-url').write_text('https://cache.nixos.org')
+            (release/'store-paths.xz').write_bytes(lzma.compress((path+'\n').encode()))
+            (root/'.nixos-test.update').symlink_to('releases/nixos-test@new')
+            mod=load(root)
+            result=subprocess.CompletedProcess([],1,b'',f"error: path '{path}' is not valid\n".encode())
+            from unittest.mock import Mock
+            with patch.object(mod,'download'),patch.object(mod.subprocess,'run',return_value=result),patch.object(mod,'http_get',return_value=Mock(status_code=503)):
+                mod.update_channels(['nixos-test'])
+            self.assertTrue(mod.failure)
+            self.assertFalse((root/'nixos-test').exists())
+            self.assertTrue((root/'.nixos-test.update').is_symlink())
+
+    def test_missing_official_channel_does_not_block_other_channels(self):
+        with tempfile.TemporaryDirectory() as d:
+            root=Path(d); missing='/nix/store/'+'0'*32+'-removed'
+            for name in ['missing','available']:
+                release=root/'releases'/name;release.mkdir(parents=True)
+                (release/'.original-binary-cache-url').write_text('https://cache.nixos.org')
+                (release/'store-paths.xz').write_bytes(lzma.compress((missing+'\n').encode()))
+                (root/('.'+name+'.update')).symlink_to('releases/'+name)
+            mod=load(root)
+            results=[subprocess.CompletedProcess([],1,b'',f"error: path '{missing}' is not valid\n".encode()),
+                     subprocess.CompletedProcess([],0,b'[]',b'')]
+            from unittest.mock import Mock
+            with patch.object(mod,'download'),patch.object(mod.subprocess,'run',side_effect=results),patch.object(mod,'http_get',return_value=Mock(status_code=404)):
+                mod.update_channels(['missing','available'])
+            self.assertFalse(mod.failure)
+            self.assertFalse((root/'missing').exists())
+            self.assertTrue((root/'available').is_symlink())
+            self.assertTrue((root/'releases'/'available'/'.sync-complete').exists())
+
+    def test_non_official_store_errors_are_not_classified_as_removed(self):
+        with tempfile.TemporaryDirectory() as d:
+            mod=load(Path(d))
+            error=("error: path '/nix/store/"+'0'*32+"-removed' is not valid").encode()
+            with patch.object(mod,'http_get') as get:
+                self.assertIsNone(mod.removed_official_path(error,'https://cache.example.test'))
+                get.assert_not_called()
+
     def test_retention_keeps_published_and_recent_releases(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)
