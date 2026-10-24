@@ -122,6 +122,8 @@ async fn main() -> Result<(), String> {
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(10));
         loop {
             tick.tick().await;
+            let _config = reaper_engine.config_gate.read().await;
+            let _metrics = reaper_engine.metrics_gate.write().await;
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)
@@ -253,6 +255,21 @@ async fn main() -> Result<(), String> {
                     .collect();
             if let Ok(statuses) = reaper_engine.store.job_status_list().await {
                 for (name, status) in statuses {
+                    if !matches!(
+                        status,
+                        synora_core::JobStatus::Syncing
+                            | synora_core::JobStatus::Running
+                            | synora_core::JobStatus::Cancelling
+                    ) {
+                        for metric in [
+                            "synora_job_memory_bytes",
+                            "synora_job_cpu_seconds",
+                            "synora_job_cpu_percent",
+                            "synora_job_bandwidth_bytes",
+                        ] {
+                            reaper_engine.metrics.remove_job_metric(metric, &name);
+                        }
+                    }
                     let job = reaper_engine.job(&name);
                     let worker = job
                         .as_ref()
@@ -348,6 +365,7 @@ async fn main() -> Result<(), String> {
                     }
                 }
             }
+            let _ = reaper_engine.refresh_worker_metrics(None).await;
             reaper_picker.refresh().await;
             // Re-dispatch unassigned QUEUED runs now that workers are online:
             // runs queued while no worker was up, or unassigned

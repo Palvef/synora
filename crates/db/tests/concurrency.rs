@@ -174,6 +174,17 @@ async fn exercise(db: Db, connections: Vec<Db>) {
         .await
         .unwrap();
     assert_eq!(rows[0][0].1.as_i64(), Some(9_000_000_000));
+    assert_eq!(store.latest_runs().await.unwrap().len(), 100);
+    let scoped = store
+        .reconcile_worker_run_counts(Some(worker))
+        .await
+        .unwrap();
+    assert_eq!(scoped.len(), 1);
+    assert_eq!(scoped[0].0, worker);
+    assert_eq!(
+        store.reconcile_worker_run_counts(None).await.unwrap().len(),
+        100
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

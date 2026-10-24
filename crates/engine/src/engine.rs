@@ -103,8 +103,33 @@ pub const LOCAL_WORKER: &str = "local";
 /// Worker picker for distributed dispatch.
 pub type WorkerPlanner = Arc<dyn Fn(&JobSpec) -> Option<String> + Send + Sync>;
 
+#[derive(PartialEq)]
+struct RoutingSnapshot {
+    proxies: std::collections::HashMap<String, config::ProxyConfig>,
+    proxy_groups: std::collections::HashMap<String, config::ProxyGroupConfig>,
+    egresses: Vec<config::EgressConfig>,
+    egress_groups: std::collections::HashMap<String, config::EgressGroupConfig>,
+    default_proxy: Option<String>,
+}
+impl RoutingSnapshot {
+    fn from_config(cfg: &ResolvedConfig) -> Self {
+        Self {
+            proxies: cfg.proxies.clone(),
+            proxy_groups: cfg.proxy_groups.clone(),
+            egresses: cfg.egresses.clone(),
+            egress_groups: cfg.egress_groups.clone(),
+            default_proxy: cfg.daemon.default_proxy.clone(),
+        }
+    }
+}
+
 pub struct Engine {
     pub config_gate: tokio::sync::RwLock<()>,
+    /// Serializes run lifecycle and heartbeat metric projections.
+    pub metrics_gate: tokio::sync::RwLock<()>,
+    worker_metrics_locks: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    reload_gate: tokio::sync::Mutex<()>,
+    routing_snapshot: std::sync::Mutex<RoutingSnapshot>,
     /// Static daemon config: NOT hot-reloadable. Reloadable job
     /// definitions live in `live_jobs`.
     pub cfg: ResolvedConfig,
@@ -197,11 +222,16 @@ impl Engine {
             job_locks.insert(j.name.clone(), Arc::new(tokio::sync::Mutex::new(())));
             live_jobs.insert(j.name.clone(), j.clone());
         }
+        let routing_snapshot = std::sync::Mutex::new(RoutingSnapshot::from_config(&cfg));
         let engine = Arc::new(Engine {
             cfg,
             store,
             metrics: Arc::new(Metrics::new()),
             config_gate: tokio::sync::RwLock::new(()),
+            metrics_gate: tokio::sync::RwLock::new(()),
+            worker_metrics_locks: std::sync::Mutex::new(HashMap::new()),
+            reload_gate: tokio::sync::Mutex::new(()),
+            routing_snapshot,
             live_jobs: std::sync::RwLock::new(live_jobs),
             job_locks: std::sync::RwLock::new(job_locks),
             global_sem: Arc::new(tokio::sync::Semaphore::new(max_concurrency)),
@@ -217,6 +247,61 @@ impl Engine {
         Ok(engine)
     }
 
+    /// Shared with dispatch: no completion may overwrite a newer claim's projection.
+    pub fn job_projection_lock(&self, job: &str) -> Option<Arc<tokio::sync::Mutex<()>>> {
+        self.job_locks
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(job)
+            .cloned()
+    }
+
+    pub fn worker_metrics_lock(&self, worker: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.worker_metrics_locks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(worker.to_owned())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    pub async fn refresh_worker_metrics(&self, worker: Option<&str>) -> Result<(), String> {
+        for (worker, status, running) in self
+            .store
+            .reconcile_worker_run_counts(worker)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            self.metrics.set_gauge(
+                "synora_worker_jobs_running",
+                &[("worker", &worker)],
+                running as f64,
+            );
+            self.metrics.set_gauge(
+                "synora_worker_status",
+                &[("worker", &worker)],
+                match status.as_str() {
+                    "ONLINE" => 1.0,
+                    "DRAINING" => 2.0,
+                    "MAINTENANCE" => 3.0,
+                    _ => 0.0,
+                },
+            );
+            if running == 0 || status == "OFFLINE" {
+                self.metrics.remove_worker_metrics(
+                    &[
+                        "synora_job_memory_bytes",
+                        "synora_job_cpu_seconds",
+                        "synora_job_cpu_percent",
+                        "synora_job_bandwidth_bytes",
+                    ],
+                    &worker,
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Sync config-defined jobs + schedules into the DB (idempotent, keeps
     /// interval anchors). Jobs removed from config are purged from every table.
     pub async fn sync_config(&self) -> Result<(), String> {
@@ -230,7 +315,7 @@ impl Engine {
             .collect();
         for job in &jobs {
             self.store.sync_job(job).await.map_err(|e| e.to_string())?;
-            self.sync_schedule_for(job, now).await?;
+            self.sync_schedule_for(job, now, true).await?;
         }
         for (name, _) in self
             .store
@@ -248,6 +333,7 @@ impl Engine {
     /// Drop a job from memory, metrics, logs, and every DB table.
     pub async fn forget_job(&self, name: &str) -> Result<(), String> {
         let _guard = self.config_gate.write().await;
+        let _metrics = self.metrics_gate.write().await;
         self.forget_job_current(name).await
     }
     async fn forget_job_current(&self, name: &str) -> Result<(), String> {
@@ -313,7 +399,12 @@ impl Engine {
             .map(|(path, _)| path.clone())
     }
 
-    async fn sync_schedule_for(&self, job: &JobSpec, now: i64) -> Result<(), String> {
+    async fn sync_schedule_for(
+        &self,
+        job: &JobSpec,
+        now: i64,
+        immediate: bool,
+    ) -> Result<(), String> {
         self.store
             .db()
             .execute(
@@ -357,10 +448,14 @@ impl Engine {
                 synora_core::ScheduleKind::Manual | synora_core::ScheduleKind::Startup => {
                     (None, None)
                 }
-                synora_core::ScheduleKind::Interval { .. } => {
-                    // A new/changed interval gets a new grid. The first point
-                    // is due immediately; subsequent points remain anchored.
-                    (Some(now), Some(now))
+                synora_core::ScheduleKind::Interval { every } => {
+                    // Startup can run immediately; reload starts on the next grid point.
+                    let next = if immediate {
+                        now
+                    } else {
+                        now.saturating_add(every.whole_seconds().max(1))
+                    };
+                    (Some(next), Some(now))
                 }
                 _ => {
                     let next = job
@@ -654,14 +749,18 @@ impl Engine {
     /// config, apply job/schedule changes, reject non-reloadable changes
     /// (db backend, listen address, tls, log dir) as a whole.
     pub async fn reload(&self) -> Result<usize, String> {
-        let _guard = self.config_gate.write().await;
+        let _reload = self.reload_gate.lock().await;
         let (path, overrides) = self
             .config_source
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
             .ok_or_else(|| "no config source set (started without -c?)".to_string())?;
-        let new_cfg = ConfigLoader::load(&path, &overrides).map_err(|e| e.to_string())?;
+        let new_cfg = tokio::task::spawn_blocking(move || ConfigLoader::load(&path, &overrides))
+            .await
+            .map_err(|e| format!("config loader failed: {e}"))?
+            .map_err(|e| e.to_string())?;
+
         // Non-reloadable fields.
         let old = &self.cfg;
         let reject = |field: &str, a: &dyn std::fmt::Debug, b: &dyn std::fmt::Debug| {
@@ -713,6 +812,19 @@ impl Engine {
             return reject("notification", &old.notifications, &new_cfg.notifications);
         }
 
+        let _guard = self.config_gate.write().await;
+        let _metrics = self.metrics_gate.write().await;
+        let changed_jobs: Vec<_> = new_cfg
+            .jobs
+            .iter()
+            .filter(|job| self.job(&job.name).as_ref() != Some(*job))
+            .cloned()
+            .collect();
+        let added = changed_jobs
+            .iter()
+            .filter(|job| self.job(&job.name).is_none())
+            .count();
+        let modified = changed_jobs.len() - added;
         // Apply job changes: upsert changed jobs + schedules, disable removed.
         // (Keep the live-jobs lock across awaits is forbidden — guards are not
         // Send — so: short lock for the diff, awaits, short lock to apply.)
@@ -724,73 +836,35 @@ impl Engine {
                 .cloned()
                 .collect()
         };
-        for job in &new_cfg.jobs {
+        for job in &changed_jobs {
             if self.job(&job.name).as_ref() == Some(job) {
                 continue;
             }
             self.store.db().execute("UPDATE job_runs SET status = 'CANCELLED', finished_at = ?, message = 'configuration changed before execution' WHERE job_id = ? AND status IN ('QUEUED','RETRYING')", &[now.into(), job.name.clone().into()]).await.map_err(|e| e.to_string())?;
             self.store.sync_job(job).await.map_err(|e| e.to_string())?;
-            self.sync_schedule_for(job, now).await?;
+            self.sync_schedule_for(job, now, false).await?;
         }
         for name in &removed {
             self.forget_job_current(name).await?;
         }
-        let audit: Vec<(String, Option<String>, Option<String>)> = {
+        let audit = {
             let mut jobs = self.live_jobs.write().unwrap_or_else(|e| e.into_inner());
-            let mut rows = Vec::new();
-            {
-                let mut locks = self.job_locks.write().unwrap_or_else(|e| e.into_inner());
-                for job in &new_cfg.jobs {
-                    locks
-                        .entry(job.name.clone())
-                        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())));
-                }
-                for name in &removed {
-                    locks.remove(name);
-                }
-            }
-            for job in &new_cfg.jobs {
+            let mut locks = self.job_locks.write().unwrap_or_else(|e| e.into_inner());
+            let mut audit = Vec::new();
+            for job in &changed_jobs {
                 let before = jobs
                     .get(&job.name)
-                    .map(|old| serde_json::to_string(old).unwrap_or_default());
+                    .and_then(|old| serde_json::to_string(old).ok());
+                let after = serde_json::to_string(job).ok();
                 jobs.insert(job.name.clone(), job.clone());
-                // Only actually-changed jobs are audited (and re-run).
-                if let Some(before_json) = before {
-                    let after_json = serde_json::to_string(job).ok();
-                    if Some(&before_json) != after_json.as_ref() {
-                        rows.push((job.name.clone(), Some(before_json), after_json));
-                    }
-                }
+                locks
+                    .entry(job.name.clone())
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())));
+                audit.push((job.name.clone(), before, after));
             }
-            for name in &removed {
-                jobs.remove(name);
-            }
-            rows
+            audit
         };
-        // Changed jobs re-sync once after reload (user requirement: reload
-        // must make the affected mirrors catch up immediately).
-        for (name, _, _) in &audit {
-            let job = self.job(name).ok_or("job vanished during reload")?;
-            if job.enabled {
-                // Queue one catch-up run; dispatch goes through the same
-                // planner/concurrency gates as a scheduled run.
-                match self.dispatch_current(name, false).await {
-                    Ok(run_id) => {
-                        let _ = self
-                            .store
-                            .insert_event(
-                                None,
-                                Some(name),
-                                "INFO",
-                                &format!("reload: queued catch-up run {run_id}"),
-                            )
-                            .await;
-                    }
-                    Err(e) => tracing::warn!("reload: cannot queue `{name}`: {e}"),
-                }
-                let _ = job;
-            }
-        }
+        // Reload changes definitions and schedules only; it never triggers catch-up runs.
         for (name, before, after) in audit {
             let _ = self
                 .store
@@ -801,27 +875,32 @@ impl Engine {
                 )
                 .await;
         }
-        // Proxy/egress changes: rebuild the NetRoute (user: TUI-registered
-        // proxies apply on reload).
-        // Always rebuild from the just-loaded snapshot. Comparing against
-        // `self.cfg` (the immutable startup config) made A -> B -> A reloads
-        // leave routing stuck on B.
-        *self.netroute.write().unwrap_or_else(|e| e.into_inner()) =
-            netroute::NetRoute::build_optional(
-                &new_cfg.proxies,
-                &new_cfg.proxy_groups,
-                &new_cfg.egresses,
-                &new_cfg.egress_groups,
-                new_cfg.daemon.default_proxy.as_deref(),
-            );
-        let changed = new_cfg.jobs.len() + removed.len();
+        let routing = RoutingSnapshot::from_config(&new_cfg);
+        {
+            let mut previous = self
+                .routing_snapshot
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if *previous != routing {
+                *self.netroute.write().unwrap_or_else(|e| e.into_inner()) =
+                    netroute::NetRoute::build_optional(
+                        &new_cfg.proxies,
+                        &new_cfg.proxy_groups,
+                        &new_cfg.egresses,
+                        &new_cfg.egress_groups,
+                        new_cfg.daemon.default_proxy.as_deref(),
+                    );
+                *previous = routing;
+            }
+        }
+        let changed = changed_jobs.len() + removed.len();
         let _ = self
             .store
             .insert_event(
                 None,
                 None,
                 "INFO",
-                &format!("config reloaded ({changed} job(s) applied)"),
+                &format!("config reloaded: {added} added, {modified} modified, {} removed ({changed} job(s) applied)", removed.len()),
             )
             .await;
         Ok(changed)

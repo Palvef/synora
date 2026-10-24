@@ -10,7 +10,7 @@ pub const API_V1: &str = "/api/v1";
 // DTOs
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JobDTO {
     pub name: String,
     pub enabled: bool,
@@ -25,7 +25,7 @@ pub struct JobDTO {
     pub size_bytes: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunDTO {
     pub id: String,
     pub job_id: String,
@@ -43,7 +43,7 @@ pub struct RunDTO {
     pub created_at: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkerDTO {
     pub id: String,
     pub hostname: String,

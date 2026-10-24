@@ -892,3 +892,108 @@ depends_on = ["http"]
     assert!(log.contains("1 missing-file warnings"));
     server.abort();
 }
+
+#[tokio::test]
+async fn reload_is_incremental_and_never_dispatches_catchup_runs() {
+    let dir = temp_dir("incremental-reload");
+    write(&dir, "synora.toml", &config_text(&dir));
+    let job = |name: &str, cmd: &str| {
+        format!("[[jobs]]\nname = \"{name}\"\nschedule = \"interval\"\nevery = \"1h\"\nprovider = \"script\"\ncommand = \"{cmd}\"\nstorage = \"/tmp/{name}\"\n")
+    };
+    write(&dir, "jobs/a.toml", &job("a", "true"));
+    let engine = engine_for(&dir).await;
+    engine.set_config_source(dir.join("synora.toml"), CliOverrides::default());
+    engine.sync_config().await.unwrap();
+    engine
+        .store
+        .db()
+        .execute(
+            "UPDATE schedules SET next_run = ? WHERE job_name = 'a'",
+            &[(time::OffsetDateTime::now_utc().unix_timestamp() + 3600).into()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(engine.reload().await.unwrap(), 0);
+    write(&dir, "jobs/b.toml", &job("b", "true"));
+    assert_eq!(engine.reload().await.unwrap(), 1);
+    assert!(
+        engine
+            .store
+            .get_schedule("b")
+            .await
+            .unwrap()
+            .unwrap()
+            .next_run
+            .unwrap()
+            > time::OffsetDateTime::now_utc().unix_timestamp()
+    );
+    engine.tick().await;
+    assert!(engine.store.run_history("b", 10).await.unwrap().is_empty());
+    write(&dir, "jobs/a.toml", &job("a", "echo changed"));
+    assert_eq!(engine.reload().await.unwrap(), 1);
+    assert!(engine.store.run_history("a", 10).await.unwrap().is_empty());
+    std::fs::remove_file(dir.join("jobs/b.toml")).unwrap();
+    assert_eq!(engine.reload().await.unwrap(), 1);
+    assert!(engine.job("b").is_none());
+    assert_eq!(engine.reload().await.unwrap(), 0);
+    let before = engine.job("a").unwrap();
+    write(
+        &dir,
+        "jobs/a.toml",
+        "[[jobs]]\nname = \"a\"\nprovider = \"unknown\"\n",
+    );
+    assert!(engine.reload().await.is_err());
+    assert_eq!(engine.job("a").unwrap(), before);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn bulk_latest_runs_and_slots_ignore_stale_worker_counts() {
+    let dir = temp_dir("bulk-and-slots");
+    write(&dir, "synora.toml", &config_text(&dir));
+    write(&dir, "jobs/slots.toml", "[[jobs]]\nname = \"slots\"\nschedule = \"manual\"\nprovider = \"script\"\ncommand = \"true\"\nstorage = \"/tmp/slots\"\n");
+    let engine = engine_for(&dir).await;
+    engine.sync_config().await.unwrap();
+    for id in ["a", "b", "z"] {
+        engine
+            .store
+            .create_run(
+                id,
+                "slots",
+                Some("local"),
+                synora_core::JobStatus::Queued,
+                0,
+            )
+            .await
+            .unwrap();
+    }
+    let latest = engine.store.latest_runs().await.unwrap();
+    assert_eq!(latest.len(), 1);
+    assert_eq!(
+        latest[0].id,
+        engine.store.run_history("slots", 1).await.unwrap()[0].id
+    );
+    assert!(engine.store.claim_run("z", "local").await.unwrap());
+    engine
+        .store
+        .touch_heartbeat("local", 999, "running", &[])
+        .await
+        .unwrap();
+    let counts = engine
+        .store
+        .reconcile_worker_run_counts(None)
+        .await
+        .unwrap();
+    assert_eq!(counts.iter().find(|(id, _, _)| id == "local").unwrap().2, 1);
+    engine.store.set_run_lost("z").await.unwrap();
+    assert_eq!(
+        engine
+            .store
+            .reconcile_worker_run_counts(None)
+            .await
+            .unwrap()[0]
+            .2,
+        0
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}

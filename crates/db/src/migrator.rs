@@ -10,6 +10,10 @@ use std::path::Path;
 /// e.g. systemd services with CWD=/ — the embedded set runs instead.
 const EMBEDDED: &[(u64, &str)] = &[
     (
+        10,
+        include_str!("../../../migrations/0010_worker_active_runs.sql"),
+    ),
+    (
         9,
         include_str!("../../../migrations/0009_config_generation.sql"),
     ),

@@ -204,6 +204,7 @@ struct LoadState {
     /// Files on the current include path (for cycle detection).
     stack: HashSet<PathBuf>,
     jobs: Vec<JobEntry>,
+    connection_only: bool,
 }
 
 pub struct ConfigLoader;
@@ -213,28 +214,158 @@ impl ConfigLoader {
         config_path: &Path,
         overrides: &CliOverrides,
     ) -> Result<ResolvedConfig, ConfigError> {
-        let root = config_path.canonicalize().map_err(|e| {
-            ConfigError::new(
-                config_path.display().to_string(),
-                0,
-                format!("cannot read config: {e}"),
-            )
-        })?;
-        let mut state = LoadState {
-            files: 0,
-            bytes: 0,
-            stack: HashSet::new(),
-            jobs: Vec::new(),
-        };
-        let mut merged: Option<toml_edit::DocumentMut> = None;
-        load_file(&root, &mut state, &mut merged, 0)?;
-
-        let root: RootDoc = deserialize_root(merged.as_ref())?;
-        let mut cfg = resolve(&root, state.jobs)?;
+        let (root, jobs) = load_documents(config_path, false)?;
+        let mut cfg = resolve(&root, jobs)?;
         apply_env_overrides(&mut cfg)?;
         apply_cli_overrides(&mut cfg, overrides)?;
         Ok(cfg)
     }
+    /// Client connection settings without deserializing or validating every job.
+    pub fn load_api(config_path: &Path) -> Result<ApiConfig, ConfigError> {
+        let (root, _) = load_documents(config_path, true)?;
+        let api_root = RootDoc {
+            api: root.api,
+            ..RootDoc::default()
+        };
+        let mut cfg = resolve(&api_root, Vec::new())?;
+        if let Ok(value) = std::env::var("SYNORA_API_LISTEN") {
+            cfg.api.listen = value
+                .parse()
+                .map_err(|_| ConfigError::new("<env>", 0, "invalid SYNORA_API_LISTEN"))?;
+        }
+        Ok(cfg.api)
+    }
+}
+
+fn load_documents(
+    config_path: &Path,
+    connection_only: bool,
+) -> Result<(RootDoc, Vec<JobEntry>), ConfigError> {
+    let root = config_path.canonicalize().map_err(|_| {
+        ConfigError::new(config_path.display().to_string(), 0, "cannot read config")
+    })?;
+    let mut state = LoadState {
+        files: 0,
+        bytes: 0,
+        stack: HashSet::new(),
+        jobs: Vec::new(),
+        connection_only,
+    };
+    let mut merged = None;
+    load_file(&root, &mut state, &mut merged, 0)?;
+    Ok((deserialize_root(merged.as_ref())?, state.jobs))
+}
+
+#[derive(Clone, PartialEq)]
+struct FileStamp {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    identity: (u64, u64, i64, i64),
+}
+
+#[derive(Clone)]
+struct CachedDocument {
+    stamp: FileStamp,
+    raw: String,
+    expanded: String,
+    doc: std::sync::Arc<toml_edit::DocumentMut>,
+    job_lines: Vec<usize>,
+    include_line: usize,
+}
+
+fn document_cache() -> &'static std::sync::Mutex<HashMap<PathBuf, CachedDocument>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<PathBuf, CachedDocument>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+fn read_document(path: &Path, file: &str) -> Result<CachedDocument, ConfigError> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|_| ConfigError::new(file, 0, "cannot read config file"))?;
+    #[cfg(unix)]
+    let identity = {
+        use std::os::unix::fs::MetadataExt;
+        (
+            metadata.dev(),
+            metadata.ino(),
+            metadata.ctime(),
+            metadata.ctime_nsec(),
+        )
+    };
+    #[cfg(not(unix))]
+    let identity = (0, 0, 0, 0);
+    let stamp = FileStamp {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+        identity,
+    };
+    let cached = document_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(path)
+        .filter(|value| value.stamp == stamp)
+        .cloned();
+    if let Some(cached) = cached {
+        if expand_env(&cached.raw, file)? == cached.expanded {
+            return Ok(cached);
+        }
+    }
+    use std::io::Read;
+    let mut raw = String::new();
+    std::fs::File::open(path)
+        .and_then(|f| {
+            f.take((MAX_CONFIG_BYTES + 1) as u64)
+                .read_to_string(&mut raw)
+        })
+        .map_err(|_| ConfigError::new(file, 0, "cannot read config file"))?;
+    if raw.len() > MAX_CONFIG_BYTES {
+        return Err(ConfigError::new(file, 0, "configuration exceeds 16 MiB"));
+    }
+    let expanded = expand_env(&raw, file)?;
+    let im: toml_edit::ImDocument<String> =
+        expanded.parse().map_err(|e: toml_edit::TomlError| {
+            ConfigError::new(
+                file,
+                line_of(&expanded, e.span()),
+                "TOML syntax error (source omitted to protect secrets)",
+            )
+        })?;
+    let job_lines = job_line_numbers(&im, &expanded);
+    let include_line = im
+        .as_table()
+        .get("include")
+        .and_then(|item| item.span())
+        .map(|span| line_of(&expanded, Some(span)))
+        .unwrap_or(0);
+    let doc = expanded.parse().map_err(|e: toml_edit::TomlError| {
+        ConfigError::new(
+            file,
+            line_of(&expanded, e.span()),
+            "TOML syntax error (source omitted to protect secrets)",
+        )
+    })?;
+    let entry = CachedDocument {
+        stamp,
+        raw,
+        expanded,
+        doc: std::sync::Arc::new(doc),
+        job_lines,
+        include_line,
+    };
+    let mut cache = document_cache().lock().unwrap_or_else(|e| e.into_inner());
+    if cache.len() >= MAX_CONFIG_FILES
+        || cache
+            .values()
+            .map(|value| value.raw.len() + value.expanded.len())
+            .sum::<usize>()
+            + entry.raw.len()
+            + entry.expanded.len()
+            > MAX_CONFIG_BYTES * 2
+    {
+        cache.clear();
+    }
+    cache.insert(path.to_path_buf(), entry.clone());
+    Ok(entry)
 }
 
 /// Validate an editor's bare job document before replacing its config file.
@@ -286,24 +417,11 @@ fn load_file(
             "too many included files (limit 1024)",
         ));
     }
-    use std::io::Read;
-    let mut text = String::new();
-    std::fs::File::open(path)
-        .and_then(|f| {
-            f.take((MAX_CONFIG_BYTES + 1) as u64)
-                .read_to_string(&mut text)
-        })
-        .map_err(|_| ConfigError::new(&file, 0, "cannot read config file"))?;
-    state.bytes = state.bytes.saturating_add(text.len());
-    if state.bytes > MAX_CONFIG_BYTES {
+    let cached = read_document(path, &file)?;
+    if state.bytes.saturating_add(cached.raw.len()) > MAX_CONFIG_BYTES {
         return Err(ConfigError::new(&file, 0, "configuration exceeds 16 MiB"));
     }
-    let original_len = text.len();
-    let text = expand_env(&text, &file)?;
-    state.bytes = state
-        .bytes
-        .saturating_sub(original_len)
-        .saturating_add(text.len());
+    state.bytes = state.bytes.saturating_add(cached.expanded.len());
     if state.bytes > MAX_CONFIG_BYTES {
         return Err(ConfigError::new(
             &file,
@@ -311,35 +429,18 @@ fn load_file(
             "expanded configuration exceeds 16 MiB",
         ));
     }
-
-    // First parse: immutable doc — spans survive, giving us file:line for jobs.
-    let im_parsed: Result<toml_edit::ImDocument<String>, toml_edit::TomlError> = text.parse();
-    let im = im_parsed.map_err(|e| {
-        ConfigError::new(
-            &file,
-            line_of(&text, e.span()),
-            "TOML syntax error (source omitted to protect secrets)",
-        )
-    })?;
-    let job_lines = job_line_numbers(&im, &text);
-    let include_line = im
-        .as_table()
-        .get("include")
-        .and_then(|i| i.span())
-        .map(|s| line_of(&text, Some(s)))
-        .unwrap_or(0);
-    // Second parse: mutable doc for include/job extraction and merging.
-    let doc_parsed: Result<toml_edit::DocumentMut, toml_edit::TomlError> = text.parse();
-    let mut doc = doc_parsed.map_err(|e| {
-        ConfigError::new(
-            &file,
-            line_of(&text, e.span()),
-            "TOML syntax error (source omitted to protect secrets)",
-        )
-    })?;
-
+    let mut doc = (*cached.doc).clone();
+    let include_line = cached.include_line;
+    let job_lines = cached.job_lines;
     let include = extract_include(&mut doc, &file, include_line)?;
-    extract_jobs(&mut doc, &file, &job_lines, &mut state.jobs)?;
+    if state.connection_only {
+        doc.remove("jobs");
+        if doc.as_table().contains_key("provider") {
+            doc.as_table_mut().clear();
+        }
+    } else {
+        extract_jobs(&mut doc, &file, &job_lines, &mut state.jobs)?;
+    }
 
     // Own content first (lowest precedence), then includes.
     merge_doc(merged, doc);
@@ -1723,4 +1824,36 @@ fn apply_cli_overrides(
         })?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    #[test]
+    fn cached_documents_reuse_parses_but_detect_edits_and_env_changes() {
+        let path = std::env::temp_dir().join(format!(
+            "synora-cached-config-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, "[api]\nlisten = \"127.0.0.1:8100\"\n").unwrap();
+        let a = read_document(&path, "test").unwrap();
+        let b = read_document(&path, "test").unwrap();
+        assert!(std::sync::Arc::ptr_eq(&a.doc, &b.doc));
+        std::fs::write(&path, "[api]\nlisten = \"127.0.0.1:8101\"\n").unwrap();
+        let c = read_document(&path, "test").unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&a.doc, &c.doc));
+        let key = format!("SYNORA_CACHE_TEST_{}", std::process::id());
+        std::fs::write(&path, format!("[api]\nlisten = \"${{{key}}}\"\n")).unwrap();
+        std::env::set_var(&key, "127.0.0.1:8102");
+        let d = read_document(&path, "test").unwrap();
+        std::env::set_var(&key, "127.0.0.1:8103");
+        let e = read_document(&path, "test").unwrap();
+        assert_ne!(d.expanded, e.expanded);
+        std::env::remove_var(&key);
+        std::fs::remove_file(path).unwrap();
+    }
 }

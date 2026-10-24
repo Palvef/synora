@@ -699,15 +699,15 @@ fn manager_creds(
     let (url, token) = match (manager, token) {
         (Some(u), Some(t)) => (u, t), // fully explicit: no config file needed
         (manager, token) => {
-            let (cfg, _) = load_config(config, None)?;
+            let api = ConfigLoader::load_api(&find_config(config)?).map_err(|e| e.to_string())?;
             let url = match manager {
                 Some(u) => u,
-                None => manager_url_from_listen(cfg.api.listen),
+                None => manager_url_from_listen(api.listen),
             };
             let token =
                 match token {
                     Some(t) => t,
-                    None => cfg.api.tokens.first().map(|t| t.token.clone()).ok_or(
+                    None => api.tokens.first().map(|t| t.token.clone()).ok_or(
                         "no api token configured (set one in [api.tokens] or pass --token)",
                     )?,
                 };
@@ -766,6 +766,7 @@ async fn cmd_reload(config: Option<PathBuf>) -> Result<(), String> {
                     println!("reload applied via {url} ({n} job(s))");
                     return Ok(());
                 }
+                Err(e @ api::ApiError::Rejected(_)) => return Err(format!("manager {url}: {e}")),
                 Err(e) => errors.push(format!("manager {url}: {e}")),
             }
         }

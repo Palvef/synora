@@ -1027,7 +1027,7 @@ impl Store {
     pub async fn run_history(&self, job_name: &str, limit: u32) -> DbResult<Vec<RunRow>> {
         let sql = "SELECT id, job_id, worker_id, status, lease_token, retry_count, next_retry_at, created_at,
                           started_at, finished_at, duration_secs, exit_code, message
-                   FROM job_runs WHERE job_id = ? ORDER BY created_at DESC LIMIT ?";
+                   FROM job_runs WHERE job_id = ? ORDER BY created_at DESC, id DESC LIMIT ?";
         let rows = self
             .db
             .query(sql, &[job_name.into(), (limit as i64).into()])
@@ -1035,6 +1035,47 @@ impl Store {
         let mut v: Vec<RunRow> = rows.iter().map(|r| run_row(r)).collect();
         v.truncate(limit as usize);
         Ok(v)
+    }
+
+    /// Latest runs for all jobs in one query (also used by the operator API).
+    pub async fn latest_runs(&self) -> DbResult<Vec<RunRow>> {
+        let rows = self.db.query("SELECT runs.* FROM jobs JOIN job_runs runs ON runs.id = (SELECT id FROM job_runs WHERE job_id = jobs.name ORDER BY created_at DESC, id DESC LIMIT 1)", &[]).await?;
+        Ok(rows.iter().map(|r| run_row(r)).collect())
+    }
+
+    /// Worker slot usage follows owned active assignments, never a stale client count.
+    pub async fn reconcile_worker_run_counts(
+        &self,
+        worker: Option<&str>,
+    ) -> DbResult<Vec<(String, String, i64)>> {
+        let scope = if worker.is_some() {
+            " WHERE id = ?"
+        } else {
+            ""
+        };
+        let mut params: Vec<Param> = vec![unix_now().into()];
+        if let Some(worker) = worker {
+            params.push(worker.into());
+        }
+        self.db.execute(&format!("UPDATE workers SET jobs_running = (SELECT COUNT(*) FROM job_runs WHERE worker_id = workers.id AND status IN ('STARTING','SYNCING','RUNNING','CANCELLING') AND (lease_expires_at > ? OR worker_id = 'local')){scope}"), &params).await?;
+        let params: Vec<Param> = worker.into_iter().map(Into::into).collect();
+        let rows = self
+            .db
+            .query(
+                &format!("SELECT id, status, jobs_running FROM workers{scope}"),
+                &params,
+            )
+            .await?;
+        Ok(rows
+            .iter()
+            .filter_map(|row| {
+                Some((
+                    cell(row, "id")?.as_str()?.to_owned(),
+                    cell(row, "status")?.as_str()?.to_owned(),
+                    cell(row, "jobs_running")?.as_i64()?,
+                ))
+            })
+            .collect())
     }
 
     pub async fn get_run(&self, id: &str) -> DbResult<Option<RunRow>> {

@@ -610,3 +610,26 @@ fn unsafe_job_path_names_rejected() {
     }
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn client_settings_ignore_invalid_jobs_but_full_load_rejects_them() {
+    let dir = temp_dir("connection-only");
+    write(
+        &dir,
+        "synora.toml",
+        "include = [\"jobs/*.toml\"]\n[api]\nlisten = \"127.0.0.1:9290\"\n",
+    );
+    write(
+        &dir,
+        "jobs/broken.toml",
+        "[[jobs]]\nname = \"broken\"\nprovider = \"unknown\"\n",
+    );
+    assert_eq!(
+        ConfigLoader::load_api(&dir.join("synora.toml"))
+            .unwrap()
+            .listen
+            .port(),
+        9290
+    );
+    assert!(load(&dir).is_err());
+}
