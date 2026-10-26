@@ -24,7 +24,7 @@ fi
 MAX_RETRY=${MAX_RETRY:-"3"}
 DOWNLOAD_TIMEOUT=${DOWNLOAD_TIMEOUT:-"1800"}
 
-BASE_URL="http://download.virtualbox.org/virtualbox"
+BASE_URL=${SYNORA_UPSTREAM:-"https://download.virtualbox.org/virtualbox"}
 BASE_PATH="${SYNORA_STORAGE}"
 
 YUM_PATH="${BASE_PATH}/rpm"
