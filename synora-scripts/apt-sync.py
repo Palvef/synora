@@ -5,6 +5,7 @@ import gzip
 import hashlib
 import logging
 import lzma
+import math
 import os
 import re
 import shutil
@@ -64,6 +65,7 @@ pattern_package_name = re.compile(r"^Filename: (.+)$", re.MULTILINE)
 pattern_package_size = re.compile(r"^Size: (\d+)$", re.MULTILINE)
 pattern_package_sha256 = re.compile(r"^SHA256: (\w{64})$", re.MULTILINE)
 download_cache = dict()
+last_request_started = None
 
 
 def check_args(prop: str, lst: List[str]):
@@ -74,7 +76,11 @@ def check_args(prop: str, lst: List[str]):
 
 
 def check_and_download(url: str, dst_file: Path, caching=False) -> int:
+    global last_request_started
     try:
+        interval = float(os.getenv('APT_REQUEST_INTERVAL', '0'))
+        if not math.isfinite(interval) or not 0 <= interval <= 60:
+            raise ValueError('APT_REQUEST_INTERVAL must be between 0 and 60 seconds')
         if caching:
             if url in download_cache:
                 logger.info(f"Using cached content: {url}")
@@ -82,6 +88,13 @@ def check_and_download(url: str, dst_file: Path, caching=False) -> int:
                     f.write(download_cache[url])
                 return 0
             download_cache[url] = bytes()
+        if interval:
+            now = time.monotonic()
+            if last_request_started is not None:
+                delay = last_request_started + interval - now
+                if delay > 0:
+                    time.sleep(delay)
+            last_request_started = time.monotonic()
         start = time.time()
         with requests.get(url, stream=True, timeout=(30, 60)) as r:
             r.raise_for_status()

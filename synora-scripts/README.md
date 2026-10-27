@@ -141,6 +141,11 @@ repository and URL-path exceptions are applied. Existing `SYNC_APT_ARCHES`,
 `SYNC_YUM_ARCHES`, `*_BY_PATH`, `SYNC_VERSIONS`, and `SYNC_COMPONENTS` remain
 available for explicit job overrides. `SYNC_EXCLUDE_*` always wins.
 
+For rate-limited APT upstreams, `APT_REQUEST_INTERVAL=1` spaces network
+request starts by at least one second. The default is zero (no added pacing);
+valid values are 0–60 seconds. In-process cache hits do not wait. This controls
+request frequency without changing retries, repository scope or failure checks.
+
 The `[discovery]` table controls shared release windows: the latest two released
 RHEL-compatible/Fedora versions, three Ubuntu LTS/Debian releases, and the
 `debian-latest2`/`debian-latest` subsets. Discovery uses official inventories;
