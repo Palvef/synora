@@ -77,7 +77,7 @@ jobs:
             rubygems) check='gem list --local --exact rubygems-mirror --installed' ;;
             rustup) check='rustup-mirror --version' ;;
             nix-channels) check='nix-store --version; python3 -c "from minio.credentials import Static; import pyquery"' ;;
-            yukina) check='yukina --help >/dev/null; python -m py_compile /opt/pypi-cache/sync.py /opt/pypi-cache/logs.py' ;;
+            yukina) check='yukina --help >/dev/null; python -m py_compile /opt/pypi-cache/sync.py /opt/pypi-cache/logs.py /opt/pypi-cache/clickhouse_logs.py' ;;
             shadowmire) check='shadowmire --help >/dev/null' ;;
             ftpsync) check='test -x /ftpsync/bin/ftpsync; bash -n /ftpsync/bin/ftpsync' ;;
           esac

@@ -10,7 +10,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from logs import prepare
+from clickhouse_logs import prepare
 
 UPSTREAM='https://mirrors.tuna.tsinghua.edu.cn/pypi/web/'
 BUDGET=512*1024**3
@@ -108,13 +108,13 @@ def run(command):
 def cache_command(root,logdir,upstream,budget):
     return ['yukina','--name','pypi','--repo-path',str(root/'packages'),'--size-limit',str(budget),'--url',upstream+'packages/','--strip-prefix','/packages','--filter',r'^[0-9a-f]{2}/[0-9a-f]{2}/[0-9a-f]+/[^/]+$','--log-path',str(logdir),'--log-format','mirror-json','--log-duration','7d','--min-vote-count','1','--include-browser-ua','--remote-sizedb',str(root/'.synora/remote-size.db'),'--local-sizedb',str(root/'.synora/local-size.db'),'--download-error-threshold','1','--output-stats']
 
-def cycle(root,source,historical,upstream,budget,index_mode='full'):
+def cycle(root,upstream,budget,index_mode='full'):
     state=root/'.synora'; state.mkdir(parents=True,exist_ok=True)
     logdir=state/'logs';logdir.mkdir(exist_ok=True)
     with (state/'sync.lock').open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        print('Preparing seven-day access logs',flush=True)
-        count=prepare(source,historical,logdir/'pypi.log',progress=lambda message: print(message,flush=True))
+        print('Preparing seven-day access logs from ClickHouse',flush=True)
+        count=prepare(logdir/'pypi.log',progress=lambda message: print(message,flush=True))
         print(f'Validated {count} recent requests',flush=True)
         if index_mode == 'full':
             run([sys.executable,__file__,'--shadowmire','--repo',str(root),'sync','--no-sync-packages','--no-filter-metadata','--shadowmire-upstream',upstream])
@@ -124,7 +124,7 @@ def cycle(root,source,historical,upstream,budget,index_mode='full'):
             print('Index mode: on-demand upstream proxy; updating only access-log package candidates',flush=True)
         # Initial index sync can take days; refresh the seven-day vote window afterwards.
         if index_mode == 'full':
-            prepare(source,historical,logdir/'pypi.log',progress=lambda message: print(message,flush=True))
+            prepare(logdir/'pypi.log',progress=lambda message: print(message,flush=True))
         (root/'packages').mkdir(exist_ok=True)
         missing=run(cache_command(root,logdir,upstream,budget)) or []
         if not isinstance(missing, list): missing=[]
@@ -169,7 +169,7 @@ if __name__=='__main__':
         else:
             budget=int(os.environ.get('PYPI_CACHE_BYTES',BUDGET))
             if budget<=0: raise ValueError('PYPI_CACHE_BYTES must be positive')
-            cycle(Path('/data'),Path('/nginx-log'),Path('/nginx-legacy'),os.environ.get('PYPI_UPSTREAM',UPSTREAM).rstrip('/')+'/',budget,os.environ.get('PYPI_INDEX_MODE','full'))
+            cycle(Path('/data'),os.environ.get('PYPI_UPSTREAM',UPSTREAM).rstrip('/')+'/',budget,os.environ.get('PYPI_INDEX_MODE','full'))
     except Exception as exc:
         print(f'PyPI synchronization failed: {exc}',file=sys.stderr,flush=True)
         sys.exit(1)

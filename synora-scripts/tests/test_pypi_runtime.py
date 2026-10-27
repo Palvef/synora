@@ -122,7 +122,7 @@ class SyncTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d)
             with patch.object(sync,'prepare',return_value=1), patch.object(sync,'run',return_value=[]) as run:
-                sync.cycle(root,root,None,'https://upstream/web/',512,index_mode='proxy')
+                sync.cycle(root,'https://upstream/web/',512,index_mode='proxy')
                 self.assertEqual(run.call_count,1)
                 self.assertEqual(run.call_args[0][0][0],'yukina')
                 self.assertFalse((root/'.synora/initial-success.json').exists())
@@ -187,14 +187,14 @@ class SyncTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d)
             with patch.object(sync,'prepare',return_value=1), patch.object(sync,'run',side_effect=RuntimeError('failed')) as run:
-                with self.assertRaises(RuntimeError): sync.cycle(root,root,None,'https://upstream/web/',512)
+                with self.assertRaises(RuntimeError): sync.cycle(root,'https://upstream/web/',512)
                 self.assertEqual(run.call_count,1)
                 self.assertFalse((root/'.synora/initial-success.json').exists())
     def test_failed_cache_stops_marker(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d)
             with patch.object(sync,'prepare',return_value=1), patch.object(sync,'run',side_effect=[None,RuntimeError('cache failed')]):
-                with self.assertRaises(RuntimeError): sync.cycle(root,root,None,'https://upstream/web/',512)
+                with self.assertRaises(RuntimeError): sync.cycle(root,'https://upstream/web/',512)
                 self.assertFalse((root/'.synora/initial-success.json').exists())
     def test_concurrent_run_does_not_start(self):
         with tempfile.TemporaryDirectory() as d:
@@ -202,18 +202,18 @@ class SyncTest(unittest.TestCase):
             with (state/'sync.lock').open('a') as lock:
                 fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
                 with patch.object(sync,'prepare') as prepare:
-                    with self.assertRaises(BlockingIOError): sync.cycle(root,root,None,'https://upstream/web/',512)
+                    with self.assertRaises(BlockingIOError): sync.cycle(root,'https://upstream/web/',512)
                     prepare.assert_not_called()
     def test_empty_cache_not_bootstrapped(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d)
             with patch.object(sync,'prepare',return_value=1), patch.object(sync,'run'):
-                with self.assertRaises(RuntimeError): sync.cycle(root,root,None,'https://upstream/web/',512)
+                with self.assertRaises(RuntimeError): sync.cycle(root,'https://upstream/web/',512)
     def test_success_marker(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d); p=root/'packages/aa/bb/hash/a.whl'; p.parent.mkdir(parents=True);p.write_bytes(b'a')
             with patch.object(sync,'prepare',return_value=1), patch.object(sync,'run'):
-                sync.cycle(root,root,None,'https://upstream/web/',512)
+                sync.cycle(root,'https://upstream/web/',512)
                 self.assertTrue((root/'.synora/initial-success.json').exists())
 
 if __name__=='__main__': unittest.main()

@@ -10,7 +10,7 @@ RUN python3 /tmp/patch_upstream.py && cargo build --locked --release --bin yukin
 FROM python:3.13-slim-bookworm
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libclang1-14 && rm -rf /var/lib/apt/lists/*
 COPY --from=source /src/target/release/yukina /usr/local/bin/yukina
-COPY pypi-runtime/sync.py pypi-runtime/logs.py /opt/pypi-cache/
+COPY pypi-runtime/sync.py pypi-runtime/logs.py pypi-runtime/clickhouse_logs.py /opt/pypi-cache/
 ENV PYTHONUNBUFFERED=1 PYPI_INDEX_MODE=proxy
 ENTRYPOINT ["python", "/opt/pypi-cache/sync.py"]
 WORKDIR /data
