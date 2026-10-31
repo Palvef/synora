@@ -1,10 +1,9 @@
-# Synora 0.2.4
+# Synora 0.2.5
 
-- Keep task state, live resource gauges, and worker slot usage consistent with effective run assignments. Late worker reports cannot restore finished task resources.
-- Batch task-list database reads and keep TUI navigation responsive during slow requests and background operations.
-- Cache parsed configuration files and apply only added, changed, or removed jobs on reload. Reload reports the actual change count and does not trigger catch-up runs.
-- Show current resources separately from previous completion data in the synora-mirror Grafana dashboard, with a five-second refresh and the existing fifteen-second collection interval.
-- Preserve the PyPI access-log validation cache and ignore unusable request paths without ignoring corrupted logs.
-- Retain published Nix channels and report warnings when the official cache has removed objects required by a new release.
+- Separate temporary worker shutdown (`STOPPING`) from operator retirement (`DRAINING`). Registration after a restart restores temporarily stopped workers to `ONLINE`, including when shutdown was interrupted. Explicit retirement and maintenance remain durable. Assignment leases and fencing checks remain enforced.
+- Read PyPI cache votes from a dedicated read-only ClickHouse view instead of scanning Nginx log files. Validate complete, fresh seven-day results before cache eviction; preserve subsecond time boundaries and report sanitized validation errors.
+- Detect same-sized rapid configuration edits even when filesystem timestamps are unchanged, while reusing parsed documents for unchanged content.
+- Add optional APT request pacing through `APT_REQUEST_INTERVAL` without changing retry policies, synchronization scope or integrity checks.
+- Use HTTPS for VirtualBox and honor its configured upstream.
 
 Linux binaries target Ubuntu 24.04 / glibc 2.39 or newer; Ubuntu 22.04 is no longer supported. CLI, Manager, and Worker archives are available for x86_64 and ARM64. Synchronization images are built and published separately through Actions to GHCR.
