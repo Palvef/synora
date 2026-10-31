@@ -3,6 +3,11 @@
 日常操作都在这里：如何注册 CF One / WARP、如何添加代理、TUI 怎么用、
 常用命令对照表、systemd 部署步骤。
 
+Worker 普通停止时进入临时 `STOPPING` 状态，继续为正在执行的任务续租，
+再次启动并注册后自动恢复 `ONLINE`、领取排队任务。手动执行 `worker retire`
+产生的 `DRAINING` 以及 `MAINTENANCE` 状态会跨重启保留。
+普通停止调用 `/api/v1/workers/{id}/shutdown`，不能用永久退役接口代替。
+
 ## 1. 注册 CF One / WARP（加入 manager）
 
 ### 自动注册（推荐）

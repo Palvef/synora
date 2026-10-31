@@ -225,11 +225,7 @@ storage = "{}"
         )
         .await
         .unwrap();
-    engine
-        .store
-        .set_worker_status("remote", "DRAINING")
-        .await
-        .unwrap();
+    engine.store.begin_worker_shutdown("remote").await.unwrap();
     engine.store.unregister_worker("remote").await.unwrap();
 
     let row = engine.store.get_worker("remote").await.unwrap().unwrap();

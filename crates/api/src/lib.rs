@@ -442,6 +442,15 @@ impl Client {
         .await
     }
 
+    pub async fn begin_worker_shutdown(&self, worker_id: &str) -> Result<(), ApiError> {
+        self.send_ok(
+            reqwest::Method::POST,
+            &format!("{API_V1}/workers/{worker_id}/shutdown"),
+            None::<&()>,
+        )
+        .await
+    }
+
     pub async fn job_logs(&self, job: &str, tail: u32) -> Result<String, ApiError> {
         // The logs endpoint returns plain text, not JSON — json() would
         // fail parsing every response.

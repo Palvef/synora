@@ -40,7 +40,7 @@ def query(config, now):
     return f"""SELECT timestamp, clientip, url, size, status, user_agent, proxied,
        count() OVER () AS total_requests
 FROM {table}
-WHERE timestamp >= {int(now-WINDOW)} AND timestamp <= {int(now)}
+WHERE timestamp >= {now-WINDOW!r} AND timestamp <= {now!r}
   AND (startsWith(url, '/pypi/packages/') OR startsWith(url, '/pypi/web/packages/'))
 FORMAT JSONEachRow"""
 
@@ -85,19 +85,23 @@ def prepare(output, *, config=None, now=None, progress=None):
                     row = json.loads(line)
                     expected = int(row.pop('total_requests'))
                     if expected <= 0 or (total is not None and total != expected):
-                        raise ValueError()
+                        raise ValueError('inconsistent result count')
                     total = expected
                     received += 1
                     item = normalize(row)
                     if not now-WINDOW <= item['timestamp'] <= now:
-                        raise ValueError()
+                        raise ValueError('timestamp outside requested window')
                     if not item['url'].startswith('/pypi/packages/'):
-                        raise ValueError()
+                        raise ValueError('unexpected package path')
                 except UnusableRequestPath:
                     rejected += 1
                     continue
-                except (ValueError, KeyError, TypeError, AttributeError):
-                    raise ValueError(f'invalid ClickHouse access record {received}; refusing cache GC') from None
+                except (ValueError, KeyError, TypeError, AttributeError) as exc:
+                    reasons = {'inconsistent result count', 'timestamp outside requested window',
+                               'unexpected package path', 'invalid timestamp', 'invalid response',
+                               'invalid user agent', 'missing/invalid cache origin'}
+                    reason = str(exc) if str(exc) in reasons else type(exc).__name__
+                    raise ValueError(f'invalid ClickHouse access record {received}: {reason}; refusing cache GC') from None
                 latest = max(latest, item['timestamp'])
                 destination.write(json.dumps(item, separators=(',', ':'))+'\n')
                 count += 1

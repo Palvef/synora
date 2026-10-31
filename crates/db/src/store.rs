@@ -407,6 +407,19 @@ impl Store {
         Ok(())
     }
 
+    /// An automatic shutdown must be recoverable at the next registration,
+    /// while an operator's retirement or maintenance decision remains durable.
+    pub async fn begin_worker_shutdown(&self, id: &str) -> DbResult<()> {
+        self.db
+            .execute(
+                "UPDATE workers SET status = CASE WHEN status IN ('DRAINING','MAINTENANCE')
+             THEN status ELSE 'STOPPING' END WHERE id = ?",
+                &[id.into()],
+            )
+            .await?;
+        Ok(())
+    }
+
     /// Retire a worker without deleting its row. `job_runs.worker_id` keeps
     /// historical foreign-key references to workers, so DELETE fails as soon
     /// as a worker has completed its first run. OFFLINE is also the correct
@@ -414,7 +427,8 @@ impl Store {
     pub async fn unregister_worker(&self, id: &str) -> DbResult<()> {
         self.db
             .execute(
-                "UPDATE workers SET status = 'OFFLINE', jobs_running = 0 WHERE id = ?",
+                "UPDATE workers SET status = CASE WHEN status IN ('DRAINING','MAINTENANCE')
+                 THEN status ELSE 'OFFLINE' END, jobs_running = 0 WHERE id = ?",
                 &[id.into()],
             )
             .await?;

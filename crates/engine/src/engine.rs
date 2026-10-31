@@ -282,7 +282,7 @@ impl Engine {
                 &[("worker", &worker)],
                 match status.as_str() {
                     "ONLINE" => 1.0,
-                    "DRAINING" => 2.0,
+                    "DRAINING" | "STOPPING" => 2.0,
                     "MAINTENANCE" => 3.0,
                     _ => 0.0,
                 },

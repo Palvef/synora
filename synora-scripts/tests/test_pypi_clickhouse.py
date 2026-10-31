@@ -68,6 +68,12 @@ class ClickHouseLogsTest(unittest.TestCase):
         self.assertIn('FORMAT JSONEachRow',query)
         with self.assertRaises(ValueError): ck.query(dict(CONFIG,table='access_log; DROP TABLE x'),NOW)
 
+    def test_query_uses_same_fractional_boundaries_as_record_validation(self):
+        now=NOW+0.75
+        query=ck.query(CONFIG,now)
+        self.assertIn('timestamp >= '+repr(now-7*86400),query)
+        self.assertIn('timestamp <= '+repr(now),query)
+
     def test_query_failure_hides_credentials_and_preserves_votes(self):
         with tempfile.TemporaryDirectory() as directory:
             out=Path(directory)/'pypi.log';out.write_text('previous')

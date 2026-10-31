@@ -187,10 +187,10 @@ async fn main() -> Result<(), String> {
     // Worker exit is a drain, not a cancellation: stop accepting work and
     // keep heartbeating until every in-flight run finishes naturally.
     // Lease loss also cancels work, independently of graceful draining.
-    async fn request_drain(client: Client, worker_id: String, shutdown: Arc<AtomicBool>) {
+    async fn request_shutdown(client: Client, worker_id: String, shutdown: Arc<AtomicBool>) {
         shutdown.store(true, Ordering::SeqCst);
-        if let Err(e) = client.drain_worker(&worker_id).await {
-            tracing::warn!("failed to mark worker `{worker_id}` draining: {e}");
+        if let Err(e) = client.begin_worker_shutdown(&worker_id).await {
+            tracing::warn!("failed to mark worker `{worker_id}` stopping: {e}");
         }
     }
 
@@ -204,8 +204,8 @@ async fn main() -> Result<(), String> {
                 _ = tokio::signal::ctrl_c() => {}
                 _ = wait_sigterm() => {}
             }
-            tracing::info!("shutdown requested; draining in-flight runs without cancelling them");
-            request_drain(client2, worker_id2, shutdown2).await;
+            tracing::info!("shutdown requested; finishing in-flight runs before exit");
+            request_shutdown(client2, worker_id2, shutdown2).await;
         });
         // SIGHUP (systemd reload): ignore. Reload used to cancel every
         // running job; apply config with `systemctl restart`.

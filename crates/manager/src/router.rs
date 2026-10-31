@@ -136,6 +136,7 @@ pub fn build(
         .route("/workers/{id}/heartbeat", post(heartbeat))
         .route("/workers/{id}/drain", post(drain))
         .route("/workers/{id}/retire", post(drain))
+        .route("/workers/{id}/shutdown", post(worker_shutdown))
         .route("/workers/{id}", axum::routing::delete(unregister))
         .route("/runs/{id}/claim", post(claim))
         .route("/runs/{id}/complete", post(complete))
@@ -1118,6 +1119,25 @@ async fn drain(
     Ok(axum::Json(serde_json::json!({"ok": true})))
 }
 
+async fn worker_shutdown(
+    State(state): State<AppState>,
+    axum::Extension(auth): axum::Extension<AuthUser>,
+    Path(worker_id): Path<String>,
+) -> Result<axum::Json<serde_json::Value>, StatusCode> {
+    if !has_perm(&auth, "workers.write") && !token_owns_worker(&state, &auth, &worker_id).await {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    state
+        .engine
+        .store
+        .begin_worker_shutdown(&worker_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    state.picker.refresh().await;
+    tracing::info!("worker `{worker_id}` preparing for shutdown");
+    Ok(axum::Json(serde_json::json!({"ok": true})))
+}
+
 async fn unregister(
     State(state): State<AppState>,
     axum::Extension(auth): axum::Extension<AuthUser>,
@@ -1881,6 +1901,37 @@ retry = 0
             .upsert_worker("worker", "host", "", "test", &[], "admin")
             .await
             .unwrap();
+        assert_eq!(
+            request(
+                &router,
+                "POST",
+                "/api/v1/workers/worker/shutdown",
+                None,
+                serde_json::Value::Null
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            request(
+                &router,
+                "POST",
+                "/api/v1/workers/worker/shutdown",
+                Some(&token),
+                serde_json::Value::Null
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        assert!(engine.store.eligible_workers(8).await.unwrap().is_empty());
+        engine
+            .store
+            .upsert_worker("worker", "host", "", "test", &[], "admin")
+            .await
+            .unwrap();
+        assert_eq!(engine.store.eligible_workers(8).await.unwrap().len(), 1);
         engine
             .store
             .create_run("run", "test", None, JobStatus::Queued, 0)

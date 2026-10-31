@@ -305,11 +305,6 @@ fn read_document(path: &Path, file: &str) -> Result<CachedDocument, ConfigError>
         .get(path)
         .filter(|value| value.stamp == stamp)
         .cloned();
-    if let Some(cached) = cached {
-        if expand_env(&cached.raw, file)? == cached.expanded {
-            return Ok(cached);
-        }
-    }
     use std::io::Read;
     let mut raw = String::new();
     std::fs::File::open(path)
@@ -320,6 +315,13 @@ fn read_document(path: &Path, file: &str) -> Result<CachedDocument, ConfigError>
         .map_err(|_| ConfigError::new(file, 0, "cannot read config file"))?;
     if raw.len() > MAX_CONFIG_BYTES {
         return Err(ConfigError::new(file, 0, "configuration exceeds 16 MiB"));
+    }
+    // Filesystems can give same-sized writes identical timestamps. Reuse the
+    // parsed document only after comparing bytes, even when metadata matches.
+    if let Some(cached) = cached {
+        if raw == cached.raw && expand_env(&raw, file)? == cached.expanded {
+            return Ok(cached);
+        }
     }
     let expanded = expand_env(&raw, file)?;
     let im: toml_edit::ImDocument<String> =
