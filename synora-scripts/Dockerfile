@@ -56,7 +56,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 
-ARG REPO_REV=4c37f588069d3a62b416ffcc25184119cd21e59e
+ARG REPO_REV=365629015667e04739f59070e745548a728549c8
 RUN HTTPS_PROXY="$FETCH_HTTPS_PROXY" https_proxy="$FETCH_HTTPS_PROXY" \
     curl --fail --location --retry 5 --output /usr/local/bin/repo \
       "https://raw.githubusercontent.com/GerritCodeReview/git-repo/${REPO_REV}/repo" \
