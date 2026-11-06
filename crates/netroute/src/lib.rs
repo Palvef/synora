@@ -1066,7 +1066,7 @@ async fn serve_auth_proxy_conn(
             .unwrap_or(false);
         if !auth_ok {
             let _ = client
-                .write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"synora\"\r\n\r\n")
+                .write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"synora\"\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                 .await;
             return Ok(());
         }
@@ -1946,6 +1946,8 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert!(response.starts_with("HTTP/1.1 407"));
+            assert!(response.contains("\r\nContent-Length: 0\r\n"));
+            assert!(response.contains("\r\nConnection: close\r\n"));
             server.await.unwrap();
         }
     }
