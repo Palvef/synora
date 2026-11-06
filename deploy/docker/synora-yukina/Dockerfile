@@ -5,6 +5,7 @@ WORKDIR /src
 RUN git init && git remote add origin https://github.com/taoky/yukina.git \
     && git fetch --depth=1 origin "$YUKINA_REV" && git checkout --detach FETCH_HEAD
 COPY pypi-runtime/patch_upstream.py /tmp/patch_upstream.py
+COPY pypi-runtime/http_diagnostics.rs /tmp/http_diagnostics.rs
 RUN python3 /tmp/patch_upstream.py && cargo build --locked --release --bin yukina
 
 FROM python:3.13-slim-bookworm

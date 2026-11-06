@@ -82,6 +82,21 @@ class ClickHouseLogsTest(unittest.TestCase):
             self.assertNotIn('secret',str(error.exception))
             self.assertEqual(out.read_text(),'previous')
 
+    def test_http_403_reports_endpoint_status_server_reason_and_ua(self):
+        import urllib.error
+        error=urllib.error.HTTPError('http://clickhouse.test:8123/',403,'Forbidden',
+            {'Server':'nginx','X-Request-ID':'request-123'},
+            io.BytesIO(b'Access denied for source IP; secret'))
+        with tempfile.TemporaryDirectory() as directory:
+            out=Path(directory)/'pypi.log';out.write_text('previous')
+            with patch.object(ck,'open_query',side_effect=error),self.assertRaises(RuntimeError) as result:
+                ck.prepare(out,config=CONFIG,now=NOW)
+            message=str(result.exception)
+            for text in ['HTTP 403','Forbidden','nginx','request-123','Access denied for source IP','User-Agent','clickhouse.test']:
+                self.assertIn(text,message)
+            self.assertNotIn('secret',message)
+            self.assertEqual(out.read_text(),'previous')
+
     def test_http_query_uses_header_auth_and_bypasses_sync_proxy(self):
         from unittest.mock import Mock
         opener=Mock()

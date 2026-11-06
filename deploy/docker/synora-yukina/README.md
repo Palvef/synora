@@ -40,3 +40,12 @@ Empty, invalid, stale or incomplete results stop synchronization before cache
 eviction. The latest valid package request must be newer than
 `max_age_seconds`; this prevents stale ingestion data from authorizing eviction.
 Query credentials are sent in an authorization header and never printed.
+
+PyPI requests use `Synora-pypi-yukina` as their User-Agent, printed at the
+start of each run and explicitly passed to Yukina. `PYPI_SYNC_USER_AGENT` can
+override the package-request value. ClickHouse requests also use
+`Synora-pypi-yukina`. HTTP failures include status, sanitized endpoint, request
+method and permitted response identifiers. When HEAD returns 403, a bounded
+diagnostic GET captures any available denial body; the failed HEAD still fails
+the synchronization, even if that diagnostic GET succeeds. An upstream that
+does not provide a reason is reported as such.

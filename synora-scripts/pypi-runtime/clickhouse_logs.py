@@ -13,6 +13,32 @@ from logs import normalize, UnusableRequestPath
 
 WINDOW = 7 * 86400
 MAX_LINE_BYTES = 1024 * 1024
+USER_AGENT = 'Synora-pypi-yukina'
+
+
+def http_failure(error, config):
+    """Bound diagnostic output and remove credentials before logging it."""
+    endpoint = urllib.parse.urlsplit(config['endpoint'])
+    target = endpoint.hostname or '<unknown>'
+    if endpoint.port:
+        target += ':' + str(endpoint.port)
+    try:
+        body = error.read(2048).decode('utf-8', 'replace')
+    except Exception:
+        body = '<response body unavailable>'
+    parts = [f'ClickHouse HTTP {error.code} {error.reason}; endpoint={target}',
+             f'User-Agent={USER_AGENT}']
+    for name in ['Server', 'X-Request-ID', 'X-ClickHouse-Exception-Code']:
+        if error.headers and error.headers.get(name):
+            parts.append(name + '=' + error.headers[name])
+    parts.append('response=' + re.sub(r'<[^>]*>', ' ', body))
+    message = '; '.join(parts)
+    for value in [config.get('password'), config.get('username'),
+                  base64.b64encode((config['username']+':'+config['password']).encode()).decode()]:
+        if value:
+            message = message.replace(value, '[redacted]')
+    message = re.sub(r'[\x00-\x1f\x7f]+', ' ', message)
+    return message[:3000] + '; refusing cache GC'
 
 
 def configuration():
@@ -49,7 +75,8 @@ def open_query(config, sql):
     token = base64.b64encode((config['username'] + ':' + config['password']).encode()).decode()
     url = config['endpoint'].rstrip('/') + '/?wait_end_of_query=1'
     request = urllib.request.Request(url, data=sql.encode(), headers={
-        'Authorization': 'Basic ' + token, 'Content-Type': 'text/plain; charset=utf-8'})
+        'Authorization': 'Basic ' + token, 'Content-Type': 'text/plain; charset=utf-8',
+        'User-Agent': USER_AGENT})
     # Sync egress proxies must not intercept this internal database request.
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     return opener.open(request, timeout=120)
@@ -68,10 +95,12 @@ def prepare(output, *, config=None, now=None, progress=None):
     latest = 0
     last_report = time.monotonic()
     if progress:
-        progress('ClickHouse: querying seven-day PyPI package requests')
+        progress('ClickHouse: querying seven-day PyPI package requests; User-Agent=' + USER_AGENT)
     try:
         try:
             response = open_query(config, sql)
+        except urllib.error.HTTPError as error:
+            raise RuntimeError(http_failure(error, config)) from None
         except Exception:
             raise RuntimeError('ClickHouse access-log query failed; refusing cache GC') from None
         with response, temporary.open('w') as destination:

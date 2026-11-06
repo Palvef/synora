@@ -183,6 +183,10 @@ class SyncTest(unittest.TestCase):
         cmd=sync.cache_command(Path('/data'),Path('/logs'),'https://upstream/web/',549755813888)
         self.assertEqual(cmd[cmd.index('--size-limit')+1], '549755813888')
         self.assertIn('--strip-prefix',cmd)
+    def test_configured_sync_user_agent_is_passed_to_yukina(self):
+        with patch.dict('os.environ',{'PYPI_SYNC_USER_AGENT':'Synora-Test/1.0'}):
+            cmd=sync.cache_command(Path('/data'),Path('/logs'),'https://upstream/web/',512)
+        self.assertEqual(cmd[cmd.index('--user-agent')+1],'Synora-Test/1.0')
     def test_failed_index_stops_cache_and_marker(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d)

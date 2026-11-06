@@ -106,13 +106,18 @@ def run(command):
         process.stdout.close()
 
 def cache_command(root,logdir,upstream,budget):
-    return ['yukina','--name','pypi','--repo-path',str(root/'packages'),'--size-limit',str(budget),'--url',upstream+'packages/','--strip-prefix','/packages','--filter',r'^[0-9a-f]{2}/[0-9a-f]{2}/[0-9a-f]+/[^/]+$','--log-path',str(logdir),'--log-format','mirror-json','--log-duration','7d','--min-vote-count','1','--include-browser-ua','--remote-sizedb',str(root/'.synora/remote-size.db'),'--local-sizedb',str(root/'.synora/local-size.db'),'--download-error-threshold','1','--output-stats']
+    agent=os.environ.get('PYPI_SYNC_USER_AGENT','Synora-pypi-yukina')
+    if not agent or any(ord(c)<32 or ord(c)==127 for c in agent):
+        raise ValueError('PYPI_SYNC_USER_AGENT must be nonempty and contain no control characters')
+    return ['yukina','--user-agent',agent,'--name','pypi','--repo-path',str(root/'packages'),'--size-limit',str(budget),'--url',upstream+'packages/','--strip-prefix','/packages','--filter',r'^[0-9a-f]{2}/[0-9a-f]{2}/[0-9a-f]+/[^/]+$','--log-path',str(logdir),'--log-format','mirror-json','--log-duration','7d','--min-vote-count','1','--include-browser-ua','--remote-sizedb',str(root/'.synora/remote-size.db'),'--local-sizedb',str(root/'.synora/local-size.db'),'--download-error-threshold','1','--output-stats']
 
 def cycle(root,upstream,budget,index_mode='full'):
     state=root/'.synora'; state.mkdir(parents=True,exist_ok=True)
     logdir=state/'logs';logdir.mkdir(exist_ok=True)
     with (state/'sync.lock').open('a') as lock:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        command=cache_command(root,logdir,upstream,budget)
+        print('PyPI sync User-Agent: '+command[command.index('--user-agent')+1],flush=True)
         print('Preparing seven-day access logs from ClickHouse',flush=True)
         count=prepare(logdir/'pypi.log',progress=lambda message: print(message,flush=True))
         print(f'Validated {count} recent requests',flush=True)
@@ -126,7 +131,7 @@ def cycle(root,upstream,budget,index_mode='full'):
         if index_mode == 'full':
             prepare(logdir/'pypi.log',progress=lambda message: print(message,flush=True))
         (root/'packages').mkdir(exist_ok=True)
-        missing=run(cache_command(root,logdir,upstream,budget)) or []
+        missing=run(command) or []
         if not isinstance(missing, list): missing=[]
         warning_tmp=state/'cache-warnings.tmp'
         warning_tmp.write_text(json.dumps(dict(count=len(missing),paths=missing))+'\n')

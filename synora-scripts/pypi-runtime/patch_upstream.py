@@ -19,6 +19,30 @@ replace(stages, 'reqwest_err.status() == Some(reqwest::StatusCode::NOT_FOUND)',
 replace(stages, 'if is_not_found(e) {', '''if is_not_found(e) {
                         println!("SYNORA_MISSING={}", remote_item.path);''')
 main = Path('src/main.rs')
+diagnostics = Path(__file__).with_name('http_diagnostics.rs').read_text()
+replace(main, 'async fn head_file(', diagnostics + '\nasync fn head_file(')
+replace(main, '        Ok(resp) => Ok(resp),', '''        Ok(mut resp) => {
+            report_http_failure("HEAD", &args.user_agent, &mut resp).await;
+            if resp.status() == reqwest::StatusCode::FORBIDDEN {
+                // HEAD has no body. Probe only the denied URL with a bounded
+                // GET to capture an upstream denial explanation, without
+                // treating the diagnostic response as successful HEAD data.
+                match client.get(url).header("Range", "bytes=0-2047")
+                    .timeout(std::time::Duration::from_secs(10)).send().await {
+                    Ok(mut probe) => {
+                        tracing::warn!("HEAD 403 diagnostic GET: status={} User-Agent={}", probe.status(), args.user_agent);
+                        report_http_failure("GET", &args.user_agent, &mut probe).await;
+                    }
+                    Err(error) => tracing::warn!("HEAD 403 diagnostic GET failed: {}", error.without_url()),
+                }
+            }
+            Ok(resp)
+        },''')
+replace(main, '        let resp = client.get(url).send().await?.error_for_status()?;', '''        let mut resp = client.get(url).send().await?;
+        report_http_failure("GET", &args.user_agent, &mut resp).await;
+        let resp = resp.error_for_status()?;''')
+replace(main, '    tracing::debug!("{:?}", args);', '''    tracing::debug!("{:?}", args);
+    tracing::info!("PyPI sync User-Agent: {}", args.user_agent);''')
 replace(main, '''        path: &str,
         url: &str,''', '''        path: &str,
         expected_size: u64,
