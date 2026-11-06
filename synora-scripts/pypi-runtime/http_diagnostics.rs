@@ -2,6 +2,12 @@ fn diagnostic_text(value: &str) -> String {
     value.chars().take(2048).map(|c| if c.is_control() { ' ' } else { c }).collect()
 }
 
+fn denial_identifier(body: &str) -> String {
+    let pattern = regex::Regex::new(r#"(?is)<pre\s+class=["']ident["'][^>]*>\s*([0-9a-f]{8})\s+([0-9a-f]{32})"#).unwrap();
+    pattern.captures(body).map(|m| format!("{} {}", &m[1], &m[2]))
+        .unwrap_or_else(|| "not supplied".to_string())
+}
+
 #[cfg(test)]
 mod http_diagnostics_tests {
     use super::*;
@@ -38,6 +44,13 @@ mod http_diagnostics_tests {
         assert_eq!(diagnostic_text("denied\n\u{1b}[31m"), "denied  [31m");
         assert_eq!(diagnostic_text(&"x".repeat(5000)).len(), 2048);
     }
+
+    #[test]
+    fn extracts_denial_code_after_long_multilingual_body() {
+        let body = format!("{}<pre class=\"ident\">00000004 5355981b1656b4e0bde8b99dfb8ec1ab<!--footer--></pre>", "x".repeat(14000));
+        assert_eq!(denial_identifier(&body), "00000004 5355981b1656b4e0bde8b99dfb8ec1ab");
+        assert_eq!(denial_identifier("Forbidden"), "not supplied");
+    }
 }
 
 async fn report_http_failure(method: &str, agent: &str, response: &mut reqwest::Response) {
@@ -60,10 +73,10 @@ async fn report_http_failure(method: &str, agent: &str, response: &mut reqwest::
     let mut body = Vec::new();
     if method != "HEAD" {
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while body.len() < 2048 {
+            while body.len() < 32768 {
                 match response.chunk().await {
                     Ok(Some(chunk)) => {
-                        let n = (2048 - body.len()).min(chunk.len());
+                        let n = (32768 - body.len()).min(chunk.len());
                         body.extend_from_slice(&chunk[..n]);
                     }
                     _ => break,
@@ -71,11 +84,13 @@ async fn report_http_failure(method: &str, agent: &str, response: &mut reqwest::
             }
         }).await;
     }
+    let body = String::from_utf8_lossy(&body);
+    let identifier = denial_identifier(&body);
     let reason = if body.is_empty() {
         "upstream supplied no response body; see response headers".to_string()
     } else {
-        diagnostic_text(&String::from_utf8_lossy(&body))
+        diagnostic_text(&body)
     };
-    tracing::error!("HTTP sync rejected: method={} status={} url={} User-Agent={} headers=[{}] reason={}",
-        method, status, url, diagnostic_text(agent), headers.join("; "), reason);
+    tracing::error!("HTTP sync rejected: method={} status={} url={} User-Agent={} headers=[{}] denial_identifier={} reason={}",
+        method, status, url, diagnostic_text(agent), headers.join("; "), identifier, reason);
 }
