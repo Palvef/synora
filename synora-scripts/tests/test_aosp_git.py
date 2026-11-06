@@ -54,3 +54,34 @@ class AospMirrorTests(unittest.TestCase):
         self.git('-C', str(self.source), 'branch', 'security-release')
         self.assertEqual(self.fetch().returncode, 0)
         self.assertEqual(self.git('-C', str(self.mirror), 'rev-parse', 'refs/heads/security-release'), self.git('-C', str(self.source), 'rev-parse', 'HEAD'))
+
+
+class TransportRetryTests(unittest.TestCase):
+    def test_transient_connect_failure_retries_then_succeeds(self):
+        self.check_fetch([128, 0], [b'CONNECT tunnel failed, response 502', b''], 2, [2])
+
+    def test_corrupt_object_is_not_retried(self):
+        self.check_fetch([128], [b'error: inflate: data stream error'], 1, [])
+
+    def test_retries_are_bounded(self):
+        self.check_fetch([128] * 5, [b'Proxy CONNECT aborted'] * 5, 5, [2, 4, 8, 16])
+
+    def check_fetch(self, codes, errors, calls, pauses):
+        import importlib.util
+        import io
+        from unittest.mock import MagicMock, patch, call
+        spec = importlib.util.spec_from_file_location('aosp_git_retry', HELPER)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        processes = []
+        for code, error in zip(codes, errors):
+            process = MagicMock()
+            process.__enter__.return_value = process
+            process.stderr = io.BytesIO(error)
+            process.wait.return_value = code
+            processes.append(process)
+        with patch.object(module.subprocess, 'Popen', side_effect=processes) as start, patch.object(module.time, 'sleep') as sleep, patch.object(module.sys, 'stderr', new=io.StringIO()):
+            result = module.fetch_with_retry('git', ['fetch', 'origin'])
+        self.assertEqual(result, codes[-1])
+        self.assertEqual(start.call_count, calls)
+        self.assertEqual(sleep.call_args_list, [call(pause) for pause in pauses])

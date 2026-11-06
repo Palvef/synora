@@ -3,25 +3,48 @@
 import os
 import subprocess
 import sys
+import time
 
 PREFIX = 'refs/synora/aosp-heads/'
 REFSPEC = '+refs/heads/*:refs/heads/*'
 
 
+def fetch_with_retry(git, arguments, attempts=5, delay=2):
+    transient = (b'CONNECT tunnel failed, response 502',
+                 b'Proxy CONNECT aborted', b'Connection timed out',
+                 b'Failed to connect', b'Could not resolve proxy',
+                 b'Could not resolve host')
+    for attempt in range(1, attempts + 1):
+        tail = b''
+        with subprocess.Popen([git, *arguments], stderr=subprocess.PIPE) as process:
+            while chunk := process.stderr.read(8192):
+                sys.stderr.write(chunk.decode('utf-8', errors='replace'))
+                sys.stderr.flush()
+                tail = (tail + chunk)[-65536:]
+            code = process.wait()
+        if code == 0 or attempt == attempts or not any(error in tail for error in transient):
+            return code
+        pause = delay * 2 ** (attempt - 1)
+        print(f'AOSP Git transport retry {attempt}/{attempts - 1} in {pause}s: transient proxy/network failure', file=sys.stderr, flush=True)
+        time.sleep(pause)
+
+
 def main():
     git = os.environ['SYNORA_AOSP_REAL_GIT']
     args = sys.argv[1:]
-    if not args or args[0] != 'fetch' or REFSPEC not in args:
+    if not args or args[0] != 'fetch':
         os.execv(git, [git, *args])
 
     def run(*arguments, **kwargs):
         return subprocess.run([git, *arguments], check=True, **kwargs)
 
     mapped = [('+refs/heads/*:' + PREFIX + '*') if arg == REFSPEC else arg for arg in args]
+    if REFSPEC not in args:
+        return fetch_with_retry(git, args)
     # Explicit mapping must not also update remote.aosp.fetch's refs/heads targets.
-    result = subprocess.run([git, *mapped, '--refmap='])
-    if result.returncode:
-        return result.returncode
+    code = fetch_with_retry(git, [*mapped, '--refmap='])
+    if code:
+        return code
     rows = run('for-each-ref', '--format=%(refname) %(objectname) %(objecttype)', PREFIX, capture_output=True, text=True).stdout.splitlines()
     heads = {}
     for row in rows:

@@ -57,6 +57,9 @@ if [[ ! -d "$SYNORA_STORAGE/git-repo.git" ]]; then
 fi
 
 repo_sync
+if [[ "$repo_sync_rc" -ne 0 ]]; then
+	exit "$repo_sync_rc"
+fi
 
 total_size=0
 if [[ "$USE_BITMAP_INDEX" == "1" ]]; then
