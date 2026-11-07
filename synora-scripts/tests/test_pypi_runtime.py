@@ -183,6 +183,8 @@ class SyncTest(unittest.TestCase):
         cmd=sync.cache_command(Path('/data'),Path('/logs'),'https://upstream/web/',549755813888)
         self.assertEqual(cmd[cmd.index('--size-limit')+1], '549755813888')
         self.assertIn('--strip-prefix',cmd)
+        self.assertIn('--aggressive-removal',cmd)
+        self.assertEqual(cmd[cmd.index('--log-duration')+1], '7d')
     def test_configured_sync_user_agent_is_passed_to_yukina(self):
         with patch.dict('os.environ',{'PYPI_SYNC_USER_AGENT':'Synora-Test/1.0'}):
             cmd=sync.cache_command(Path('/data'),Path('/logs'),'https://upstream/web/',512)

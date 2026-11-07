@@ -109,7 +109,7 @@ def cache_command(root,logdir,upstream,budget):
     agent=os.environ.get('PYPI_SYNC_USER_AGENT','Synora-pypi-yukina')
     if not agent or any(ord(c)<32 or ord(c)==127 for c in agent):
         raise ValueError('PYPI_SYNC_USER_AGENT must be nonempty and contain no control characters')
-    return ['yukina','--user-agent',agent,'--name','pypi','--repo-path',str(root/'packages'),'--size-limit',str(budget),'--url',upstream+'packages/','--strip-prefix','/packages','--filter',r'^[0-9a-f]{2}/[0-9a-f]{2}/[0-9a-f]+/[^/]+$','--log-path',str(logdir),'--log-format','mirror-json','--log-duration','7d','--min-vote-count','1','--include-browser-ua','--remote-sizedb',str(root/'.synora/remote-size.db'),'--local-sizedb',str(root/'.synora/local-size.db'),'--download-error-threshold','1','--output-stats']
+    return ['yukina','--user-agent',agent,'--name','pypi','--repo-path',str(root/'packages'),'--size-limit',str(budget),'--url',upstream+'packages/','--strip-prefix','/packages','--filter',r'^[0-9a-f]{2}/[0-9a-f]{2}/[0-9a-f]+/[^/]+$','--log-path',str(logdir),'--log-format','mirror-json','--log-duration','7d','--min-vote-count','1','--aggressive-removal','--include-browser-ua','--remote-sizedb',str(root/'.synora/remote-size.db'),'--local-sizedb',str(root/'.synora/local-size.db'),'--download-error-threshold','1','--output-stats']
 
 def cycle(root,upstream,budget,index_mode='full'):
     state=root/'.synora'; state.mkdir(parents=True,exist_ok=True)
@@ -131,6 +131,7 @@ def cycle(root,upstream,budget,index_mode='full'):
         if index_mode == 'full':
             prepare(logdir/'pypi.log',progress=lambda message: print(message,flush=True))
         (root/'packages').mkdir(exist_ok=True)
+        print('Cache eviction: removing package files with no valid requests in the last seven days; budget remains '+str(budget)+' bytes',flush=True)
         missing=run(command) or []
         if not isinstance(missing, list): missing=[]
         warning_tmp=state/'cache-warnings.tmp'
